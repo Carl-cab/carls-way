@@ -1,0 +1,411 @@
+WEBVTT
+Kind: captions
+Language: en-CA
+
+NOTE
+BCFNJC IT Onboarding Video — Closed Captions
+Version: 1.0
+Language: English (Canadian)
+Generated from: Narration Script v1.0
+Last reviewed: [DATE]
+
+00:00:03.000 --> 00:00:07.500
+Hello, and welcome to the
+BC First Nations Justice Council.
+
+00:00:07.500 --> 00:00:12.000
+My name is [Presenter Name], and I'm here
+to walk you through everything you need
+
+00:00:12.000 --> 00:00:15.500
+to get started with your technology at BCFNJC.
+
+00:00:15.500 --> 00:00:20.000
+In this video, we'll cover your laptop setup,
+how to care for and secure your device,
+
+00:00:20.000 --> 00:00:24.500
+how to reach IT support, and a guided tour
+of the Microsoft 365 tools
+
+00:00:24.500 --> 00:00:27.000
+you'll use every day.
+
+00:00:27.000 --> 00:00:32.500
+Whether you're brand new to Microsoft 365 or just
+need to get familiar with how we do things here,
+
+00:00:32.500 --> 00:00:36.000
+this video is your guide. Let's get started.
+
+NOTE Scene 02 — Hardware Overview
+
+00:00:40.000 --> 00:00:43.000
+Let's start with your laptop.
+
+00:00:43.000 --> 00:00:48.500
+You'll notice there's a small physical privacy
+shutter on your webcam.
+
+00:00:48.500 --> 00:00:54.000
+Get in the habit of sliding it closed whenever
+you're not on a video call.
+
+00:00:54.000 --> 00:00:57.500
+It's a simple way to protect your privacy.
+
+00:00:57.500 --> 00:01:03.000
+For best performance, keep your laptop
+plugged in when you're at your desk.
+
+00:01:03.000 --> 00:01:08.500
+And whenever possible, connect
+using an Ethernet cable.
+
+00:01:08.500 --> 00:01:14.000
+Wired connections are faster and more stable
+than Wi-Fi — especially for video calls
+
+00:01:14.000 --> 00:01:17.000
+and large file transfers.
+
+00:01:17.000 --> 00:01:22.500
+Finally — please reboot your laptop
+at least once every few days.
+
+00:01:22.500 --> 00:01:28.000
+This keeps everything running smoothly and makes
+sure important security updates get installed.
+
+NOTE Scene 03 — Care & Security
+
+00:02:10.000 --> 00:02:15.000
+Taking good care of your device also means
+taking care of the people we serve.
+
+00:02:15.000 --> 00:02:20.500
+When you're traveling with your laptop,
+keep it in a secure bag
+
+00:02:20.500 --> 00:02:24.000
+and never leave it unattended in a car
+or public space.
+
+00:02:24.000 --> 00:02:29.500
+If your device is ever lost, stolen, or damaged —
+even a cracked screen —
+
+00:02:29.500 --> 00:02:32.500
+please notify IT immediately.
+
+00:02:32.500 --> 00:02:38.000
+The faster we know, the faster we can protect
+your account and our organization's data.
+
+00:02:38.000 --> 00:02:44.000
+Protecting our clients' information is something
+we all take seriously here.
+
+00:02:44.000 --> 00:02:49.500
+Please be thoughtful about where you use your
+laptop and who can see your screen.
+
+00:02:49.500 --> 00:02:55.000
+For personal use, please keep it to a minimum
+and stay within our Acceptable Use Policy,
+
+00:02:55.000 --> 00:02:58.000
+which you can find on the Intranet.
+
+00:02:58.000 --> 00:03:05.000
+If you have travel coming up that might involve
+exceptions to standard policy, reach out to IT
+
+00:03:05.000 --> 00:03:08.000
+in advance — we're happy to help.
+
+NOTE Scene 04 — IT Support
+
+00:03:25.000 --> 00:03:30.000
+If you ever run into a technical issue,
+we make it easy to get help.
+
+00:03:30.000 --> 00:03:35.500
+Your first stop should be the Intranet — it has
+answers to the most common questions,
+
+00:03:35.500 --> 00:03:39.000
+along with IT forms and policies.
+
+00:03:39.000 --> 00:03:44.500
+If you need direct support, you can email us
+at support@sfy.ca,
+
+00:03:44.500 --> 00:03:49.000
+or call 1-877-378-6730.
+
+00:03:49.000 --> 00:03:54.000
+We're here Monday through Friday and we'll
+get back to you as quickly as possible.
+
+00:03:54.000 --> 00:03:57.500
+Don't hesitate to reach out —
+that's what we're here for.
+
+NOTE Scene 05 — Hardware & Printers
+
+00:04:15.000 --> 00:04:21.000
+If you ever need additional hardware —
+a monitor, a keyboard, a headset —
+
+00:04:21.000 --> 00:04:25.000
+start by talking to your manager.
+
+00:04:25.000 --> 00:04:30.500
+They'll work with IT to make sure
+you have what you need.
+
+00:04:30.500 --> 00:04:36.000
+Your laptop comes with antivirus and endpoint
+protection software already installed.
+
+00:04:36.000 --> 00:04:41.500
+You don't need to do anything to set that up —
+it's running in the background keeping you safe.
+
+00:04:41.500 --> 00:04:47.000
+For printers: once you're connected to the staff
+network, reach out to SFY to have a printer
+
+00:04:47.000 --> 00:04:50.500
+deployed to your device.
+
+00:04:50.500 --> 00:04:56.000
+It typically appears in your printer list
+within 10 to 15 minutes. Easy.
+
+NOTE Scene 06 — Microsoft Edge & Intranet
+
+00:05:15.000 --> 00:05:20.500
+Microsoft Edge is the browser we use at BCFNJC.
+
+00:05:20.500 --> 00:05:26.000
+Once you sign in with your Microsoft 365 account,
+your bookmarks, passwords, and browser settings
+
+00:05:26.000 --> 00:05:30.000
+will sync automatically across any device you use.
+
+00:05:30.000 --> 00:05:35.500
+Your first stop online should be the Intranet.
+It's your central hub for everything BCFNJC —
+
+00:05:35.500 --> 00:05:41.000
+staff directories, organizational resources,
+IT forms, and our Acceptable Use Policy.
+
+00:05:41.000 --> 00:05:45.000
+Bookmark it now so it's always one click away.
+
+00:05:45.000 --> 00:05:51.000
+You'll also have access to BCFNJC's SharePoint
+environment, where shared documents
+
+00:05:51.000 --> 00:05:54.000
+and resources are stored.
+
+NOTE Scene 07 — OneDrive & File Management
+
+00:06:35.000 --> 00:06:40.000
+OneDrive is where your files live — and it's
+working for you automatically in the background.
+
+00:06:40.000 --> 00:06:45.500
+Your Desktop, Documents, and Pictures folders
+are all backed up to OneDrive.
+
+00:06:45.500 --> 00:06:50.000
+So if anything happens to your laptop,
+your files are safe in the cloud.
+
+00:06:50.000 --> 00:06:56.000
+You'll see a small green checkmark icon next to
+files and folders in File Explorer —
+
+00:06:56.000 --> 00:07:00.000
+that means they're synced and backed up.
+
+00:07:00.000 --> 00:07:05.500
+If you have questions about where to store
+specific records or documents,
+
+00:07:05.500 --> 00:07:09.000
+reach out to records@bcfnjc.com.
+
+00:07:09.000 --> 00:07:14.500
+And when you need to access or share
+organizational files with colleagues,
+
+00:07:14.500 --> 00:07:19.000
+the BCFNJC SharePoint shared library
+is where you'll find them.
+
+NOTE Scene 08 — Outlook Email
+
+00:07:50.000 --> 00:07:54.000
+Outlook is your email and calendar home base.
+
+00:07:54.000 --> 00:08:00.000
+When you first open it, take a few minutes
+to explore the address book.
+
+00:08:00.000 --> 00:08:05.500
+You'll find all BCFNJC staff listed there, along
+with distribution lists for teams and departments —
+
+00:08:05.500 --> 00:08:10.000
+which makes it easy to send messages
+to the right group of people.
+
+00:08:10.000 --> 00:08:16.000
+To confirm your email is set up correctly,
+send a quick test email.
+
+00:08:16.000 --> 00:08:21.500
+Your Outlook calendar is where you'll schedule
+meetings, accept meeting invites,
+
+00:08:21.500 --> 00:08:25.000
+and check colleagues' availability.
+
+00:08:25.000 --> 00:08:30.500
+Make sure to subscribe to the All Staff calendar —
+it's listed in the calendar sidebar —
+
+00:08:30.500 --> 00:08:36.000
+so you stay informed about organization-wide
+events and closures.
+
+NOTE Scene 09 — Microsoft Teams
+
+00:09:20.000 --> 00:09:25.500
+Microsoft Teams is where the day-to-day
+collaboration happens at BCFNJC.
+
+00:09:25.500 --> 00:09:31.000
+Once you've signed in, go to your settings
+and enable auto-launch.
+
+00:09:31.000 --> 00:09:36.500
+That way, Teams will start automatically every
+time you log into your computer,
+
+00:09:36.500 --> 00:09:40.000
+and you'll never miss a message or meeting.
+
+00:09:40.000 --> 00:09:46.000
+Next, head into your notification settings and
+make sure you have notifications turned on
+
+00:09:46.000 --> 00:09:49.000
+for the All Staff team.
+
+00:09:49.000 --> 00:09:55.000
+This keeps you connected with
+organization-wide updates.
+
+00:09:55.000 --> 00:10:01.000
+Teams is also your tool for video and audio
+meetings, screen sharing, and sharing files
+
+00:10:01.000 --> 00:10:04.000
+within your team channels.
+
+NOTE Scene 10 — Microsoft Word & Templates
+
+00:10:40.000 --> 00:10:46.000
+When you create a document at BCFNJC, always
+start with one of our organizational templates.
+
+00:10:46.000 --> 00:10:51.500
+Open Microsoft Word, go to File, then New,
+and you'll see a section for BCFNJC templates.
+
+00:10:51.500 --> 00:10:57.000
+These are pre-formatted with our branding,
+fonts, and layouts.
+
+00:10:57.000 --> 00:11:02.500
+Our default font is Montserrat. Please use it
+in all documents you create.
+
+00:11:02.500 --> 00:11:08.000
+When it comes to saving: always save
+your files to OneDrive.
+
+00:11:08.000 --> 00:11:13.500
+When you do, AutoSave activates automatically —
+which means Word is saving your work
+
+00:11:13.500 --> 00:11:17.000
+every few seconds as you type.
+
+00:11:17.000 --> 00:11:23.000
+Before you edit any template, save a personal
+copy first so the original stays intact
+
+00:11:23.000 --> 00:11:25.500
+for everyone else.
+
+NOTE Scene 11 — Adobe Acrobat Pro
+
+00:11:50.000 --> 00:11:56.000
+For working with PDFs, you have Adobe
+Acrobat Pro installed on your device.
+
+00:11:56.000 --> 00:12:02.000
+You can use it to view, edit, annotate, and
+digitally sign PDF documents —
+
+00:12:02.000 --> 00:12:07.000
+which comes up regularly for contracts,
+forms, and official correspondence.
+
+00:12:07.000 --> 00:12:13.000
+If you're new to Acrobat, don't worry — there
+are resources on the Intranet to help you.
+
+00:12:13.000 --> 00:12:17.000
+And of course, IT is always here
+if you have questions.
+
+NOTE Scene 12 — Closing
+
+00:12:35.000 --> 00:12:40.000
+And that's your IT onboarding overview.
+
+00:12:40.000 --> 00:12:45.500
+You've covered a lot of ground today — from
+your hardware setup to Microsoft 365,
+
+00:12:45.500 --> 00:12:49.000
+file management, and collaboration tools.
+
+00:12:49.000 --> 00:12:54.500
+If you missed anything or want to revisit a
+section, this video is available anytime
+
+00:12:54.500 --> 00:12:58.000
+on the BCFNJC SharePoint intranet.
+
+00:12:58.000 --> 00:13:04.000
+Remember — your Intranet is your first stop
+for answers. And our IT team
+
+00:13:04.000 --> 00:13:10.000
+at support@sfy.ca or 1-877-378-6730
+is always here when you need us.
+
+00:13:10.000 --> 00:13:17.000
+Welcome to BCFNJC. We're really glad you're
+here, and we look forward to working with you.
