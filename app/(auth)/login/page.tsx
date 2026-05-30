@@ -39,8 +39,8 @@ export default function LoginPage() {
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
         <div className="text-center mb-8">
           <div className="text-5xl mb-3">🍁</div>
-          <h1 className="text-3xl font-bold text-red-700">Carl&apos;s Way</h1>
-          <p className="text-gray-500 mt-1 text-sm">Pay Canadian. Stay Canadian.</p>
+          <h1 className="text-3xl font-bold text-red-700">Venmac</h1>
+          <p className="text-gray-500 mt-1 text-sm">Pay across North America.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -81,7 +81,7 @@ export default function LoginPage() {
         </form>
 
         <p className="text-center text-sm text-gray-500 mt-6">
-          New to Carl&apos;s Way?{' '}
+          New to Venmac?{' '}
           <Link href="/register" className="text-red-700 font-semibold hover:underline">
             Create account
           </Link>

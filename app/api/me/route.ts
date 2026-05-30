@@ -10,7 +10,7 @@ export async function GET() {
 
   const db = getDb();
   const me = db.prepare(
-    'SELECT id, name, username, email, phone, balance, province, avatar_color, created_at FROM users WHERE id = ?'
+    'SELECT id, name, username, email, phone, balance, province, country, avatar_color, created_at FROM users WHERE id = ?'
   ).get(user.userId);
 
   if (!me) {

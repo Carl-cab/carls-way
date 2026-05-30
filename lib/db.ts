@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DB_PATH = path.join(process.cwd(), 'data', 'carls-way.db');
+const DB_PATH = path.join(process.cwd(), 'data', 'venmac.db');
 
 const dataDir = path.join(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
@@ -32,6 +32,7 @@ function initializeSchema(database: Database.Database) {
       password_hash TEXT NOT NULL,
       balance REAL NOT NULL DEFAULT 100.00,
       province TEXT,
+      country TEXT NOT NULL DEFAULT 'CA',
       avatar_color TEXT NOT NULL DEFAULT '#CC0000',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -52,6 +53,7 @@ function initializeSchema(database: Database.Database) {
       sender_id INTEGER NOT NULL,
       receiver_id INTEGER NOT NULL,
       amount REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'CAD',
       note TEXT,
       type TEXT NOT NULL DEFAULT 'payment',
       status TEXT NOT NULL DEFAULT 'completed',

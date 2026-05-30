@@ -86,12 +86,14 @@ export async function POST(req: NextRequest) {
     }
 
     const sender = db.prepare('SELECT * FROM users WHERE id = ?').get(user.userId) as {
-      id: number; balance: number;
+      id: number; balance: number; country: string;
     };
+
+    const currency = sender.country === 'US' ? 'USD' : 'CAD';
 
     if (type === 'payment') {
       if (sender.balance < amount) {
-        return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
+        return NextResponse.json({ error: `Insufficient balance` }, { status: 400 });
       }
 
       // Execute transfer
@@ -99,14 +101,14 @@ export async function POST(req: NextRequest) {
       db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(amount, receiver.id);
 
       const result = db.prepare(
-        'INSERT INTO transactions (sender_id, receiver_id, amount, note, type, status, privacy) VALUES (?, ?, ?, ?, \'payment\', \'completed\', ?)'
-      ).run(user.userId, receiver.id, amount, note || null, privacy || 'public');
+        'INSERT INTO transactions (sender_id, receiver_id, amount, currency, note, type, status, privacy) VALUES (?, ?, ?, ?, ?, \'payment\', \'completed\', ?)'
+      ).run(user.userId, receiver.id, amount, currency, note || null, privacy || 'public');
 
       return NextResponse.json({ success: true, transactionId: result.lastInsertRowid }, { status: 201 });
     } else if (type === 'request') {
       const result = db.prepare(
-        'INSERT INTO transactions (sender_id, receiver_id, amount, note, type, status, privacy) VALUES (?, ?, ?, ?, \'request\', \'pending\', ?)'
-      ).run(receiver.id, user.userId, amount, note || null, privacy || 'private');
+        'INSERT INTO transactions (sender_id, receiver_id, amount, currency, note, type, status, privacy) VALUES (?, ?, ?, ?, ?, \'request\', \'pending\', ?)'
+      ).run(receiver.id, user.userId, amount, currency, note || null, privacy || 'private');
 
       return NextResponse.json({ success: true, transactionId: result.lastInsertRowid }, { status: 201 });
     }

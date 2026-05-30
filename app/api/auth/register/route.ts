@@ -10,7 +10,7 @@ const AVATAR_COLORS = [
 
 export async function POST(req: NextRequest) {
   try {
-    const { name, email, phone, password, province } = await req.json();
+    const { name, email, phone, password, province, country } = await req.json();
 
     if (!name || !email || !password) {
       return NextResponse.json({ error: 'Name, email, and password are required' }, { status: 400 });
@@ -30,9 +30,10 @@ export async function POST(req: NextRequest) {
     const password_hash = await bcrypt.hash(password, 10);
     const avatar_color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
 
+    const userCountry = country === 'US' ? 'US' : 'CA';
     const result = db.prepare(
-      'INSERT INTO users (name, username, email, phone, password_hash, province, avatar_color) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(name, username, email, phone || null, password_hash, province || null, avatar_color);
+      'INSERT INTO users (name, username, email, phone, password_hash, province, country, avatar_color) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(name, username, email, phone || null, password_hash, province || null, userCountry, avatar_color);
 
     const userId = result.lastInsertRowid as number;
     const token = signToken({ userId, email, username });

@@ -8,8 +8,8 @@ const geist = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "Carl's Way — Pay Canadian. Stay Canadian.",
-  description: "The Canadian peer-to-peer payment app",
+  title: "Venmac — Pay Across North America.",
+  description: "The peer-to-peer payment app for Canada and the United States",
 };
 
 export default function RootLayout({

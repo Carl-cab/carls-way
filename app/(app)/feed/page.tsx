@@ -10,6 +10,7 @@ interface Transaction {
   receiver_username: string;
   receiver_avatar_color: string;
   amount: number;
+  currency: string;
   note: string;
   created_at: string;
 }
@@ -24,8 +25,9 @@ function Avatar({ name, color, size = 'md' }: { name: string; color: string; siz
   );
 }
 
-function formatCAD(amount: number) {
-  return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' }).format(amount);
+function formatAmount(amount: number, currency: string) {
+  const locale = currency === 'USD' ? 'en-US' : 'en-CA';
+  return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(amount);
 }
 
 function timeAgo(dateStr: string) {
@@ -55,7 +57,7 @@ export default function FeedPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold text-gray-800">Public Feed</h2>
-        <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-full">🇨🇦 CAD</span>
+        <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-full">🇨🇦 CAD · 🇺🇸 USD</span>
       </div>
 
       {loading && (
@@ -90,7 +92,7 @@ export default function FeedPage() {
                 <p className="text-xs text-gray-400 mt-1">{timeAgo(tx.created_at)}</p>
               </div>
               <div className="text-right flex-shrink-0">
-                <p className="font-bold text-green-600">{formatCAD(tx.amount)}</p>
+                <p className="font-bold text-green-600">{formatAmount(tx.amount, tx.currency || 'CAD')}</p>
               </div>
             </div>
           </div>

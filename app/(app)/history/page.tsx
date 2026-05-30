@@ -12,6 +12,7 @@ interface Transaction {
   receiver_username: string;
   receiver_avatar_color: string;
   amount: number;
+  currency: string;
   note: string;
   type: string;
   status: string;
@@ -32,8 +33,9 @@ function Avatar({ name, color }: { name: string; color: string }) {
   );
 }
 
-function formatCAD(amount: number) {
-  return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' }).format(amount);
+function formatAmount(amount: number, currency: string) {
+  const locale = currency === 'USD' ? 'en-US' : 'en-CA';
+  return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(amount);
 }
 
 function formatDate(dateStr: string) {
@@ -151,7 +153,7 @@ export default function HistoryPage() {
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0">
-                  <p className={`font-bold ${amountColor}`}>{amountPrefix}{formatCAD(tx.amount)}</p>
+                  <p className={`font-bold ${amountColor}`}>{amountPrefix}{formatAmount(tx.amount, tx.currency || 'CAD')}</p>
                 </div>
               </div>
 

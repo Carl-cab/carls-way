@@ -1,9 +1,10 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 export default function RequestPage() {
   const router = useRouter();
+  const [currency, setCurrency] = useState('CAD');
   const [form, setForm] = useState({
     receiverEmail: '',
     amount: '',
@@ -13,6 +14,12 @@ export default function RequestPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/me').then(r => r.json()).then(data => {
+      setCurrency(data.country === 'US' ? 'USD' : 'CAD');
+    });
+  }, []);
 
   function update(field: string, value: string) {
     setForm(prev => ({ ...prev, [field]: value }));
@@ -37,7 +44,7 @@ export default function RequestPage() {
       if (!res.ok) {
         setError(data.error || 'Request failed');
       } else {
-        setSuccess('Payment request sent! 🍁');
+        setSuccess('Payment request sent! 💸');
         setTimeout(() => router.push('/history'), 1500);
       }
     } catch {
@@ -63,13 +70,13 @@ export default function RequestPage() {
               onChange={e => update('receiverEmail', e.target.value)}
               required
               className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
-              placeholder="friend@example.ca or username"
+              placeholder="friend@example.com or @username"
             />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Amount (CAD)
+              Amount ({currency})
             </label>
             <div className="relative">
               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">$</span>
@@ -81,10 +88,10 @@ export default function RequestPage() {
                 value={form.amount}
                 onChange={e => update('amount', e.target.value)}
                 required
-                className="w-full border border-gray-300 rounded-lg pl-8 pr-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full border border-gray-300 rounded-lg pl-8 pr-16 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
                 placeholder="0.00"
               />
-              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400">CAD</span>
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">{currency}</span>
             </div>
           </div>
 

@@ -8,6 +8,7 @@ interface User {
   name: string;
   username: string;
   balance: number;
+  country: string;
   avatar_color: string;
 }
 
@@ -15,8 +16,10 @@ function getInitials(name: string) {
   return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
 }
 
-function formatCAD(amount: number) {
-  return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' }).format(amount);
+function formatBalance(amount: number, country: string) {
+  const currency = country === 'US' ? 'USD' : 'CAD';
+  const locale = country === 'US' ? 'en-US' : 'en-CA';
+  return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(amount);
 }
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -43,6 +46,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/profile', label: 'Profile', icon: '👤' },
   ];
 
+  const countryFlag = user?.country === 'US' ? '🇺🇸' : '🍁';
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Top Header */}
@@ -50,13 +55,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between">
           <Link href="/feed" className="flex items-center gap-2">
             <span className="text-2xl">🍁</span>
-            <span className="font-bold text-lg">Carl&apos;s Way</span>
+            <span className="font-bold text-lg">Venmac</span>
           </Link>
           {user && (
             <div className="flex items-center gap-3">
               <div className="text-right hidden sm:block">
                 <div className="text-xs opacity-75">Balance</div>
-                <div className="font-bold text-sm">{formatCAD(user.balance)}</div>
+                <div className="font-bold text-sm">{formatBalance(user.balance, user.country || 'CA')}</div>
               </div>
               <button
                 onClick={handleLogout}
@@ -72,7 +77,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       {/* Balance bar (mobile) */}
       {user && (
         <div className="bg-red-800 text-white text-center py-2 text-sm sm:hidden">
-          Balance: <strong>{formatCAD(user.balance)}</strong>
+          {countryFlag} Balance: <strong>{formatBalance(user.balance, user.country || 'CA')}</strong>
         </div>
       )}
 
@@ -92,7 +97,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           href="/send"
           className="bg-red-700 text-white font-bold text-sm px-4 py-2.5 rounded-full shadow-lg hover:bg-red-800 transition text-center"
         >
-          Pay 🍁
+          Pay {countryFlag}
         </Link>
       </div>
 
