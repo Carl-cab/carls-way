@@ -1,20 +1,31 @@
-import { neon, NeonQueryFunction } from '@neondatabase/serverless';
+import { Pool } from 'pg';
 
-let _sql: NeonQueryFunction<false, false> | null = null;
+let _pool: Pool | null = null;
 
-export function getSql(): NeonQueryFunction<false, false> {
-  if (!_sql) {
+export function getPool(): Pool {
+  if (!_pool) {
     if (!process.env.DATABASE_URL) {
       throw new Error('DATABASE_URL environment variable is not set');
     }
-    _sql = neon(process.env.DATABASE_URL);
+    _pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 5,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
   }
-  return _sql;
+  return _pool;
+}
+
+// Helper: run a parameterized query
+export async function query(text: string, params?: unknown[]) {
+  const pool = getPool();
+  return pool.query(text, params);
 }
 
 export async function initializeSchema() {
-  const db = getSql();
-  await db`
+  await query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -28,8 +39,8 @@ export async function initializeSchema() {
       avatar_color TEXT NOT NULL DEFAULT '#CC0000',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  `;
-  await db`
+  `);
+  await query(`
     CREATE TABLE IF NOT EXISTS friends (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id),
@@ -38,8 +49,8 @@ export async function initializeSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, friend_id)
     )
-  `;
-  await db`
+  `);
+  await query(`
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
       sender_id INTEGER NOT NULL REFERENCES users(id),
@@ -52,8 +63,7 @@ export async function initializeSchema() {
       privacy TEXT NOT NULL DEFAULT 'public',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  `;
+  `);
 }
 
-// Export a function that returns the sql client (lazy)
-export default getSql;
+export default getPool;
