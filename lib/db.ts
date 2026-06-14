@@ -1,31 +1,22 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { neon, NeonQueryFunction } from '@neondatabase/serverless';
 
-// Vercel's serverless filesystem is read-only except for /tmp
-const dataDir = process.env.VERCEL ? '/tmp/data' : path.join(process.cwd(), 'data');
-const DB_PATH = path.join(dataDir, 'manna.db');
+let _sql: NeonQueryFunction<false, false> | null = null;
 
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-let dbInstance: Database.Database | null = null;
-
-function getDb(): Database.Database {
-  if (!dbInstance) {
-    dbInstance = new Database(DB_PATH);
-    dbInstance.pragma('journal_mode = WAL');
-    dbInstance.pragma('foreign_keys = ON');
-    initializeSchema(dbInstance);
+export function getSql(): NeonQueryFunction<false, false> {
+  if (!_sql) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL environment variable is not set');
+    }
+    _sql = neon(process.env.DATABASE_URL);
   }
-  return dbInstance;
+  return _sql;
 }
 
-function initializeSchema(database: Database.Database) {
-  database.exec(`
+export async function initializeSchema() {
+  const db = getSql();
+  await db`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       username TEXT UNIQUE NOT NULL,
       email TEXT UNIQUE NOT NULL,
@@ -35,35 +26,34 @@ function initializeSchema(database: Database.Database) {
       province TEXT,
       country TEXT NOT NULL DEFAULT 'CA',
       avatar_color TEXT NOT NULL DEFAULT '#CC0000',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await db`
     CREATE TABLE IF NOT EXISTS friends (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      friend_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      friend_id INTEGER NOT NULL REFERENCES users(id),
       status TEXT NOT NULL DEFAULT 'pending',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (friend_id) REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, friend_id)
-    );
-
+    )
+  `;
+  await db`
     CREATE TABLE IF NOT EXISTS transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sender_id INTEGER NOT NULL,
-      receiver_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      receiver_id INTEGER NOT NULL REFERENCES users(id),
       amount REAL NOT NULL,
       currency TEXT NOT NULL DEFAULT 'CAD',
       note TEXT,
       type TEXT NOT NULL DEFAULT 'payment',
       status TEXT NOT NULL DEFAULT 'completed',
       privacy TEXT NOT NULL DEFAULT 'public',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (sender_id) REFERENCES users(id),
-      FOREIGN KEY (receiver_id) REFERENCES users(id)
-    );
-  `);
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
 }
 
-export default getDb;
+// Export a function that returns the sql client (lazy)
+export default getSql;
