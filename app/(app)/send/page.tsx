@@ -74,7 +74,7 @@ export default function SendPage() {
       if (!res.ok) { setError(data.error || 'Transaction failed'); }
       else {
         setSuccess(data.isCrossBorder
-          ? `Sent! ${data.receiverAmount} ${data.receiverCurrency} arrives in 1-2 business days. 🌎`
+          ? `Sent! ${data.receiverAmount} ${data.receiverCurrency} delivered instantly. 🌎`
           : `${form.type === 'pay' ? 'Payment sent' : 'Request sent'}! ${currency === 'CAD' ? '🍁' : '🦅'}`);
         setTimeout(() => router.push('/history'), 2000);
       }
@@ -128,7 +128,7 @@ export default function SendPage() {
                   <div className="flex justify-between text-amber-700"><span>Exchange rate</span><span>1 {fxQuote.fromCurrency} = {fxQuote.rate.toFixed(4)} {fxQuote.toCurrency}</span></div>
                   <div className="flex justify-between text-amber-700"><span>Transfer fee (0.5%)</span><span>−{fxQuote.feeAmount.toFixed(2)} {fxQuote.fromCurrency}</span></div>
                   <div className="flex justify-between font-semibold text-amber-900 border-t border-amber-200 pt-1 mt-1"><span>Recipient receives</span><span>{fxQuote.receiverAmount.toFixed(2)} {fxQuote.toCurrency}</span></div>
-                  <p className="text-amber-600 text-xs">⏱ Estimated arrival: 1–2 business days</p>
+                  <p className="text-amber-600 text-xs">⚡ Instant settlement</p>
                 </div>
               ) : null}
             </div>

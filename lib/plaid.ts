@@ -2,7 +2,7 @@ import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } fro
 
 const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID || '';
 const PLAID_SECRET = process.env.PLAID_SECRET || '';
-const PLAID_ENV = (process.env.PLAID_ENV || 'sandbox') as keyof typeof PlaidEnvironments;
+const PLAID_ENV = (process.env.PLAID_ENV || 'production') as keyof typeof PlaidEnvironments;
 
 const config = new Configuration({
   basePath: PlaidEnvironments[PLAID_ENV],

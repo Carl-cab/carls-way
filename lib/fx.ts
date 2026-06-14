@@ -98,11 +98,8 @@ export async function buildFxQuote(
   const feeAmount = isCrossBorder ? parseFloat((senderAmount * feePercent).toFixed(2)) : 0;
   const receiverAmount = parseFloat(((senderAmount - feeAmount) * rate).toFixed(2));
 
-  // Settlement time: domestic = instant, cross-border = 1-2 business days
+  // Settlement time: instant for all transfers
   const estimatedSettlement = new Date();
-  if (isCrossBorder) {
-    estimatedSettlement.setDate(estimatedSettlement.getDate() + 2);
-  }
 
   return {
     fromCurrency,
