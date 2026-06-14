@@ -9,12 +9,17 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "bcryptjs": "^3.0.3",
     "jsonwebtoken": "^9.0.3",
     "next": "16.2.6",
+    "plaid": "^42.2.0",
     "postgres": "^3.4.9",
+    "qrcode": "^1.5.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "react-plaid-link": "^4.1.1",
+    "speakeasy": "^2.0.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
