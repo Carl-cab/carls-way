@@ -39,7 +39,9 @@ function formatAmount(amount: number, currency: string) {
 }
 
 function formatDate(dateStr: string) {
-  return new Date(dateStr + 'Z').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
+  // Avoid appending 'Z' if the string already ends with 'Z'
+  const normalized = dateStr.endsWith('Z') ? dateStr : dateStr + 'Z';
+  return new Date(normalized).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 export default function HistoryPage() {

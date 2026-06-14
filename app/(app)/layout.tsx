@@ -8,6 +8,8 @@ interface User {
   name: string;
   username: string;
   balance: number;
+  balance_cad: number;
+  balance_usd: number;
   country: string;
   avatar_color: string;
 }
@@ -20,6 +22,13 @@ function formatBalance(amount: number, country: string) {
   const currency = country === 'US' ? 'USD' : 'CAD';
   const locale = country === 'US' ? 'en-US' : 'en-CA';
   return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(amount);
+}
+
+function getDisplayBalance(user: User) {
+  if (user.country === 'US') {
+    return user.balance_usd ?? user.balance;
+  }
+  return user.balance_cad ?? user.balance;
 }
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -61,7 +70,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-3">
               <div className="text-right hidden sm:block">
                 <div className="text-xs opacity-75">Balance</div>
-                <div className="font-bold text-sm">{formatBalance(user.balance, user.country || 'CA')}</div>
+                <div className="font-bold text-sm">{formatBalance(getDisplayBalance(user), user.country || 'CA')}</div>
               </div>
               <button
                 onClick={handleLogout}
@@ -77,7 +86,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       {/* Balance bar (mobile) */}
       {user && (
         <div className="bg-red-800 text-white text-center py-2 text-sm sm:hidden">
-          {countryFlag} Balance: <strong>{formatBalance(user.balance, user.country || 'CA')}</strong>
+          {countryFlag} Balance: <strong>{formatBalance(getDisplayBalance(user), user.country || 'CA')}</strong>
         </div>
       )}
 

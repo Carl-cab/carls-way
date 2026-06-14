@@ -54,6 +54,25 @@ export async function initializeSchema() {
     )
   `;
   await sql`
+    CREATE TABLE IF NOT EXISTS bank_accounts (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      plaid_item_id TEXT,
+      plaid_access_token_enc TEXT,
+      institution_name TEXT NOT NULL,
+      account_name TEXT NOT NULL,
+      account_type TEXT NOT NULL DEFAULT 'depository',
+      account_mask TEXT,
+      currency TEXT NOT NULL DEFAULT 'CAD',
+      country TEXT NOT NULL DEFAULT 'CA',
+      is_primary BOOLEAN NOT NULL DEFAULT false,
+      is_verified BOOLEAN NOT NULL DEFAULT false,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(plaid_item_id, account_mask)
+    )
+  `;
+  await sql`
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
       sender_id INTEGER NOT NULL REFERENCES users(id),

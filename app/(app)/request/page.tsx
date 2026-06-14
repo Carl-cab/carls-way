@@ -6,7 +6,7 @@ export default function RequestPage() {
   const router = useRouter();
   const [currency, setCurrency] = useState('CAD');
   const [form, setForm] = useState({
-    receiverEmail: '',
+    receiverUsername: '',
     amount: '',
     note: '',
     privacy: 'private',
@@ -35,8 +35,10 @@ export default function RequestPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...form,
+          receiverUsername: form.receiverUsername.replace('@', ''),
           amount: parseFloat(form.amount),
+          note: form.note,
+          privacy: form.privacy,
           type: 'request',
         }),
       });
@@ -62,15 +64,15 @@ export default function RequestPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              From (email or username)
+              From (username)
             </label>
             <input
               type="text"
-              value={form.receiverEmail}
-              onChange={e => update('receiverEmail', e.target.value)}
+              value={form.receiverUsername}
+              onChange={e => update('receiverUsername', e.target.value)}
               required
               className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
-              placeholder="friend@example.com or @username"
+              placeholder="@username"
             />
           </div>
 
