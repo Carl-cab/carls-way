@@ -1,8 +1,8 @@
 import jwt from 'jsonwebtoken';
 import { cookies } from 'next/headers';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'venmac-secret-key-change-in-production';
-const COOKIE_NAME = 'venmac-token';
+const JWT_SECRET = process.env.JWT_SECRET || 'manna-secret-key-change-in-production';
+const COOKIE_NAME = 'manna-token';
 
 export interface JWTPayload {
   userId: number;

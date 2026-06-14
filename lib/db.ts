@@ -2,9 +2,10 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DB_PATH = path.join(process.cwd(), 'data', 'venmac.db');
+// Vercel's serverless filesystem is read-only except for /tmp
+const dataDir = process.env.VERCEL ? '/tmp/data' : path.join(process.cwd(), 'data');
+const DB_PATH = path.join(dataDir, 'manna.db');
 
-const dataDir = path.join(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }

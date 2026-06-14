@@ -8,7 +8,7 @@ const geist = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "Venmac — Pay Across North America.",
+  title: "manna — Pay Across North America.",
   description: "The peer-to-peer payment app for Canada and the United States",
 };
 

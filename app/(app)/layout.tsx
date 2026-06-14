@@ -55,7 +55,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between">
           <Link href="/feed" className="flex items-center gap-2">
             <span className="text-2xl">🍁</span>
-            <span className="font-bold text-lg">Venmac</span>
+            <span className="font-bold text-lg">manna</span>
           </Link>
           {user && (
             <div className="flex items-center gap-3">

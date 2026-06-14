@@ -6,7 +6,7 @@ const PUBLIC_PATHS = ['/login', '/register'];
 const AUTH_PATHS = ['/feed', '/send', '/request', '/history', '/profile', '/friends'];
 
 export function proxy(request: NextRequest) {
-  const token = request.cookies.get('carls-way-token')?.value;
+  const token = request.cookies.get('manna-token')?.value;
   const { pathname } = request.nextUrl;
 
   const isPublicPath = PUBLIC_PATHS.some(p => pathname.startsWith(p));
