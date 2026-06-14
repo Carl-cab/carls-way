@@ -1,31 +1,25 @@
-import { Pool } from 'pg';
+import postgres from 'postgres';
 
-let _pool: Pool | null = null;
+let _sql: ReturnType<typeof postgres> | null = null;
 
-export function getPool(): Pool {
-  if (!_pool) {
+export function getSql() {
+  if (!_sql) {
     if (!process.env.DATABASE_URL) {
       throw new Error('DATABASE_URL environment variable is not set');
     }
-    _pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+    _sql = postgres(process.env.DATABASE_URL, {
+      ssl: 'require',
       max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      idle_timeout: 30,
+      connect_timeout: 10,
     });
   }
-  return _pool;
-}
-
-// Helper: run a parameterized query
-export async function query(text: string, params?: unknown[]) {
-  const pool = getPool();
-  return pool.query(text, params);
+  return _sql;
 }
 
 export async function initializeSchema() {
-  await query(`
+  const sql = getSql();
+  await sql`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -39,8 +33,8 @@ export async function initializeSchema() {
       avatar_color TEXT NOT NULL DEFAULT '#CC0000',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  `);
-  await query(`
+  `;
+  await sql`
     CREATE TABLE IF NOT EXISTS friends (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id),
@@ -49,8 +43,8 @@ export async function initializeSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, friend_id)
     )
-  `);
-  await query(`
+  `;
+  await sql`
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
       sender_id INTEGER NOT NULL REFERENCES users(id),
@@ -63,7 +57,7 @@ export async function initializeSchema() {
       privacy TEXT NOT NULL DEFAULT 'public',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  `);
+  `;
 }
 
-export default getPool;
+export default getSql;

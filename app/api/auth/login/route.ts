@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import { query } from '@/lib/db';
+import { getSql } from '@/lib/db';
 import { signToken, COOKIE_NAME } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   try {
+    const sql = getSql();
     const { email, password } = await req.json();
     if (!email || !password) {
       return NextResponse.json({ error: 'Email and password are required' }, { status: 400 });
     }
-    const rows = await query('SELECT * FROM users WHERE email = $1', [email]);
-    const user = rows.rows[0] as {
+    const rows = await sql`SELECT * FROM users WHERE email = ${email}`;
+    const user = rows[0] as {
       id: number; email: string; username: string; password_hash: string;
     } | undefined;
     if (!user) {

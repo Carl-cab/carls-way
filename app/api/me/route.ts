@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
 
 export async function GET() {
@@ -7,12 +7,13 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  const rows = await query(
-    'SELECT id, name, username, email, phone, balance, province, country, avatar_color, created_at FROM users WHERE id = $1',
-    [user.userId]
-  );
-  if (rows.rows.length === 0) {
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, name, username, email, phone, balance, province, country, avatar_color, created_at
+    FROM users WHERE id = ${user.userId}
+  `;
+  if (rows.length === 0) {
     return NextResponse.json({ error: 'User not found' }, { status: 404 });
   }
-  return NextResponse.json(rows.rows[0]);
+  return NextResponse.json(rows[0]);
 }

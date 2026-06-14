@@ -9,11 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@types/pg": "^8.20.0",
     "bcryptjs": "^3.0.3",
     "jsonwebtoken": "^9.0.3",
     "next": "16.2.6",
-    "pg": "^8.21.0",
+    "postgres": "^3.4.9",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
