@@ -4,14 +4,23 @@ let _sql: ReturnType<typeof postgres> | null = null;
 
 export function getSql() {
   if (!_sql) {
-    if (!process.env.DATABASE_URL) {
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) {
       throw new Error('DATABASE_URL environment variable is not set');
     }
-    _sql = postgres(process.env.DATABASE_URL, {
+    // Parse URL manually so special characters in the password don't break URL parsing
+    const url = new URL(dbUrl);
+    _sql = postgres({
+      host: url.hostname,
+      port: parseInt(url.port) || 5432,
+      database: url.pathname.replace(/^\//, ''),
+      username: decodeURIComponent(url.username),
+      password: decodeURIComponent(url.password),
       ssl: 'require',
       max: 5,
       idle_timeout: 30,
       connect_timeout: 10,
+      prepare: false, // Required for Supabase transaction/session pooler
     });
   }
   return _sql;
