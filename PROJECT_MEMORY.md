@@ -58,10 +58,9 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 
 ## 6. Known Bugs
 
-1. **Activity filter chips non-functional** (MEDIUM) — History page sends `?filter=sent|received|pending`, but `GET /api/transactions` ignores it and always returns all 50.
-2. **Frontend password validation mismatch** (LOW) — registration form has `minLength={6}`, but `validatePassword()` requires 8+ chars, one uppercase, one number.
+1. **Frontend password validation mismatch** (LOW) — registration form has `minLength={6}`, but `validatePassword()` requires 8+ chars, one uppercase, one number.
 
-~~Request acceptance used legacy `balance` field~~ — **fixed** (see Session History).
+~~Request acceptance used legacy `balance` field~~ — **fixed**. ~~Activity filter chips non-functional~~ — **fixed** (see Session History).
 
 ---
 
@@ -85,8 +84,7 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 1. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
 2. Implement KYC verification flow, wire up "Start verification" button
 3. Encrypt Plaid access tokens
-4. Implement `?filter=` support in `GET /api/transactions`
-5. Fix frontend password validation mismatch (`minLength={6}` → 8)
+4. Fix frontend password validation mismatch (`minLength={6}` → 8)
 
 ---
 
@@ -98,4 +96,5 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 - **Auth cookie fix** (`claude/cool-cerf-ErxD3`): fixed `proxy.ts`/`lib/auth.ts` cookie name mismatch (`carls-way-token` vs `venmac-token` → unified to `manna-token`), resolving broken auth routing
 - **June 2026 UX audit**: fixed hanging profile page, Request Money field name mismatch, timestamp formatting bugs on Feed/History
 - **Docs session**: confirmed `CLAUDE.md` matches handoff spec (no change needed); rewrote `PROJECT_MEMORY.md` into a concise 10-section live-state summary per updated project memory format
-- **Request acceptance fix (current)**: rewrote the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd`, run velocity checks, build an FX quote via `buildFxQuote()` for cross-border requests, and record `fx_rate`/`fx_fee`/`sender_amount`/`receiver_amount`/`payment_rail`/`estimated_settlement` plus audit logging — closing the highest-priority known bug
+- **Request acceptance fix**: rewrote the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd`, run velocity checks, build an FX quote via `buildFxQuote()` for cross-border requests, and record `fx_rate`/`fx_fee`/`sender_amount`/`receiver_amount`/`payment_rail`/`estimated_settlement` plus audit logging — closing the highest-priority known bug
+- **Activity filter chips fix (current)**: `GET /api/transactions` now honors `?filter=sent|received|pending` (in addition to `all`) via a composed `postgres.js` query fragment, matching what `app/(app)/history/page.tsx` already sends

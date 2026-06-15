@@ -3,12 +3,19 @@ import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog, sanitizeString } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const sql = getSql();
+    const filter = req.nextUrl.searchParams.get('filter') || 'all';
+    const filterCondition =
+      filter === 'sent' ? sql`AND t.sender_id = ${user.userId}` :
+      filter === 'received' ? sql`AND t.receiver_id = ${user.userId}` :
+      filter === 'pending' ? sql`AND t.status = 'pending'` :
+      sql``;
+
     const transactions = await sql`
       SELECT t.*,
         s.name as sender_name, s.username as sender_username, s.avatar_color as sender_avatar,
@@ -16,7 +23,8 @@ export async function GET() {
       FROM transactions t
       JOIN users s ON t.sender_id = s.id
       JOIN users r ON t.receiver_id = r.id
-      WHERE t.sender_id = ${user.userId} OR t.receiver_id = ${user.userId}
+      WHERE (t.sender_id = ${user.userId} OR t.receiver_id = ${user.userId})
+        ${filterCondition}
       ORDER BY t.created_at DESC
       LIMIT 50
     `;
