@@ -40,6 +40,7 @@ Client (React 19)
 | `lib/auth.ts` | JWT helpers, `getAuthUser()`, velocity limits, audit logging |
 | `lib/fx.ts` | Wise API integration, FX rate caching, `buildFxQuote()` |
 | `lib/plaid.ts` | Plaid client configuration |
+| `lib/crypto.ts` | AES-256-GCM encrypt/decrypt helpers for Plaid access tokens |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 
 ---
@@ -104,21 +105,7 @@ After deploying, call `GET /api/migrate` once (authenticated) to apply the migra
 
 ## Known Issues
 
-**[HIGH] Request acceptance uses legacy balance field.**
-File: `app/api/transactions/[id]/route.ts`
-When a user accepts a pending money request, the `accept` branch deducts from the legacy `users.balance` column and ignores cross-border FX logic entirely. It must be rewritten to mirror the dual-currency and FX logic in `POST /api/transactions/route.ts` — checking `balance_cad` / `balance_usd` based on country, calling `buildFxQuote()` for cross-border requests, and recording FX fields on the transaction row.
-
-**[HIGH] Plaid access tokens stored in plaintext.**
-File: `app/api/plaid/exchange-token/route.ts`
-The `plaid_access_token_enc` column stores raw Plaid access tokens despite the `_enc` suffix implying encryption. Application-level encryption must be added before enabling real ACH money movement.
-
-**[MEDIUM] Activity filter chips are non-functional.**
-File: `app/(app)/history/page.tsx`, `app/api/transactions/route.ts`
-The History page sends `?filter=sent|received|pending` to the transactions API, but the API ignores this query parameter and always returns all 50 transactions. The `GET /api/transactions` route needs a `WHERE` clause branch for each filter value.
-
-**[LOW] Frontend password validation mismatch.**
-File: `app/(auth)/register/page.tsx`
-The registration form enforces `minLength={6}` in the HTML input, but the backend `validatePassword()` in `lib/auth.ts` requires at least 8 characters, one uppercase letter, and one number. The frontend placeholder and `minLength` should be updated to match.
+All previously tracked issues (request acceptance legacy balance, Plaid plaintext tokens, non-functional Activity filter chips, frontend password validation mismatch) have been fixed. See `PROJECT_MEMORY.md` session history for details.
 
 ---
 
@@ -126,11 +113,8 @@ The registration form enforces `minLength={6}` in the HTML input, but the backen
 
 The following tasks are ordered by business impact and should be worked in sequence:
 
-1. **Fix request acceptance bug** — Rewrite the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd` and handle cross-border FX.
-2. **Implement Add Money / Cash Out** — Wire up the inert "+ Add Money" and "Cash Out" buttons on the profile page to a Plaid Transfer or Stripe ACH integration.
-3. **Implement KYC verification flow** — Integrate a KYC provider (Stripe Identity or Persona) and build the endpoint to update `users.kyc_status` to `'verified'`, which unlocks higher velocity limits.
-4. **Encrypt Plaid access tokens** — Add AES-256-GCM encryption around the token stored in `plaid_access_token_enc` before any real ACH transfers go live.
-5. **Fix Activity filter chips** — Add `?filter=` query parameter support to `GET /api/transactions`.
+1. **Implement Add Money / Cash Out** — Wire up the inert "+ Add Money" and "Cash Out" buttons on the profile page to a Plaid Transfer or Stripe ACH integration.
+2. **Implement KYC verification flow** — Integrate a KYC provider (Stripe Identity or Persona) and build the endpoint to update `users.kyc_status` to `'verified'`, which unlocks higher velocity limits.
 
 ---
 
@@ -201,6 +185,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `NEXT_PUBLIC_PLAID_ENV` | Must be `production` |
 | `WISE_API_KEY` | API token from Wise developer settings |
 | `WISE_ENV` | Set to `production` |
+| `PLAID_TOKEN_ENC_KEY` | 64-character hex string (32 bytes) used to AES-256-GCM encrypt Plaid access tokens before storing in `bank_accounts.plaid_access_token_enc`. Generate with `openssl rand -hex 32`. |
 
 **After any schema change:** Deploy first, then call `GET /api/migrate` once with a valid auth cookie to apply `ALTER TABLE` changes to the live database.
 

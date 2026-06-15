@@ -64,15 +64,17 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 
 ## 7. Security Risks
 
-- **Plaid access tokens stored in plaintext** (HIGH) — `bank_accounts.plaid_access_token_enc` despite its name is unencrypted. Must be fixed before enabling real ACH money movement.
 - Ad-hoc migration system relies on manually hitting `/api/migrate` after every deploy — risk of schema drift between environments if forgotten.
+
+~~Plaid access tokens stored in plaintext~~ — **fixed** (see Session History). Requires `PLAID_TOKEN_ENC_KEY` env var to be set in Vercel.
 
 ---
 
 ## 8. Deployment Notes
 
 - Vercel auto-deploys `master` on push
-- Required env vars (set in Vercel): `DATABASE_URL` (Supabase pooler), `JWT_SECRET`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `NEXT_PUBLIC_PLAID_ENV` (`production`), `WISE_API_KEY`, `WISE_ENV` (`production`)
+- Required env vars (set in Vercel): `DATABASE_URL` (Supabase pooler), `JWT_SECRET`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `NEXT_PUBLIC_PLAID_ENV` (`production`), `WISE_API_KEY`, `WISE_ENV` (`production`), `PLAID_TOKEN_ENC_KEY` (64-char hex, `openssl rand -hex 32`)
+- **New deploy requirement**: `PLAID_TOKEN_ENC_KEY` must be set before linking any new bank account, or `/api/plaid/exchange-token` will throw
 - After any schema change: deploy, then call `GET /api/migrate` once to apply `ALTER TABLE` statements to production
 
 ---
@@ -81,7 +83,7 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 
 1. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
 2. Implement KYC verification flow, wire up "Start verification" button
-3. Encrypt Plaid access tokens
+3. Set `PLAID_TOKEN_ENC_KEY` in Vercel (required before next bank-account link)
 
 ---
 
@@ -95,4 +97,5 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 - **Docs session**: confirmed `CLAUDE.md` matches handoff spec (no change needed); rewrote `PROJECT_MEMORY.md` into a concise 10-section live-state summary per updated project memory format
 - **Request acceptance fix**: rewrote the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd`, run velocity checks, build an FX quote via `buildFxQuote()` for cross-border requests, and record `fx_rate`/`fx_fee`/`sender_amount`/`receiver_amount`/`payment_rail`/`estimated_settlement` plus audit logging — closing the highest-priority known bug
 - **Activity filter chips fix**: `GET /api/transactions` now honors `?filter=sent|received|pending` (in addition to `all`) via a composed `postgres.js` query fragment, matching what `app/(app)/history/page.tsx` already sends
-- **Password validation fix (current)**: `app/(auth)/register/page.tsx` password field now uses `minLength={8}` and updated placeholder text, matching `validatePassword()` in `lib/auth.ts` (8+ chars, 1 uppercase, 1 number)
+- **Password validation fix**: `app/(auth)/register/page.tsx` password field now uses `minLength={8}` and updated placeholder text, matching `validatePassword()` in `lib/auth.ts` (8+ chars, 1 uppercase, 1 number)
+- **Plaid token encryption (current)**: added `lib/crypto.ts` (AES-256-GCM encrypt/decrypt helpers, keyed by new `PLAID_TOKEN_ENC_KEY` env var); `app/api/plaid/exchange-token/route.ts` now encrypts the Plaid access token before storing it in `bank_accounts.plaid_access_token_enc`; updated `CLAUDE.md` env var table and marked all previously-tracked Known Issues as resolved
