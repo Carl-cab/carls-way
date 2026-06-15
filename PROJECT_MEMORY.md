@@ -1,107 +1,99 @@
-# Manna App — Project Memory
+# Manna — Project Memory
 
-> **Purpose:** This file is the single source of truth for any AI coding assistant (Claude Code, Cursor, Copilot) working on this project. Load it at the start of every session. It contains all design decisions, business rules, architecture constraints, coding conventions, and project history needed to continue development without losing context.
-
----
-
-## What Is Manna?
-
-Manna is a peer-to-peer payment application for cross-border money transfers between the United States and Canada. Users register with a country (CA or US), receive a $100 seed balance in their local currency, and can send or request money from other users. Cross-border transfers are powered by live Wise FX rates. Bank accounts are linked via Plaid. The app is a Next.js 16 full-stack application deployed on Vercel with a Supabase PostgreSQL database.
-
-**Live URL:** https://carloscab74.vercel.app
-
-**GitHub Repository:** https://github.com/Carl-cab/carls-way
+> Running project log and live-state summary. For full architecture, coding standards, and conventions, see `CLAUDE.md`. Update this file at the end of every session.
 
 ---
 
-## Architecture Rules (Do Not Violate)
+## 1. Current Product Purpose
 
-**Database access** must always go through the `getSql()` singleton in `lib/db.ts`. Do not introduce an ORM (Prisma, Drizzle, etc.) unless explicitly instructed. The project uses `postgres.js` for direct parameterized SQL queries, which is required for compatibility with Supabase's transaction pooler.
-
-**Schema migrations** are currently ad-hoc. To add a new column, you must add it to both `initializeSchema()` in `lib/db.ts` (so new environments get it on first boot) and to the `GET /api/migrate` endpoint in `app/api/migrate/route.ts` (so the live production database gets it via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`). After deploying, call `/api/migrate` once to apply the change.
-
-**Authentication** uses a custom JWT stored in an HTTP-only cookie named `manna-token`. Do not use NextAuth, Auth.js, or any third-party auth library. Use `getAuthUser()` from `lib/auth.ts` in every API route that requires authentication. Route-level protection is handled by `proxy.ts` middleware.
-
-**Dual-currency balances** are stored as `balance_cad` and `balance_usd` on the `users` table. There is also a legacy `balance` column that must never be used in new code. Always determine which currency column to debit or credit by checking `user.country === 'US' ? 'USD' : 'CAD'`.
-
-**Cross-border FX** must always call `buildFxQuote()` from `lib/fx.ts` before processing a cross-border payment. The resulting `fx_rate`, `fx_fee`, `sender_amount`, `receiver_amount`, and `estimated_settlement` must be recorded on the `transactions` row.
-
-**Velocity limits** must be checked via `checkVelocityLimit()` before every outbound payment (`type = 'pay'`), and recorded via `recordVelocity()` after a successful debit. Limits are defined in `VELOCITY_LIMITS` in `lib/auth.ts` and vary by `kyc_status` ('pending' vs 'verified').
+Manna is a peer-to-peer payment app for cross-border money transfers between the US and Canada. Users register with a country (CA or US), get a $100 seed balance in their local currency, and can send/request money. Cross-border transfers use live Wise FX rates. Bank accounts link via Plaid.
 
 ---
 
-## Coding Conventions
+## 2. Current Stack
 
-All styling uses Tailwind CSS utility classes. No custom CSS is written outside of `app/globals.css`. Components use Server Components by default; `'use client'` is added only when React hooks or browser event listeners are required. API routes return `NextResponse.json({ error: 'Message' }, { status: 4xx })` for errors and `NextResponse.json({ success: true, ... })` for successful mutations. All database queries use the `postgres.js` tagged template literal syntax (e.g., `` sql`SELECT * FROM users WHERE id = ${id}` ``) — never string concatenation.
-
----
-
-## Project History
-
-The project was built and deployed through Manus AI. The following significant changes were made during the development and audit cycle:
-
-A dual-currency migration was performed, adding `balance_cad` and `balance_usd` columns to the `users` table and `sender_currency`, `receiver_currency`, `fx_rate`, `fx_fee`, `sender_amount`, `receiver_amount`, `is_cross_border`, `payment_rail`, and `estimated_settlement` columns to the `transactions` table. This migration was applied to production via the `/api/migrate` endpoint.
-
-A UX audit in June 2026 identified and fixed four bugs: (1) the profile page hung because `bank_accounts` was missing from the schema — fixed by adding the table to `initializeSchema()` and running `/api/migrate`; (2) the Request Money page sent `receiverEmail` but the API expected `receiverUsername` — fixed in `app/(app)/request/page.tsx`; (3) the Feed page showed "NaNd ago" because `timeAgo()` double-appended 'Z' to ISO timestamps — fixed in `app/(app)/feed/page.tsx`; (4) the History page showed "Invalid Date" for the same reason — fixed in `app/(app)/history/page.tsx`. The global layout header was also updated to use `balance_cad`/`balance_usd` instead of the stale legacy `balance` field.
+- Next.js 16 (App Router, Turbopack), TypeScript 5, React 19, Tailwind CSS v4
+- Auth: custom JWT in httpOnly cookie `manna-token` (`lib/auth.ts`), route guard via `proxy.ts`
+- Database: Supabase PostgreSQL via `postgres.js` (`lib/db.ts`, `getSql()` singleton)
+- FX: Wise API (`lib/fx.ts`, `buildFxQuote()`)
+- Bank linking: Plaid (`lib/plaid.ts`)
+- Deployed on Vercel: https://carloscab74.vercel.app
+- Repo: https://github.com/Carl-cab/carls-way
 
 ---
 
-## Known Bugs
+## 3. Current Architecture
 
-**Request acceptance uses legacy balance.** When a user accepts a pending money request, `PATCH /api/transactions/[id]/route.ts` deducts from the legacy `balance` field and ignores cross-border FX logic entirely. This is the highest-priority bug. The fix is to rewrite the `accept` branch to mirror the dual-currency and FX logic found in `POST /api/transactions/route.ts`.
-
-**Plaid access tokens stored in plaintext.** The `plaid_access_token_enc` column stores raw Plaid access tokens despite the `_enc` suffix implying encryption. This must be resolved before enabling real ACH money movement.
-
-**Frontend password validation mismatch.** The registration form enforces `minLength={6}` in the UI, but the backend `validatePassword()` requires at least 8 characters, one uppercase letter, and one number. The frontend placeholder should be updated to match.
-
-**Activity filter chips are non-functional.** The History page sends `?filter=sent|received|pending` to the transactions API, but the API ignores this query parameter and always returns all 50 transactions.
-
----
-
-## Unfinished Features
-
-**KYC / Identity Verification.** The profile page shows a "Start verification →" button, but it has no click handler. The backend velocity limits already branch on `kyc_status === 'verified'`, so the unlock path is ready — only the KYC provider integration (e.g., Stripe Identity or Persona) and the endpoint to update `kyc_status` are missing.
-
-**Add Money / Cash Out.** The profile page shows "+ Add Money" and "Cash Out" buttons, but they are inert. These require a Plaid Transfer or Stripe ACH integration to move funds between the Manna wallet and linked bank accounts.
-
-**Friend Request Approval.** Adding a friend immediately sets the relationship to `accepted`. There is no pending-request inbox. The `friends` table has a `status` column and the API returns a `direction` field, so the data model supports it — only the UI and approval endpoint are missing.
+- `proxy.ts` gates all `(app)` routes and `/`, checking `manna-token` via `getAuthUser()`
+- `lib/db.ts` exports `getSql()` (singleton) and `initializeSchema()` (CREATE TABLE IF NOT EXISTS)
+- Schema migrations are ad-hoc: add columns to `initializeSchema()` AND `app/api/migrate/route.ts` (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`), then hit `/api/migrate` once after deploy
+- Dual-currency: `balance_cad` / `balance_usd` on `users`; legacy `balance` column must never be used in new code
+- Cross-border payments call `buildFxQuote()` and record `fx_rate`, `fx_fee`, `sender_amount`, `receiver_amount`, `is_cross_border`, `payment_rail`, `estimated_settlement`
+- Velocity limits (`checkVelocityLimit()` / `recordVelocity()`) gate `type='pay'` transactions, vary by `kyc_status`
+- All API routes return `NextResponse.json({ error })` / `{ success: true, ... }`; all queries use `postgres.js` tagged templates
 
 ---
 
-## Immediate Next Tasks (Priority Order)
+## 4. Database Tables
 
-1. Fix `app/api/transactions/[id]/route.ts` — rewrite the `accept` branch to use `balance_cad`/`balance_usd` and handle cross-border FX.
-2. Implement "Add Money" and "Cash Out" on the profile page using Plaid Transfer.
-3. Implement the KYC verification flow and connect it to the "Start verification" button.
-4. Encrypt Plaid access tokens before enabling real money movement.
-5. Fix the Activity page filter chips by implementing `?filter=` support in `GET /api/transactions`.
-
----
-
-## Environment Variables
-
-| Variable | Where Set | Purpose |
-|---|---|---|
-| `DATABASE_URL` | Vercel | Supabase PostgreSQL connection string (transaction pooler) |
-| `JWT_SECRET` | Vercel | Signs and verifies `manna-token` JWTs |
-| `PLAID_CLIENT_ID` | Vercel | Plaid API client ID |
-| `PLAID_SECRET` | Vercel | Plaid API secret (production) |
-| `NEXT_PUBLIC_PLAID_ENV` | Vercel | Plaid environment — must be `production` |
-| `WISE_API_KEY` | Vercel | Wise API token for live FX rates |
-| `WISE_ENV` | Vercel | Set to `production` for live Wise endpoint |
+- `users` — auth fields, `balance_cad`/`balance_usd`, legacy `balance`, `kyc_status`, country, avatar
+- `transactions` — payments/requests, FX details (`fx_rate`, `fx_fee`, sender/receiver currency & amount, `is_cross_border`, `payment_rail`, `estimated_settlement`)
+- `bank_accounts` — Plaid-linked accounts (`plaid_access_token_enc` currently plaintext)
+- `friends` — relationships with `status` column
+- `velocity_checks` — rolling hourly/daily/weekly totals per user
+- `audit_logs` — audit trail of sensitive actions
 
 ---
 
-## Key Files Quick Reference
+## 5. Completed Features
 
-| File | Role |
-|---|---|
-| `lib/db.ts` | DB connection singleton and schema definition |
-| `lib/auth.ts` | JWT helpers, velocity limits, audit logging, input validation |
-| `lib/fx.ts` | Wise API integration, FX rate caching, quote builder |
-| `lib/plaid.ts` | Plaid client configuration |
-| `proxy.ts` | Next.js middleware — auth route guard |
-| `app/api/transactions/route.ts` | Core money movement logic |
-| `app/api/transactions/[id]/route.ts` | Request accept/decline — **contains known bug** |
-| `app/api/migrate/route.ts` | Ad-hoc schema migration runner |
-| `app/(app)/layout.tsx` | Authenticated shell with header balance display |
+- Core auth (register/login/JWT cookie), route protection via `proxy.ts`
+- Dual-currency balances (`balance_cad`/`balance_usd`) migration applied to production
+- Cross-border FX quoting and transaction recording via Wise
+- Plaid bank account linking and display on profile page
+- Velocity limit checks and audit logging on payments
+- June 2026 UX audit fixes: `bank_accounts` table added to schema (fixed hanging profile page); Request Money page now sends `receiverUsername`; fixed "NaNd ago"/"Invalid Date" timestamp bugs on Feed and History pages; layout header now reads `balance_cad`/`balance_usd`
+
+---
+
+## 6. Known Bugs
+
+1. **Request acceptance uses legacy balance** (HIGH) — `PATCH /api/transactions/[id]/route.ts` debits the legacy `balance` field and skips FX logic. Needs rewrite to mirror `POST /api/transactions/route.ts`.
+2. **Activity filter chips non-functional** (MEDIUM) — History page sends `?filter=sent|received|pending`, but `GET /api/transactions` ignores it and always returns all 50.
+3. **Frontend password validation mismatch** (LOW) — registration form has `minLength={6}`, but `validatePassword()` requires 8+ chars, one uppercase, one number.
+
+---
+
+## 7. Security Risks
+
+- **Plaid access tokens stored in plaintext** (HIGH) — `bank_accounts.plaid_access_token_enc` despite its name is unencrypted. Must be fixed before enabling real ACH money movement.
+- Ad-hoc migration system relies on manually hitting `/api/migrate` after every deploy — risk of schema drift between environments if forgotten.
+
+---
+
+## 8. Deployment Notes
+
+- Vercel auto-deploys `master` on push
+- Required env vars (set in Vercel): `DATABASE_URL` (Supabase pooler), `JWT_SECRET`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `NEXT_PUBLIC_PLAID_ENV` (`production`), `WISE_API_KEY`, `WISE_ENV` (`production`)
+- After any schema change: deploy, then call `GET /api/migrate` once to apply `ALTER TABLE` statements to production
+
+---
+
+## 9. Current Priorities
+
+1. Fix `app/api/transactions/[id]/route.ts` accept branch — use `balance_cad`/`balance_usd` and handle cross-border FX
+2. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
+3. Implement KYC verification flow, wire up "Start verification" button
+4. Encrypt Plaid access tokens
+5. Implement `?filter=` support in `GET /api/transactions`
+
+---
+
+## 10. Session History
+
+- **Initial build**: SQLite-based MVP for CA/US P2P payments, later renamed Carl's Way → Venmac → Manna
+- **Postgres migration**: moved from SQLite to Neon, then to Supabase via `postgres.js` for Vercel compatibility
+- **Dual-currency + FX + Plaid build-out**: added `balance_cad`/`balance_usd`, Wise FX quoting, Plaid bank linking, velocity limits, audit logging (on `master`/`documentation/handoff-package`)
+- **Auth cookie fix** (`claude/cool-cerf-ErxD3`): fixed `proxy.ts`/`lib/auth.ts` cookie name mismatch (`carls-way-token` vs `venmac-token` → unified to `manna-token`), resolving broken auth routing
+- **June 2026 UX audit**: fixed hanging profile page, Request Money field name mismatch, timestamp formatting bugs on Feed/History
+- **Docs session (current)**: confirmed `CLAUDE.md` matches handoff spec (no change needed); rewrote `PROJECT_MEMORY.md` into a concise 10-section live-state summary per updated project memory format
