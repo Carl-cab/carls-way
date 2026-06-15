@@ -58,9 +58,10 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 
 ## 6. Known Bugs
 
-1. **Request acceptance uses legacy balance** (HIGH) — `PATCH /api/transactions/[id]/route.ts` debits the legacy `balance` field and skips FX logic. Needs rewrite to mirror `POST /api/transactions/route.ts`.
-2. **Activity filter chips non-functional** (MEDIUM) — History page sends `?filter=sent|received|pending`, but `GET /api/transactions` ignores it and always returns all 50.
-3. **Frontend password validation mismatch** (LOW) — registration form has `minLength={6}`, but `validatePassword()` requires 8+ chars, one uppercase, one number.
+1. **Activity filter chips non-functional** (MEDIUM) — History page sends `?filter=sent|received|pending`, but `GET /api/transactions` ignores it and always returns all 50.
+2. **Frontend password validation mismatch** (LOW) — registration form has `minLength={6}`, but `validatePassword()` requires 8+ chars, one uppercase, one number.
+
+~~Request acceptance used legacy `balance` field~~ — **fixed** (see Session History).
 
 ---
 
@@ -81,11 +82,11 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 
 ## 9. Current Priorities
 
-1. Fix `app/api/transactions/[id]/route.ts` accept branch — use `balance_cad`/`balance_usd` and handle cross-border FX
-2. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
-3. Implement KYC verification flow, wire up "Start verification" button
-4. Encrypt Plaid access tokens
-5. Implement `?filter=` support in `GET /api/transactions`
+1. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
+2. Implement KYC verification flow, wire up "Start verification" button
+3. Encrypt Plaid access tokens
+4. Implement `?filter=` support in `GET /api/transactions`
+5. Fix frontend password validation mismatch (`minLength={6}` → 8)
 
 ---
 
@@ -96,4 +97,5 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 - **Dual-currency + FX + Plaid build-out**: added `balance_cad`/`balance_usd`, Wise FX quoting, Plaid bank linking, velocity limits, audit logging (on `master`/`documentation/handoff-package`)
 - **Auth cookie fix** (`claude/cool-cerf-ErxD3`): fixed `proxy.ts`/`lib/auth.ts` cookie name mismatch (`carls-way-token` vs `venmac-token` → unified to `manna-token`), resolving broken auth routing
 - **June 2026 UX audit**: fixed hanging profile page, Request Money field name mismatch, timestamp formatting bugs on Feed/History
-- **Docs session (current)**: confirmed `CLAUDE.md` matches handoff spec (no change needed); rewrote `PROJECT_MEMORY.md` into a concise 10-section live-state summary per updated project memory format
+- **Docs session**: confirmed `CLAUDE.md` matches handoff spec (no change needed); rewrote `PROJECT_MEMORY.md` into a concise 10-section live-state summary per updated project memory format
+- **Request acceptance fix (current)**: rewrote the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd`, run velocity checks, build an FX quote via `buildFxQuote()` for cross-border requests, and record `fx_rate`/`fx_fee`/`sender_amount`/`receiver_amount`/`payment_rail`/`estimated_settlement` plus audit logging — closing the highest-priority known bug
