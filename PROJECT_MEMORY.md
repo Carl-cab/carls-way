@@ -58,9 +58,7 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 
 ## 6. Known Bugs
 
-1. **Frontend password validation mismatch** (LOW) — registration form has `minLength={6}`, but `validatePassword()` requires 8+ chars, one uppercase, one number.
-
-~~Request acceptance used legacy `balance` field~~ — **fixed**. ~~Activity filter chips non-functional~~ — **fixed** (see Session History).
+None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Activity filter chips non-functional~~, and ~~frontend password validation mismatch~~ are all **fixed** (see Session History).
 
 ---
 
@@ -84,7 +82,6 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 1. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
 2. Implement KYC verification flow, wire up "Start verification" button
 3. Encrypt Plaid access tokens
-4. Fix frontend password validation mismatch (`minLength={6}` → 8)
 
 ---
 
@@ -97,4 +94,5 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 - **June 2026 UX audit**: fixed hanging profile page, Request Money field name mismatch, timestamp formatting bugs on Feed/History
 - **Docs session**: confirmed `CLAUDE.md` matches handoff spec (no change needed); rewrote `PROJECT_MEMORY.md` into a concise 10-section live-state summary per updated project memory format
 - **Request acceptance fix**: rewrote the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd`, run velocity checks, build an FX quote via `buildFxQuote()` for cross-border requests, and record `fx_rate`/`fx_fee`/`sender_amount`/`receiver_amount`/`payment_rail`/`estimated_settlement` plus audit logging — closing the highest-priority known bug
-- **Activity filter chips fix (current)**: `GET /api/transactions` now honors `?filter=sent|received|pending` (in addition to `all`) via a composed `postgres.js` query fragment, matching what `app/(app)/history/page.tsx` already sends
+- **Activity filter chips fix**: `GET /api/transactions` now honors `?filter=sent|received|pending` (in addition to `all`) via a composed `postgres.js` query fragment, matching what `app/(app)/history/page.tsx` already sends
+- **Password validation fix (current)**: `app/(auth)/register/page.tsx` password field now uses `minLength={8}` and updated placeholder text, matching `validatePassword()` in `lib/auth.ts` (8+ chars, 1 uppercase, 1 number)
