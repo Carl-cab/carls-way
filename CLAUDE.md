@@ -40,7 +40,7 @@ Client (React 19)
 | `lib/auth.ts` | JWT helpers, `getAuthUser()`, velocity limits, audit logging |
 | `lib/fx.ts` | Wise API integration, FX rate caching, `buildFxQuote()` |
 | `lib/plaid.ts` | Plaid client configuration |
-| `lib/crypto.ts` | AES-256-GCM encrypt/decrypt helpers for Plaid access tokens |
+| `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 
 ---
@@ -185,7 +185,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `NEXT_PUBLIC_PLAID_ENV` | Must be `production` |
 | `WISE_API_KEY` | API token from Wise developer settings |
 | `WISE_ENV` | Set to `production` |
-| `PLAID_TOKEN_ENC_KEY` | 64-character hex string (32 bytes) used to AES-256-GCM encrypt Plaid access tokens before storing in `bank_accounts.plaid_access_token_enc`. Generate with `openssl rand -hex 32`. |
+| `PLAID_TOKEN_ENCRYPTION_KEY` | 64-character hex string (32 bytes) used to AES-256-GCM encrypt Plaid access tokens before storing in `bank_accounts.plaid_access_token_enc`. Generate with `openssl rand -hex 32`. |
 
 **After any schema change:** Deploy first, then call `GET /api/migrate` once with a valid auth cookie to apply `ALTER TABLE` changes to the live database.
 

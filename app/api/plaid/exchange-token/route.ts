@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { plaidClient } from '@/lib/plaid';
 import { getSql } from '@/lib/db';
-import { encrypt } from '@/lib/crypto';
+import { encryptToken } from '@/lib/encryption';
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     const country = metadata?.institution?.country_codes?.[0] === 'CA' ? 'CA' : 'US';
     const currency = country === 'CA' ? 'CAD' : 'USD';
 
-    const encryptedAccessToken = encrypt(accessToken);
+    const encryptedAccessToken = encryptToken(accessToken);
 
     const savedAccounts = [];
     for (const account of accounts.slice(0, 3)) {

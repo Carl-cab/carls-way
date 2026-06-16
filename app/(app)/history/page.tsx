@@ -48,20 +48,26 @@ export default function HistoryPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [me, setMe] = useState<Me | null>(null);
   const [filter, setFilter] = useState('all');
-  const [loading, setLoading] = useState(true);
+  const [fetchedFilter, setFetchedFilter] = useState<string | null>(null);
+
+  // loading is true until the current filter's fetch has resolved
+  const loading = fetchedFilter !== filter;
 
   useEffect(() => {
     fetch('/api/me').then(r => r.json()).then(data => setMe(data));
   }, []);
 
   useEffect(() => {
-    setLoading(true);
+    let cancelled = false;
     fetch(`/api/transactions?filter=${filter}`)
       .then(r => r.json())
       .then(data => {
-        setTransactions(Array.isArray(data) ? data : []);
-        setLoading(false);
+        if (!cancelled) {
+          setTransactions(Array.isArray(data) ? data : []);
+          setFetchedFilter(filter);
+        }
       });
+    return () => { cancelled = true; };
   }, [filter]);
 
   async function handleAction(id: number, action: 'accept' | 'decline') {
