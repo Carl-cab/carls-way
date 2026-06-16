@@ -39,7 +39,7 @@ Client (React 19)
 | `lib/db.ts` | `postgres.js` connection singleton and `initializeSchema()` |
 | `lib/auth.ts` | JWT helpers, `getAuthUser()`, velocity limits, audit logging |
 | `lib/fx.ts` | Wise API integration, FX rate caching, `buildFxQuote()` |
-| `lib/plaid.ts` | Plaid client configuration |
+| `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
 | `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |

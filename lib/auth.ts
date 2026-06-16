@@ -3,7 +3,17 @@ import jwt from 'jsonwebtoken';
 import { getSql } from '@/lib/db';
 
 export const COOKIE_NAME = 'manna-token';
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('JWT_SECRET environment variable is not set. This is required in production.');
+    }
+    return 'dev-secret-change-in-production';
+  }
+  return secret;
+}
 
 // ─── Velocity Limits ────────────────────────────────────────────────────────
 export const VELOCITY_LIMITS = {
@@ -29,12 +39,12 @@ export interface JWTPayload {
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
 export function signToken(payload: JWTPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: '7d' });
 }
 
 export function verifyToken(token: string): JWTPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as JWTPayload;
+    return jwt.verify(token, getJwtSecret()) as JWTPayload;
   } catch {
     return null;
   }

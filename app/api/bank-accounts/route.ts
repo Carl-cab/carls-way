@@ -9,7 +9,7 @@ export async function GET() {
     const sql = getSql();
     const rows = await sql`
       SELECT id, institution_name, account_name, account_type,
-             account_mask, currency, country, is_primary
+             account_mask, currency, country, is_primary, is_token_encrypted
       FROM bank_accounts WHERE user_id = ${user.userId} AND is_active = true
       ORDER BY is_primary DESC, created_at ASC
     `;

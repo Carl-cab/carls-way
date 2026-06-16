@@ -59,7 +59,9 @@ export async function initializeSchema() {
       user_id INTEGER NOT NULL REFERENCES users(id),
       friend_id INTEGER NOT NULL REFERENCES users(id),
       status TEXT NOT NULL DEFAULT 'pending',
+      requested_by INTEGER REFERENCES users(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, friend_id)
     )
   `;
@@ -78,6 +80,7 @@ export async function initializeSchema() {
       is_primary BOOLEAN NOT NULL DEFAULT false,
       is_verified BOOLEAN NOT NULL DEFAULT false,
       is_active BOOLEAN NOT NULL DEFAULT true,
+      is_token_encrypted BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(plaid_item_id, account_mask)
     )
