@@ -59,7 +59,9 @@ export async function initializeSchema() {
       user_id INTEGER NOT NULL REFERENCES users(id),
       friend_id INTEGER NOT NULL REFERENCES users(id),
       status TEXT NOT NULL DEFAULT 'pending',
+      requested_by INTEGER REFERENCES users(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, friend_id)
     )
   `;

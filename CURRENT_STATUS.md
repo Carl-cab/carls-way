@@ -10,7 +10,7 @@ Last updated: 2026-06-16
   - `JWT_SECRET` now throws in production if unset (no silent dev fallback)
 - **Payments**: Send / request / accept / decline — dual-currency (`balance_cad`/`balance_usd`), cross-border FX via Wise, velocity limits, audit logging
 - **Activity feed**: Public feed; History page with working `sent / received / pending` filter chips
-- **Friends**: Friend list (auto-accepted; no approval UI yet)
+- **Friends**: Full approval flow — send request (pending), incoming requests with Accept/Decline, sent requests, accepted friends list
 - **Bank linking**: Plaid Link flow, token exchange; tokens AES-256-GCM encrypted at rest (`is_token_encrypted = true` set on every new account)
 - **KYC**: Stripe Identity session creation, webhook handler updating `kyc_status` server-side, profile KYC card with live states
 
@@ -39,10 +39,11 @@ Last updated: 2026-06-16
 
 ## In Progress / Next
 
-1. **Add Money / Cash Out** — profile buttons still inert; no API routes exist yet
+1. **Deploy + run `/api/migrate`** — adds `friends.requested_by` and `friends.updated_at` to production
+2. **Add Money / Cash Out** — profile buttons still inert; no API routes exist yet
    - Must check `kyc_status === 'verified'` before any transfer
    - Must call `requireEncryptedBankToken()` — do not read `plaid_access_token_enc` directly
-2. **KYC live test** — set Stripe env vars in Vercel, run `/api/migrate`, register webhook
+3. **KYC live test** — set Stripe env vars in Vercel, register webhook
 
 ---
 
@@ -66,6 +67,6 @@ Last updated: 2026-06-16
 
 ## After Next Deploy
 
-1. Call `GET /api/migrate` (authenticated) to add `is_token_encrypted` column to production `bank_accounts`
+1. Call `GET /api/migrate` (authenticated) — adds `is_token_encrypted` to `bank_accounts`, `requested_by` + `updated_at` to `friends`
 2. Register Stripe webhook: `https://carloscab74.vercel.app/api/webhooks/stripe`
    - Events: `identity.verification_session.verified`, `identity.verification_session.requires_input`
