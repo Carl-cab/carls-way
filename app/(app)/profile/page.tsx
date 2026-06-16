@@ -12,7 +12,7 @@ interface User {
 interface BankAccount {
   id: number; institution_name: string; account_name: string;
   account_type: string; account_mask: string; currency: string;
-  country: string; is_primary: boolean;
+  country: string; is_primary: boolean; is_token_encrypted: boolean;
 }
 
 function formatCurrency(amount: number, currency: string) {
@@ -101,6 +101,16 @@ export default function ProfilePage() {
   const countryFlag = isCA ? '🇨🇦' : '🇺🇸';
   const regionLabel = isCA ? 'Province' : 'State';
 
+  // Transfer readiness — drives Add Money / Cash Out button states
+  const kycVerified = user.kyc_status === 'verified';
+  const hasEncryptedAccount = bankAccounts.some(a => a.is_token_encrypted);
+  const transferHint =
+    !kycVerified
+      ? 'Verify your identity before using transfers.'
+      : !hasEncryptedAccount
+      ? 'Re-link your bank account before using transfers.'
+      : 'Transfers are coming soon.';
+
   const kycConfig: Record<string, { label: string; badge: string; badgeBg: string; avatarColor: string }> = {
     pending:        { label: 'Verification Pending',  badge: 'Pending',       badgeBg: 'bg-amber-100 text-amber-700',  avatarColor: 'text-amber-600' },
     verified:       { label: 'Identity Verified ✓',   badge: 'Verified',      badgeBg: 'bg-green-100 text-green-700',  avatarColor: 'text-green-600' },
@@ -154,9 +164,24 @@ export default function ProfilePage() {
             </span>
           </div>
         </div>
-        <div className="flex gap-2 mt-4">
-          <button className="flex-1 py-2 bg-red-700 text-white text-sm font-semibold rounded-lg hover:bg-red-800 transition">+ Add Money</button>
-          <button className="flex-1 py-2 border border-gray-300 text-gray-700 text-sm font-semibold rounded-lg hover:border-red-400 transition">Cash Out</button>
+        <div className="mt-4 space-y-2">
+          <div className="flex gap-2">
+            <button
+              disabled
+              className="flex-1 py-2 bg-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
+              title={transferHint}
+            >
+              + Add Money
+            </button>
+            <button
+              disabled
+              className="flex-1 py-2 border border-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
+              title={transferHint}
+            >
+              Cash Out
+            </button>
+          </div>
+          <p className="text-xs text-center text-gray-400">{transferHint}</p>
         </div>
       </div>
 
