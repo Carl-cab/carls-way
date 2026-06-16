@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface Transaction {
   id: number;
@@ -43,6 +44,7 @@ function timeAgo(dateStr: string) {
 }
 
 export default function FeedPage() {
+  const router = useRouter();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -79,7 +81,11 @@ export default function FeedPage() {
 
       <div className="space-y-3">
         {transactions.map(tx => (
-          <div key={tx.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+          <div
+            key={tx.id}
+            onClick={() => router.push(`/transactions/${tx.id}`)}
+            className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 cursor-pointer hover:border-gray-300 transition"
+          >
             <div className="flex items-start gap-3">
               <Avatar name={tx.sender_name} color={tx.sender_avatar_color} />
               <div className="flex-1 min-w-0">
