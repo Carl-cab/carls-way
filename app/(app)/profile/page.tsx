@@ -1,12 +1,12 @@
 'use client';
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 interface User {
   id: number; name: string; username: string; email: string; phone: string;
   balance: number; balance_cad: number; balance_usd: number;
   province: string; country: string; avatar_color: string;
-  kyc_status: string; created_at: string;
+  kyc_status: string; kyc_rejection_reason?: string; created_at: string;
 }
 
 interface BankAccount {
@@ -27,24 +27,63 @@ function formatDate(dateStr: string) {
   return d.toLocaleDateString('en-CA', { month: 'long', year: 'numeric' });
 }
 
+function KycReturnBanners({ kycStatus }: { kycStatus: string }) {
+  const searchParams = useSearchParams();
+  const kycReturn = searchParams.get('kyc') === 'complete';
+  if (!kycReturn) return null;
+  if (kycStatus === 'verified') {
+    return (
+      <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm text-green-800">
+        <strong>Identity verified!</strong> Your higher transfer limits are now active.
+      </div>
+    );
+  }
+  return (
+    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-800">
+      <strong>Verification submitted.</strong> We&apos;ll update your status once Stripe processes your documents. This usually takes a few minutes.
+    </div>
+  );
+}
+
 export default function ProfilePage() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [kycBanner, setKycBanner] = useState(false);
+  const [pageLoaded, setPageLoaded] = useState(false);
+  const [kycLoading, setKycLoading] = useState(false);
+  const [kycError, setKycError] = useState('');
 
-  useEffect(() => {
+  const loadProfile = useCallback(() => {
     Promise.all([
       fetch('/api/me').then(r => r.json()),
       fetch('/api/bank-accounts').then(r => r.json()),
     ]).then(([userData, accountsData]: [User, BankAccount[]]) => {
       setUser(userData);
       setBankAccounts(Array.isArray(accountsData) ? accountsData : []);
-      setKycBanner(userData.kyc_status === 'none' || userData.kyc_status === 'pending');
-      setLoading(false);
+      setPageLoaded(true);
     });
   }, []);
+
+  useEffect(() => { loadProfile(); }, [loadProfile]);
+
+  async function handleStartKyc() {
+    setKycLoading(true);
+    setKycError('');
+    try {
+      const res = await fetch('/api/kyc/create-session', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        setKycError(data.error || 'Failed to start verification');
+        return;
+      }
+      // Redirect to Stripe hosted Identity flow
+      window.location.href = data.url;
+    } catch {
+      setKycError('Network error — please try again');
+    } finally {
+      setKycLoading(false);
+    }
+  }
 
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -52,7 +91,7 @@ export default function ProfilePage() {
     router.refresh();
   }
 
-  if (loading) return <div className="text-center py-12 text-gray-400">Loading…</div>;
+  if (!pageLoaded) return <div className="text-center py-12 text-gray-400">Loading…</div>;
   if (!user) return <div className="text-center py-12 text-gray-400">Error loading profile</div>;
 
   const initials = user.name.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2);
@@ -62,27 +101,20 @@ export default function ProfilePage() {
   const countryFlag = isCA ? '🇨🇦' : '🇺🇸';
   const regionLabel = isCA ? 'Province' : 'State';
 
-  const kycLabels: Record<string, { label: string; color: string }> = {
-    none: { label: 'Not Verified', color: 'text-gray-500' },
-    pending: { label: 'Verification Pending', color: 'text-amber-600' },
-    verified: { label: 'Verified ✓', color: 'text-green-600' },
-    rejected: { label: 'Verification Failed', color: 'text-red-600' },
+  const kycConfig: Record<string, { label: string; badge: string; badgeBg: string; avatarColor: string }> = {
+    pending:        { label: 'Verification Pending',  badge: 'Pending',       badgeBg: 'bg-amber-100 text-amber-700',  avatarColor: 'text-amber-600' },
+    verified:       { label: 'Identity Verified ✓',   badge: 'Verified',      badgeBg: 'bg-green-100 text-green-700',  avatarColor: 'text-green-600' },
+    requires_input: { label: 'Action Required',       badge: 'Action Needed', badgeBg: 'bg-red-100 text-red-700',     avatarColor: 'text-red-600'   },
+    unverified:     { label: 'Not Verified',           badge: 'Unverified',    badgeBg: 'bg-gray-100 text-gray-600',   avatarColor: 'text-gray-500'  },
   };
-  const kycInfo = kycLabels[user.kyc_status] || kycLabels.none;
+  const kycInfo = kycConfig[user.kyc_status] ?? kycConfig.unverified;
+  const canStartKyc = !['verified'].includes(user.kyc_status);
 
   return (
     <div className="space-y-4">
-      {/* KYC Banner */}
-      {kycBanner && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
-          <span className="text-2xl">🪪</span>
-          <div>
-            <p className="font-semibold text-amber-800 text-sm">Verify your identity</p>
-            <p className="text-amber-700 text-xs mt-0.5">Verify your ID to unlock higher transfer limits and cross-border payments.</p>
-            <button className="mt-2 text-xs font-semibold text-amber-800 underline">Start verification →</button>
-          </div>
-        </div>
-      )}
+      <Suspense fallback={null}>
+        <KycReturnBanners kycStatus={user.kyc_status} />
+      </Suspense>
 
       {/* Avatar & Name */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 flex items-center gap-4">
@@ -93,7 +125,7 @@ export default function ProfilePage() {
         <div className="flex-1 min-w-0">
           <h2 className="text-lg font-bold text-gray-900 truncate">{user.name}</h2>
           <p className="text-sm text-gray-500">@{user.username}</p>
-          <p className={`text-xs mt-0.5 ${kycInfo.color}`}>{kycInfo.label}</p>
+          <p className={`text-xs mt-0.5 ${kycInfo.avatarColor}`}>{kycInfo.label}</p>
         </div>
         <span className="text-2xl">{countryFlag}</span>
       </div>
@@ -126,6 +158,51 @@ export default function ProfilePage() {
           <button className="flex-1 py-2 bg-red-700 text-white text-sm font-semibold rounded-lg hover:bg-red-800 transition">+ Add Money</button>
           <button className="flex-1 py-2 border border-gray-300 text-gray-700 text-sm font-semibold rounded-lg hover:border-red-400 transition">Cash Out</button>
         </div>
+      </div>
+
+      {/* Identity Verification */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Identity Verification</h3>
+          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${kycInfo.badgeBg}`}>
+            {kycInfo.badge}
+          </span>
+        </div>
+
+        {user.kyc_status === 'verified' && (
+          <p className="text-sm text-gray-600">Your identity has been verified. Higher transfer limits are active.</p>
+        )}
+
+        {user.kyc_status === 'pending' && (
+          <p className="text-sm text-gray-600">Your verification is being reviewed. We&apos;ll update your status automatically — no action needed.</p>
+        )}
+
+        {user.kyc_status === 'requires_input' && (
+          <div className="space-y-2">
+            <p className="text-sm text-gray-600">Your verification needs attention.</p>
+            {user.kyc_rejection_reason && (
+              <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{user.kyc_rejection_reason}</p>
+            )}
+          </div>
+        )}
+
+        {(user.kyc_status === 'unverified' || user.kyc_status === 'none') && (
+          <p className="text-sm text-gray-600">Verify your identity to unlock higher transfer limits and cross-border payments.</p>
+        )}
+
+        {kycError && (
+          <p className="text-xs text-red-600 mt-2 bg-red-50 rounded-lg px-3 py-2">{kycError}</p>
+        )}
+
+        {canStartKyc && (
+          <button
+            onClick={handleStartKyc}
+            disabled={kycLoading}
+            className="mt-3 w-full py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-60 text-white text-sm font-semibold rounded-lg transition"
+          >
+            {kycLoading ? 'Starting…' : user.kyc_status === 'requires_input' ? 'Retry Verification →' : 'Verify Identity →'}
+          </button>
+        )}
       </div>
 
       {/* Bank Accounts */}

@@ -40,6 +40,7 @@ Client (React 19)
 | `lib/auth.ts` | JWT helpers, `getAuthUser()`, velocity limits, audit logging |
 | `lib/fx.ts` | Wise API integration, FX rate caching, `buildFxQuote()` |
 | `lib/plaid.ts` | Plaid client configuration |
+| `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 
@@ -114,7 +115,7 @@ All previously tracked issues (request acceptance legacy balance, Plaid plaintex
 The following tasks are ordered by business impact and should be worked in sequence:
 
 1. **Implement Add Money / Cash Out** — Wire up the inert "+ Add Money" and "Cash Out" buttons on the profile page to a Plaid Transfer or Stripe ACH integration.
-2. **Implement KYC verification flow** — Integrate a KYC provider (Stripe Identity or Persona) and build the endpoint to update `users.kyc_status` to `'verified'`, which unlocks higher velocity limits.
+2. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; run `/api/migrate`; register Stripe webhook endpoint; run a sandbox Identity flow end-to-end.
 
 ---
 
@@ -186,6 +187,9 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `WISE_API_KEY` | API token from Wise developer settings |
 | `WISE_ENV` | Set to `production` |
 | `PLAID_TOKEN_ENCRYPTION_KEY` | 64-character hex string (32 bytes) used to AES-256-GCM encrypt Plaid access tokens before storing in `bank_accounts.plaid_access_token_enc`. Generate with `openssl rand -hex 32`. |
+| `STRIPE_SECRET_KEY` | Stripe secret key (`sk_test_…` for sandbox, `sk_live_…` for production) |
+| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret from Stripe Dashboard → Developers → Webhooks (`whsec_…`) |
+| `NEXT_PUBLIC_APP_URL` | Full origin URL without trailing slash, e.g. `https://carloscab74.vercel.app` |
 
 **After any schema change:** Deploy first, then call `GET /api/migrate` once with a valid auth cookie to apply `ALTER TABLE` changes to the live database.
 
