@@ -78,6 +78,7 @@ export async function initializeSchema() {
       is_primary BOOLEAN NOT NULL DEFAULT false,
       is_verified BOOLEAN NOT NULL DEFAULT false,
       is_active BOOLEAN NOT NULL DEFAULT true,
+      is_token_encrypted BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(plaid_item_id, account_mask)
     )

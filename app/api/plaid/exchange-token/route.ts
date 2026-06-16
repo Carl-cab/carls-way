@@ -32,11 +32,11 @@ export async function POST(req: NextRequest) {
         INSERT INTO bank_accounts (
           user_id, plaid_item_id, plaid_access_token_enc,
           institution_name, account_name, account_type,
-          account_mask, currency, country, is_verified
+          account_mask, currency, country, is_verified, is_token_encrypted
         ) VALUES (
           ${user.userId}, ${itemId}, ${encryptedAccessToken},
           ${institution}, ${account.name}, ${account.type},
-          ${account.mask || null}, ${currency}, ${country}, true
+          ${account.mask || null}, ${currency}, ${country}, true, true
         )
         ON CONFLICT DO NOTHING
         RETURNING id, account_name, account_type, account_mask, institution_name, currency
