@@ -37,9 +37,19 @@ export async function initializeSchema() {
       phone TEXT,
       password_hash TEXT NOT NULL,
       balance REAL NOT NULL DEFAULT 100.00,
+      balance_cad REAL NOT NULL DEFAULT 0,
+      balance_usd REAL NOT NULL DEFAULT 0,
       province TEXT,
       country TEXT NOT NULL DEFAULT 'CA',
       avatar_color TEXT NOT NULL DEFAULT '#CC0000',
+      kyc_status TEXT NOT NULL DEFAULT 'pending',
+      kyc_provider TEXT,
+      kyc_session_id TEXT,
+      kyc_verified_at TIMESTAMPTZ,
+      kyc_rejection_reason TEXT,
+      failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+      locked_until TIMESTAMPTZ,
+      last_login_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;

@@ -16,7 +16,8 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 - Auth: custom JWT in httpOnly cookie `manna-token` (`lib/auth.ts`), route guard via `proxy.ts`
 - Database: Supabase PostgreSQL via `postgres.js` (`lib/db.ts`, `getSql()` singleton)
 - FX: Wise API (`lib/fx.ts`, `buildFxQuote()`)
-- Bank linking: Plaid (`lib/plaid.ts`)
+- Bank linking: Plaid (`lib/plaid.ts`), access tokens AES-256-GCM encrypted via `lib/encryption.ts`
+- KYC: Stripe Identity (`lib/stripe.ts`, `getStripe()`)
 - Deployed on Vercel: https://carloscab74.vercel.app
 - Repo: https://github.com/Carl-cab/carls-way
 
@@ -36,9 +37,9 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 
 ## 4. Database Tables
 
-- `users` — auth fields, `balance_cad`/`balance_usd`, legacy `balance`, `kyc_status`, country, avatar
+- `users` — auth fields, `balance_cad`/`balance_usd`, legacy `balance`, `kyc_status` / `kyc_provider` / `kyc_session_id` / `kyc_verified_at` / `kyc_rejection_reason`, `failed_login_attempts`, `locked_until`, country, avatar
 - `transactions` — payments/requests, FX details (`fx_rate`, `fx_fee`, sender/receiver currency & amount, `is_cross_border`, `payment_rail`, `estimated_settlement`)
-- `bank_accounts` — Plaid-linked accounts (`plaid_access_token_enc` currently plaintext)
+- `bank_accounts` — Plaid-linked accounts (`plaid_access_token_enc` — AES-256-GCM encrypted)
 - `friends` — relationships with `status` column
 - `velocity_checks` — rolling hourly/daily/weekly totals per user
 - `audit_logs` — audit trail of sensitive actions
@@ -53,6 +54,7 @@ Manna is a peer-to-peer payment app for cross-border money transfers between the
 - Plaid bank account linking and display on profile page
 - Velocity limit checks and audit logging on payments
 - June 2026 UX audit fixes: `bank_accounts` table added to schema (fixed hanging profile page); Request Money page now sends `receiverUsername`; fixed "NaNd ago"/"Invalid Date" timestamp bugs on Feed and History pages; layout header now reads `balance_cad`/`balance_usd`
+- KYC foundation (Stripe Identity): `POST /api/kyc/create-session` creates hosted Identity session; `POST /api/webhooks/stripe` verifies Stripe signature and updates `kyc_status` server-side; profile page shows live KYC card with status, reason for failure, and "Verify Identity →" button
 
 ---
 
@@ -73,17 +75,17 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 ## 8. Deployment Notes
 
 - Vercel auto-deploys `master` on push
-- Required env vars (set in Vercel): `DATABASE_URL` (Supabase pooler), `JWT_SECRET`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `NEXT_PUBLIC_PLAID_ENV` (`production`), `WISE_API_KEY`, `WISE_ENV` (`production`), `PLAID_TOKEN_ENCRYPTION_KEY` (64-char hex, `openssl rand -hex 32`)
-- **Deploy requirement**: `PLAID_TOKEN_ENCRYPTION_KEY` must be set before linking any new bank account, or `/api/plaid/exchange-token` will throw a clear error
+- Required env vars (set in Vercel): `DATABASE_URL`, `JWT_SECRET`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `NEXT_PUBLIC_PLAID_ENV`, `WISE_API_KEY`, `WISE_ENV`, `PLAID_TOKEN_ENCRYPTION_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`
+- After any schema change: deploy, then call `GET /api/migrate` (authenticated)
+- After adding Stripe env vars: register webhook in Stripe Dashboard → `https://carloscab74.vercel.app/api/webhooks/stripe`, events: `identity.verification_session.verified`, `identity.verification_session.requires_input`
 - After any schema change: deploy, then call `GET /api/migrate` once to apply `ALTER TABLE` statements to production
 
 ---
 
 ## 9. Current Priorities
 
-1. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer
-2. Implement KYC verification flow, wire up "Start verification" button
-3. Set `PLAID_TOKEN_ENCRYPTION_KEY` in Vercel (required before next bank-account link)
+1. Set Stripe env vars in Vercel + run `/api/migrate` + register Stripe webhook → test KYC flow end-to-end in sandbox
+2. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer or Stripe ACH
 
 ---
 
@@ -98,4 +100,5 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 - **Request acceptance fix**: rewrote the `accept` branch in `app/api/transactions/[id]/route.ts` to use `balance_cad`/`balance_usd`, run velocity checks, build an FX quote via `buildFxQuote()` for cross-border requests, and record `fx_rate`/`fx_fee`/`sender_amount`/`receiver_amount`/`payment_rail`/`estimated_settlement` plus audit logging — closing the highest-priority known bug
 - **Activity filter chips fix**: `GET /api/transactions` now honors `?filter=sent|received|pending` (in addition to `all`) via a composed `postgres.js` query fragment, matching what `app/(app)/history/page.tsx` already sends
 - **Password validation fix**: `app/(auth)/register/page.tsx` password field now uses `minLength={8}` and updated placeholder text, matching `validatePassword()` in `lib/auth.ts` (8+ chars, 1 uppercase, 1 number)
-- **Plaid token encryption (current)**: replaced interim `lib/crypto.ts` with `lib/encryption.ts` exposing `encryptToken`/`decryptToken` (AES-256-GCM, keyed by `PLAID_TOKEN_ENCRYPTION_KEY`); `app/api/plaid/exchange-token/route.ts` encrypts the Plaid access token before INSERT — decrypted value is never returned to the client; updated `CLAUDE.md` key-file table and env var table; lint and build pass clean
+- **Plaid token encryption**: replaced interim `lib/crypto.ts` with `lib/encryption.ts` exposing `encryptToken`/`decryptToken` (AES-256-GCM, keyed by `PLAID_TOKEN_ENCRYPTION_KEY`); `app/api/plaid/exchange-token/route.ts` encrypts the Plaid access token before INSERT — decrypted value is never returned to the client
+- **KYC foundation — Stripe Identity (current)**: added `lib/stripe.ts` (`getStripe()` singleton); `POST /api/kyc/create-session` creates a hosted Stripe Identity session (metadata: user_id, type: document+selfie, return_url → /profile?kyc=complete), stores `kyc_session_id` and sets `kyc_status='pending'`; `POST /api/webhooks/stripe` verifies signature with raw body, handles `verified` and `requires_input` events, updates DB server-side — client never touches status; profile page KYC card shows live status, rejection reason, and wired "Verify Identity →" / "Retry →" button; 5 new users columns added (`kyc_provider`, `kyc_session_id`, `kyc_verified_at`, `kyc_rejection_reason`, `failed_login_attempts`, `locked_until`, `last_login_at`) to both `initializeSchema()` and `/api/migrate`; `CURRENT_STATUS.md` created; lint clean; build clean
