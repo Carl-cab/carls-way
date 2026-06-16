@@ -14,10 +14,6 @@ interface User {
   avatar_color: string;
 }
 
-function getInitials(name: string) {
-  return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
-}
-
 function formatBalance(amount: number, country: string) {
   const currency = country === 'US' ? 'USD' : 'CAD';
   const locale = country === 'US' ? 'en-US' : 'en-CA';
