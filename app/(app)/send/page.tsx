@@ -1,6 +1,6 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 interface FxQuote {
   fromCurrency: string;
@@ -17,10 +17,11 @@ interface Me {
   balance_usd: number;
 }
 
-export default function SendPage() {
+function SendForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [me, setMe] = useState<Me | null>(null);
-  const [form, setForm] = useState({ receiverUsername: '', amount: '', note: '', type: 'pay', privacy: 'public' });
+  const [form, setForm] = useState({ receiverUsername: searchParams.get('to') ?? '', amount: '', note: '', type: 'pay', privacy: 'public' });
   const [fxQuote, setFxQuote] = useState<FxQuote | null>(null);
   const [fxLoading, setFxLoading] = useState(false);
   const [error, setError] = useState('');
@@ -159,5 +160,13 @@ export default function SendPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function SendPage() {
+  return (
+    <Suspense fallback={<div className="text-center py-12 text-gray-400">Loading…</div>}>
+      <SendForm />
+    </Suspense>
   );
 }
