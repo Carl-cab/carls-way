@@ -9,6 +9,8 @@ interface Transaction {
   amount: number;
   currency: string;
   note: string;
+  sender_id?: number;
+  receiver_id?: number;
   sender_username: string;
   sender_name: string;
   sender_avatar_color: string;
@@ -26,6 +28,7 @@ interface Transaction {
   estimated_settlement: string | null;
   privacy: string;
   created_at: string;
+  isPublicNonParty?: boolean;
 }
 
 function formatAmount(amount: number, currency: string) {
@@ -116,6 +119,27 @@ export default function TransactionReceiptPage() {
         <button onClick={() => router.back()} className="text-red-700 text-sm font-medium hover:underline">
           ← Go back
         </button>
+      </div>
+    );
+  }
+
+  // Public transaction but user is not a party
+  if (tx.isPublicNonParty) {
+    return (
+      <div className="max-w-lg mx-auto">
+        <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-4 transition">
+          ← Back
+        </button>
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">
+          <div className="text-5xl mb-4">🔐</div>
+          <p className="font-medium text-gray-800 mb-2">Receipt is private to participants</p>
+          <p className="text-sm text-gray-500 mb-6">This is a public transaction, but the detailed receipt is only visible to the sender and receiver.</p>
+          <div className="space-y-3 text-left">
+            <p className="text-sm"><strong>Sender:</strong> @{tx.sender_username}</p>
+            <p className="text-sm"><strong>Receiver:</strong> @{tx.receiver_username}</p>
+            <p className="text-sm"><strong>Date:</strong> {formatDate(tx.created_at)}</p>
+          </div>
+        </div>
       </div>
     );
   }
