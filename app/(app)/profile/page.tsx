@@ -184,13 +184,22 @@ export default function ProfilePage() {
                 + Add Money
               </button>
             )}
-            <button
-              disabled={!kycVerified || !hasEncryptedAccount}
-              className="flex-1 py-2 border border-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
-              title={transferHint}
-            >
-              Cash Out
-            </button>
+            {canTransfer ? (
+              <Link
+                href="/transfers?type=cash_out"
+                className="flex-1 py-2 border-2 border-red-700 text-red-700 text-sm font-semibold rounded-lg hover:bg-red-50 transition text-center"
+              >
+                Cash Out
+              </Link>
+            ) : (
+              <button
+                disabled
+                className="flex-1 py-2 border border-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
+                title={transferHint}
+              >
+                Cash Out
+              </button>
+            )}
           </div>
           <p className="text-xs text-center text-gray-400">{transferHint}</p>
         </div>

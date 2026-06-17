@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
-import { checkVelocityLimit, recordVelocity } from '@/lib/auth';
+import { checkVelocityLimit } from '@/lib/auth';
 
 export async function POST(req: Request) {
   try {
@@ -52,14 +52,11 @@ export async function POST(req: Request) {
     // Create transfer intent (sandbox only - no actual transfer)
     const result = await sql`
       INSERT INTO transfer_intents (user_id, type, amount, currency, status, provider)
-      VALUES (${user.userId}, ${type}, ${amount}, ${currency}, 'draft', 'simulated')
+      VALUES (${user.userId}, ${type}, ${amount}, ${currency}, 'draft', NULL)
       RETURNING id, type, amount, currency, status, provider, created_at
     `;
 
     const transferIntent = result[0];
-
-    // Record velocity
-    await recordVelocity(user.userId, amount, 'transfer');
 
     // Audit log
     await sql`
