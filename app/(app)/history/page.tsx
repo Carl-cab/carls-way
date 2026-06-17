@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface Transaction {
   id: number;
@@ -45,6 +46,7 @@ function formatDate(dateStr: string) {
 }
 
 export default function HistoryPage() {
+  const router = useRouter();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [me, setMe] = useState<Me | null>(null);
   const [filter, setFilter] = useState('all');
@@ -141,7 +143,11 @@ export default function HistoryPage() {
           }
 
           return (
-            <div key={tx.id} className={`bg-white rounded-xl shadow-sm border p-4 ${isPendingRequest && isSender ? 'border-yellow-300' : 'border-gray-100'}`}>
+            <div
+              key={tx.id}
+              onClick={() => router.push(`/transactions/${tx.id}`)}
+              className={`bg-white rounded-xl shadow-sm border p-4 cursor-pointer hover:border-gray-300 transition ${isPendingRequest && isSender ? 'border-yellow-300' : 'border-gray-100'}`}
+            >
               <div className="flex items-start gap-3">
                 <Avatar
                   name={isSender ? tx.receiver_name : tx.sender_name}
@@ -167,7 +173,7 @@ export default function HistoryPage() {
 
               {/* Accept/Decline buttons for pending requests where current user is the payer */}
               {isPendingRequest && isSender && (
-                <div className="flex gap-2 mt-3">
+                <div className="flex gap-2 mt-3" onClick={e => e.stopPropagation()}>
                   <button
                     onClick={() => handleAction(tx.id, 'accept')}
                     className="flex-1 bg-green-600 hover:bg-green-700 text-white text-sm font-medium py-2 rounded-lg transition"

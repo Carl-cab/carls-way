@@ -3,6 +3,37 @@ import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const user = await getAuthUser();
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const { id } = await params;
+  const txId = parseInt(id, 10);
+  if (isNaN(txId)) return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
+
+  const sql = getSql();
+  const rows = await sql`
+    SELECT t.id, t.type, t.status, t.amount, t.currency, t.note,
+           t.sender_currency, t.receiver_currency,
+           t.fx_rate, t.fx_fee, t.sender_amount, t.receiver_amount,
+           t.is_cross_border, t.payment_rail, t.estimated_settlement,
+           t.privacy, t.created_at,
+           s.username AS sender_username, s.name AS sender_name, s.avatar_color AS sender_avatar_color,
+           r.username AS receiver_username, r.name AS receiver_name, r.avatar_color AS receiver_avatar_color
+    FROM transactions t
+    JOIN users s ON t.sender_id = s.id
+    JOIN users r ON t.receiver_id = r.id
+    WHERE t.id = ${txId}
+      AND (t.sender_id = ${user.userId} OR t.receiver_id = ${user.userId})
+  `;
+
+  if (!rows[0]) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
+  return NextResponse.json(rows[0]);
+}
+
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
