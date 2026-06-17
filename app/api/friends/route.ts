@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import { createNotification } from '@/lib/notifications';
 
 export async function GET() {
   const user = await getAuthUser();
@@ -35,10 +36,23 @@ export async function POST(req: NextRequest) {
   if (existing.length > 0) {
     return NextResponse.json({ error: 'Friend request already exists or you are already friends' }, { status: 409 });
   }
-  await sql`
+  const friendshipRows = await sql`
     INSERT INTO friends (user_id, friend_id, status, requested_by, updated_at)
     VALUES (${user.userId}, ${friendId}, 'pending', ${user.userId}, NOW())
+    RETURNING id
   `;
+  const friendshipId = friendshipRows[0]?.id as number | undefined;
+
+  // Notify the recipient
+  await createNotification({
+    userId: friendId,
+    type: 'friend_request',
+    title: 'New friend request',
+    message: `@${user.username} sent you a friend request.`,
+    relatedEntityType: 'friendship',
+    relatedEntityId: friendshipId,
+  });
+
   return NextResponse.json({ success: true }, { status: 201 });
 }
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog, sanitizeString } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
+import { createNotification } from '@/lib/notifications';
 
 export async function GET(req: NextRequest) {
   try {
@@ -151,7 +152,18 @@ export async function POST(req: NextRequest) {
         isCrossBorder,
       });
 
-      return NextResponse.json({ success: true, transactionId: result[0].id, isCrossBorder, receiverAmount, receiverCurrency }, { status: 201 });
+      const txId = result[0].id as number;
+      const displayAmount = new Intl.NumberFormat('en-CA', { style: 'currency', currency: senderCurrency }).format(numAmount);
+      await createNotification({
+        userId: receiver.id,
+        type: 'payment_received',
+        title: 'You received money',
+        message: `@${user.username} sent you ${displayAmount}.`,
+        relatedEntityType: 'transaction',
+        relatedEntityId: txId,
+      });
+
+      return NextResponse.json({ success: true, transactionId: txId, isCrossBorder, receiverAmount, receiverCurrency }, { status: 201 });
 
     } else {
       // Request money
@@ -173,7 +185,18 @@ export async function POST(req: NextRequest) {
         currency: receiverCurrency,
       });
 
-      return NextResponse.json({ success: true, transactionId: result[0].id }, { status: 201 });
+      const reqTxId = result[0].id as number;
+      const reqDisplayAmount = new Intl.NumberFormat('en-CA', { style: 'currency', currency: receiverCurrency }).format(numAmount);
+      await createNotification({
+        userId: receiver.id,
+        type: 'payment_request',
+        title: 'Money requested',
+        message: `@${user.username} is requesting ${reqDisplayAmount} from you.`,
+        relatedEntityType: 'transaction',
+        relatedEntityId: reqTxId,
+      });
+
+      return NextResponse.json({ success: true, transactionId: reqTxId }, { status: 201 });
     }
   } catch (err) {
     console.error('Transaction POST error:', err);
