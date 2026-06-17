@@ -159,7 +159,10 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `users` | Identity, auth, dual-currency balances, KYC status |
 | `transactions` | All money movement — sends, requests, cross-border FX details |
 | `bank_accounts` | Plaid-linked external accounts |
-| `friends` | Social graph (currently auto-accepted, no approval flow) |
+| `friends` | Social graph with request approval flow |
+| `notifications` | In-app notifications for transactions and friend events |
+| `password_reset_tokens` | One-time password reset tokens (hashed, 1-hour expiry) |
+| `transfer_intents` | Sandbox transfer intent records (no real money movement) |
 | `velocity_checks` | Rolling transaction volume per user for rate limiting |
 | `audit_logs` | Immutable system audit trail |
 

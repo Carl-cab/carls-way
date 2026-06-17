@@ -18,7 +18,8 @@ Last updated: 2026-06-16
   - Production validated: accept ✅ decline ✅ self-add blocked ✅ duplicate blocked ✅
 - **Bank linking**: Plaid Link flow, token exchange; tokens AES-256-GCM encrypted at rest (`is_token_encrypted = true` set on every new account)
 - **KYC**: Stripe Identity session creation, webhook handler updating `kyc_status` server-side, profile KYC card with live states
-- **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live
+- **Sandbox transfer readiness**: `transfer_intents` table with draft/blocked/ready/simulated/failed statuses; `POST /api/transfers/intent` creates intents with full security gates (auth, KYC verified, encrypted bank, velocity limits) but no real money movement; `/transfers` page for sandbox simulation; buttons enabled on profile only when KYC verified + encrypted account exists; audit logging on all attempts
+- **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table
 
 ---
 

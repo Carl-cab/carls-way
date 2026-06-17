@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 
 interface User {
   id: number; name: string; username: string; email: string; phone: string;
@@ -109,7 +110,8 @@ export default function ProfilePage() {
       ? 'Verify your identity before using transfers.'
       : !hasEncryptedAccount
       ? 'Re-link your bank account before using transfers.'
-      : 'Transfers are coming soon.';
+      : 'Transfers available (sandbox simulation only).'
+  const canTransfer = kycVerified && hasEncryptedAccount;
 
   const kycConfig: Record<string, { label: string; badge: string; badgeBg: string; avatarColor: string }> = {
     pending:        { label: 'Verification Pending',  badge: 'Pending',       badgeBg: 'bg-amber-100 text-amber-700',  avatarColor: 'text-amber-600' },
@@ -166,15 +168,24 @@ export default function ProfilePage() {
         </div>
         <div className="mt-4 space-y-2">
           <div className="flex gap-2">
+            {canTransfer ? (
+              <Link
+                href="/transfers?type=add_money"
+                className="flex-1 py-2 bg-red-700 text-white text-sm font-semibold rounded-lg hover:bg-red-800 transition text-center"
+              >
+                + Add Money
+              </Link>
+            ) : (
+              <button
+                disabled
+                className="flex-1 py-2 bg-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
+                title={transferHint}
+              >
+                + Add Money
+              </button>
+            )}
             <button
-              disabled
-              className="flex-1 py-2 bg-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
-              title={transferHint}
-            >
-              + Add Money
-            </button>
-            <button
-              disabled
+              disabled={!kycVerified || !hasEncryptedAccount}
               className="flex-1 py-2 border border-gray-200 text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
               title={transferHint}
             >
