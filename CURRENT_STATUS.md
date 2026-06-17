@@ -13,6 +13,7 @@ Last updated: 2026-06-16
 - **Activity feed**: Public feed (`/api/feed` returns `privacy='public'` transactions); History page with working `sent / received / pending` filter chips
 - **Notifications**: In-app notifications for friend requests, friend accept, payment received, money requested; unread badge in nav; `/notifications` page with mark-one / mark-all-read; click to navigate to related entity; 30-second polling in layout
 - **Public receipt view**: Non-parties can see that a transaction is public but cannot access the full receipt; receipt page shows friendly message explaining privacy
+- **Password reset**: Secure password reset flow via email; `POST /api/auth/forgot-password` (never reveals user existence), `POST /api/auth/reset-password` (validates token hash, single-use, 1-hour expiry); `/forgot-password` and `/reset-password` pages with full validation; login page has "Forgot password?" link; tokens are hashed (SHA-256) and stored with expiry
 - **Friends**: Full approval flow — send request (pending), incoming requests with Accept/Decline, sent requests, accepted friends list; **Send button** beside each accepted friend routes to `/send?to=<username>` with username pre-filled
   - Production validated: accept ✅ decline ✅ self-add blocked ✅ duplicate blocked ✅
 - **Bank linking**: Plaid Link flow, token exchange; tokens AES-256-GCM encrypted at rest (`is_token_encrypted = true` set on every new account)
@@ -68,6 +69,8 @@ Last updated: 2026-06-16
 | `STRIPE_SECRET_KEY` | Needs to be set |
 | `STRIPE_WEBHOOK_SECRET` | Needs to be set |
 | `NEXT_PUBLIC_APP_URL` | Needs to be set |
+| `RESEND_API_KEY` | Needs to be set |
+| `EMAIL_FROM` | Needs to be set |
 
 ---
 
