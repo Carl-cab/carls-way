@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import { createNotification } from '@/lib/notifications';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getAuthUser();
@@ -14,14 +15,27 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 
   // Only the recipient (friend_id) can accept
   const rows = await sql`
-    SELECT id FROM friends
+    SELECT id, user_id AS requester_id FROM friends
     WHERE id = ${friendshipId} AND friend_id = ${user.userId} AND status = 'pending'
   `;
   if (!rows[0]) return NextResponse.json({ error: 'Request not found or you are not the recipient' }, { status: 404 });
+
+  const requesterId = rows[0].requester_id as number;
 
   await sql`
     UPDATE friends SET status = 'accepted', updated_at = NOW()
     WHERE id = ${friendshipId}
   `;
+
+  // Notify the original requester that their request was accepted
+  await createNotification({
+    userId: requesterId,
+    type: 'friend_request_accepted',
+    title: 'Friend request accepted',
+    message: `@${user.username} accepted your friend request.`,
+    relatedEntityType: 'friendship',
+    relatedEntityId: friendshipId,
+  });
+
   return NextResponse.json({ success: true });
 }

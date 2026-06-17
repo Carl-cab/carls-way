@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 
+const POLL_INTERVAL_MS = 30_000;
+
 interface User {
   id: number;
   name: string;
@@ -31,11 +33,28 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     fetch('/api/me').then(r => r.json()).then(data => {
       if (data.id) setUser(data);
     });
+  }, [pathname]);
+
+  useEffect(() => {
+    function fetchUnread() {
+      fetch('/api/notifications')
+        .then(r => r.json())
+        .then(data => {
+          if (Array.isArray(data)) {
+            setUnreadCount(data.filter((n: { read_at: string | null }) => !n.read_at).length);
+          }
+        })
+        .catch(() => {});
+    }
+    fetchUnread();
+    const interval = setInterval(fetchUnread, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
   }, [pathname]);
 
   async function handleLogout() {
@@ -45,10 +64,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }
 
   const navItems = [
-    { href: '/feed', label: 'Feed', icon: '🏠' },
-    { href: '/history', label: 'Activity', icon: '📋' },
-    { href: '/friends', label: 'Friends', icon: '👥' },
-    { href: '/profile', label: 'Profile', icon: '👤' },
+    { href: '/feed', label: 'Feed', icon: '🏠', badge: 0 },
+    { href: '/history', label: 'Activity', icon: '📋', badge: 0 },
+    { href: '/notifications', label: 'Alerts', icon: '🔔', badge: unreadCount },
+    { href: '/friends', label: 'Friends', icon: '👥', badge: 0 },
+    { href: '/profile', label: 'Profile', icon: '👤', badge: 0 },
   ];
 
   const countryFlag = user?.country === 'US' ? '🇺🇸' : '🍁';
@@ -117,7 +137,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                 pathname === item.href ? 'text-red-700 font-semibold' : 'text-gray-500 hover:text-red-700'
               }`}
             >
-              <span className="text-xl">{item.icon}</span>
+              <span className="relative inline-block text-xl">
+                {item.icon}
+                {item.badge > 0 && (
+                  <span className="absolute -top-1 -right-1.5 bg-red-600 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5 leading-none">
+                    {item.badge > 99 ? '99+' : item.badge}
+                  </span>
+                )}
+              </span>
               {item.label}
             </Link>
           ))}
