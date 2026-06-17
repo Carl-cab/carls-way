@@ -21,18 +21,46 @@ export async function GET(
            t.fx_rate, t.fx_fee, t.sender_amount, t.receiver_amount,
            t.is_cross_border, t.payment_rail, t.estimated_settlement,
            t.privacy, t.created_at,
+           t.sender_id, t.receiver_id,
            s.username AS sender_username, s.name AS sender_name, s.avatar_color AS sender_avatar_color,
            r.username AS receiver_username, r.name AS receiver_name, r.avatar_color AS receiver_avatar_color
     FROM transactions t
     JOIN users s ON t.sender_id = s.id
     JOIN users r ON t.receiver_id = r.id
     WHERE t.id = ${txId}
-      AND (t.sender_id = ${user.userId} OR t.receiver_id = ${user.userId})
   `;
 
   if (!rows[0]) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
-  return NextResponse.json(rows[0]);
+
+  const tx = rows[0] as {
+    id: number; sender_id: number; receiver_id: number; privacy: string;
+    sender_username: string; sender_name: string; sender_avatar_color: string;
+    receiver_username: string; receiver_name: string; receiver_avatar_color: string;
+    type: string; status: string; amount: number; currency: string; note: string;
+    sender_currency: string; receiver_currency: string;
+    fx_rate: number | null; fx_fee: number | null;
+    sender_amount: number | null; receiver_amount: number | null;
+    is_cross_border: boolean; payment_rail: string;
+    estimated_settlement: string | null; created_at: string;
+  };
+
+  // User is sender or receiver: return full data
+  if (tx.sender_id === user.userId || tx.receiver_id === user.userId) {
+    return NextResponse.json(tx);
+  }
+
+  // User is not a party: check if transaction is public
+  if (tx.privacy === 'public') {
+    return NextResponse.json({
+      ...tx,
+      isPublicNonParty: true,
+    });
+  }
+
+  // Private transaction and user is not a party
+  return NextResponse.json({ error: 'Transaction not found' }, { status: 404 });
 }
+
 
 export async function PATCH(
   req: NextRequest,

@@ -49,7 +49,7 @@ export default function FeedPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/transactions?feed=true')
+    fetch('/api/feed')
       .then(r => r.json())
       .then(data => {
         setTransactions(Array.isArray(data) ? data : []);
