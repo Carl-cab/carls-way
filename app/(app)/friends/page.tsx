@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface User {
   id: number;
@@ -31,6 +32,7 @@ function Avatar({ name, color }: { name: string; color: string }) {
 }
 
 export default function FriendsPage() {
+  const router = useRouter();
   const [friends, setFriends] = useState<Friend[] | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<User[]>([]);
@@ -233,6 +235,12 @@ export default function FriendsPage() {
                 <p className="font-medium text-sm text-gray-800">{f.name}</p>
                 <p className="text-xs text-gray-400">@{f.username}{f.province && ` · ${f.province}`}</p>
               </div>
+              <button
+                onClick={() => router.push(`/send?to=${encodeURIComponent(f.username)}`)}
+                className="bg-red-700 hover:bg-red-800 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
+              >
+                Send
+              </button>
               <button
                 onClick={() => removeFriend(f.id)}
                 className="text-xs text-gray-400 hover:text-red-600 transition"
