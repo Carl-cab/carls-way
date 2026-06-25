@@ -2,10 +2,10 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "mcpServers": {
     "markitdown": {
-      "command": "pipx",
+      "command": "python",
       "args": [
-        "run",
-        "markitdown-mcp"
+        "-m",
+        "markitdown_mcp"
       ]
     }
   }

@@ -6,11 +6,16 @@ This project is configured to use the [markitdown-mcp](https://github.com/trsdn/
 
 ### Prerequisites
 - Python 3.x
-- `pipx` (for installing Python CLI applications)
 
-### Local Setup
+### Option 1: Using pip (Recommended)
 
-To install and enable markitdown-mcp on your local machine:
+```bash
+pip install markitdown-mcp
+```
+
+### Option 2: Using pipx
+
+If you prefer to use `pipx` for isolated Python applications:
 
 ```bash
 # Install the markitdown-mcp server via pipx
@@ -24,8 +29,20 @@ Once installed, Claude Code will automatically discover and use the MCP server v
 
 ## Configuration
 
-The `.claude/settings.json` file already contains the necessary MCP server configuration:
+The `.claude/settings.json` file already contains the necessary MCP server configuration (configured for pip installation):
 
+```json
+{
+  "mcpServers": {
+    "markitdown": {
+      "command": "python",
+      "args": ["-m", "markitdown_mcp"]
+    }
+  }
+}
+```
+
+If using pipx, update the configuration to:
 ```json
 {
   "mcpServers": {
