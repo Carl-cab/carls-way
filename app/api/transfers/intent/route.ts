@@ -43,7 +43,7 @@ export async function POST(req: Request) {
     const blocked = await checkVelocityLimit(user.userId, amount, 'transfer');
     if (blocked) {
       await sql`
-        INSERT INTO audit_logs (user_id, action, details)
+        INSERT INTO audit_logs (user_id, action, metadata)
         VALUES (${user.userId}, 'transfer_intent_blocked', ${JSON.stringify({ type, amount, currency, reason: 'velocity_limit' })})
       `;
       return NextResponse.json({ error: 'Transfer limit exceeded' }, { status: 429 });
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
 
     // Audit log
     await sql`
-      INSERT INTO audit_logs (user_id, action, details)
+      INSERT INTO audit_logs (user_id, action, metadata)
       VALUES (${user.userId}, 'transfer_intent_created', ${JSON.stringify({ transfer_id: transferIntent.id, type, amount, currency, status: 'draft' })})
     `;
 
