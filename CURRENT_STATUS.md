@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-26
+Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
 
 ---
 
@@ -71,13 +71,28 @@ Last updated: 2026-06-26
 
 - **Transfer provider architecture** (2026-06-26): Region-aware `TransferProvider` interface in `lib/transfers/`; `SandboxUSProvider` for US (simulates Plaid Transfer) and `SandboxCAProvider` for CA (simulates Canadian EFT); provider router in `lib/transfers/router.ts`; 3-step flow: `POST /api/transfers/intent` → `GET /api/transfers/[id]/review` → `POST /api/transfers/[id]/confirm`; `transfer_intents` extended with `provider_region`, `provider_name`, `execution_mode`, `consent_confirmed_at`, `idempotency_key`, `bank_account_id`; no money movement, no external API calls; lint clean, build clean
 
+## Ready for Production Deploy
+
+- ✅ **Passive audit ledger** (Phase A1 — review complete, bugs fixed)
+  - `ledger_entries` table defined and migration ready
+  - `createLedgerPair()` for same-currency (atomic via CTE)
+  - `createCrossBorderLedgerPair()` for cross-border (atomic via CTE) — FIX APPLIED
+  - Ledger entries created after successful P2P payments (non-blocking)
+  - `GET /api/ledger` (auth required, user-scoped)
+  - `GET /api/ledger/balance-check` (warning-only, no mutations)
+  - All SQL uses postgres.js tagged templates
+  - Lint ✅ Build ✅ TypeScript ✅
+
+---
+
 ## In Progress / Next
 
-1. **Run `/api/migrate` in production** — Adds new `transfer_intents` columns; required before 3-step flow works in production
-2. **Validate 3-step flow in production** — US and CA user paths; confirm regional consent language correct
-3. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`; register Stripe webhook
-4. **PlaidTransferProvider** — US live ACH; requires Plaid Link products updated to include `Transfer`; `reverseVelocity()` must be built first
-5. **CanadianEFTProvider** — CA live EFT; separate integration from Plaid ACH
+1. **Run `/api/migrate` in production** — Adds `ledger_entries` table + columns for audit log (safe, non-blocking)
+2. **Validate ledger in production** — Test same-currency and cross-border payments create ledger entries; verify `/api/ledger` and `/api/ledger/balance-check` work
+3. **Validate 3-step transfer flow in production** — US and CA user paths through intent → review → confirm (sandbox simulation)
+4. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`; register Stripe webhook
+5. **PlaidTransferProvider** — US live ACH; requires Plaid Link products updated to include `Transfer`; `reverseVelocity()` must be built first
+6. **CanadianEFTProvider** — CA live EFT; separate integration from Plaid ACH
 
 ---
 
@@ -101,7 +116,18 @@ Last updated: 2026-06-26
 
 ---
 
-## After Next Deploy
+## After `/api/migrate` Runs in Production
+
+1. **Ledger table created** — `ledger_entries` table is now live
+2. **Test same-currency payment** — Verify ledger entries created with balanced debit+credit
+3. **Test cross-border payment** — Verify both entries created atomically (sender currency debit, receiver currency credit)
+4. **Test GET /api/ledger** — Authenticated user sees only their own entries
+5. **Test GET /api/ledger/balance-check** — Should show zero mismatch for new transactions
+6. **Monitor for errors** — Check logs for any ledger creation failures (non-blocking, should not affect payments)
+
+---
+
+## After Stripe Webhook Setup
 
 Register Stripe webhook: `https://carloscab74.vercel.app/api/webhooks/stripe`
 - Events: `identity.verification_session.verified`, `identity.verification_session.requires_input`
