@@ -1,590 +1,624 @@
 # Manna — Banking Architecture
 
-> Authoritative reference for how money moves in and out of Manna. Covers the provider abstraction, current sandbox state, US and Canadian live integration plans, compliance obligations, and database schema. Update this document when any provider, route, or schema changes.
-
-Last updated: 2026-06-26
+> Engineering reference for the transfer subsystem. Covers the full lifecycle of a transfer from intent creation through settlement or failure, the provider abstraction layer, ledger model, webhook processing, and compliance obligations. Updated: 2026-06-26.
 
 ---
 
-## Contents
+## 1. Transfer Lifecycle
 
-1. [Principles](#1-principles)
-2. [Provider Abstraction](#2-provider-abstraction)
-3. [Transfer Flow — 3 Steps](#3-transfer-flow--3-steps)
-4. [Status State Machine](#4-status-state-machine)
-5. [Current State — Sandbox](#5-current-state--sandbox)
-6. [US Live Integration Plan — Plaid Transfer](#6-us-live-integration-plan--plaid-transfer)
-7. [Canadian Live Integration Plan](#7-canadian-live-integration-plan)
-8. [Database Schema](#8-database-schema)
-9. [Webhook Architecture](#9-webhook-architecture)
-10. [Velocity Limits](#10-velocity-limits)
-11. [Compliance Obligations](#11-compliance-obligations)
-12. [Launch Sequencing](#12-launch-sequencing)
-13. [Adding a New Provider](#13-adding-a-new-provider)
-14. [Environment Variables](#14-environment-variables)
+A transfer in Manna progresses through four ordered steps before money moves. Each step maps to a database status and one or more API calls.
 
----
+### Steps
 
-## 1. Principles
+| Step | API | Status set | Who triggers |
+|---|---|---|---|
+| 1. Intent | `POST /api/transfers/intent` | `draft` | User |
+| 2. Review | `GET /api/transfers/[id]/review` | (no change) | User |
+| 3. Confirm | `POST /api/transfers/[id]/confirm` | `ready` | User |
+| 4. Execute | (not yet wired to UI) | `processing` | System |
 
-These rules apply to every provider, current and future. No exceptions.
+**Step 1 — Intent creation**
 
-**Money safety**
-- Balance is never updated until a webhook confirms settlement. Never on `draft`, never on `processing`.
-- Balance updates use atomic SQL (`SET balance_cad = balance_cad + ${amount}`) — never read-modify-write in application code.
-- A failed or returned transfer must trigger `reverseVelocity()` to undo the velocity budget consumed at confirm time.
+The client sends `{ type, amount, currency, bank_account_id }`. The route:
+1. Authenticates the caller (`getAuthUser()`).
+2. Verifies KYC status is `verified`.
+3. Verifies the bank account exists, belongs to the user, and has `is_token_encrypted = true`.
+4. Calls `checkVelocityLimit()` — rejects if over limit but does **not** record yet.
+5. Looks up `users.country` to select the provider via `getTransferProvider(region)`.
+6. Calls `provider.createIntent()`, which inserts a row into `transfer_intents` with `status='draft'`.
 
-**Security gates — in order, every time**
-1. `getAuthUser()` — valid JWT required
-2. `kyc_status = 'verified'` — server-side check, never trusted from client
-3. `is_token_encrypted = true` on the bank account — `requireEncryptedBankToken()` from `lib/plaid.ts`
-4. `checkVelocityLimit()` — checked at intent creation, recorded at confirm
-5. Idempotency key on every real transfer call — prevents duplicate debits/credits on retry
+**Step 2 — Review**
 
-**Sandbox guard**
-- `executeTransfer()` throws on all sandbox providers. It is structurally impossible to accidentally initiate a live transfer while in sandbox mode.
-- `execution_mode` is stored on every `transfer_intents` row. Rows where `execution_mode = 'sandbox'` are never acted upon by any live provider.
+The client calls `GET /api/transfers/[id]/review`. No status change occurs. The route:
+1. Verifies ownership (`user_id = auth user`).
+2. Verifies `status = 'draft'` (returns 409 otherwise).
+3. Reads `provider_region` from the row to select the same provider used at creation.
+4. Calls `provider.reviewTransfer()`, which returns amount, bank account details, regional consent language, and settlement estimate.
 
-**Regional separation**
-- US users use US payment rails only (ACH). Never route a US user through Canadian EFT.
-- Canadian users use Canadian payment rails only (PAD/EFT). Never show ACH language to a Canadian user.
-- Region is determined from `users.country` at intent creation and stored in `transfer_intents.provider_region`. It cannot be changed after creation.
+The consent language is region-specific and never mixes rails (CA users never see ACH language).
+
+**Step 3 — Confirm**
+
+The client calls `POST /api/transfers/[id]/confirm`. The route:
+1. Verifies ownership.
+2. Calls `provider.confirmTransfer()`, which:
+   - Validates `status = 'draft'`.
+   - Sets `status = 'ready'`, `consent_confirmed_at = NOW()`.
+   - Writes an audit log entry.
+
+**Step 4 — Execute**
+
+Not yet triggered from the UI. When wired:
+1. Calls `provider.executeTransfer()`.
+2. On both sandbox providers, this throws — preventing accidental live calls.
+3. On a live provider, this submits the transfer to the payment rail and sets `status = 'processing'`.
+4. `recordVelocity()` is called at this step only — after the external API confirms submission.
+
+### Status State Machine
+
+```
+draft ──────────────────────────────────────────────────────── cancelled
+  │
+  │ POST /api/transfers/[id]/confirm
+  ▼
+ready ──────────────────────────────────────────────────────── cancelled
+  │
+  │ executeTransfer() [system / future]
+  ▼
+processing
+  │
+  ├── webhook: settled ──► settled   (balance updated, velocity recorded)
+  ├── webhook: failed ───► failed    (no balance change, velocity not consumed)
+  └── webhook: returned ─► returned  (balance corrected, reverseVelocity called)
+```
+
+Terminal states: `settled`, `failed`, `returned`, `cancelled`, `blocked`.
+
+`blocked` is set by `checkVelocityLimit()` when a user has exceeded their rolling limit. The intent is recorded for audit purposes but never proceeds to `ready`.
 
 ---
 
 ## 2. Provider Abstraction
 
-All money movement is behind the `TransferProvider` interface in `lib/transfers/types.ts`. Every provider — sandbox or live — implements the same five methods.
+All payment rail logic is isolated behind the `TransferProvider` interface. API routes never import provider classes directly — they call `getTransferProvider(region)` from the router.
 
+### Interface (`lib/transfers/types.ts`)
+
+```typescript
+export interface TransferProvider {
+  readonly providerName: ProviderName;
+  readonly providerRegion: ProviderRegion;
+  readonly executionMode: ExecutionMode;
+
+  createIntent(
+    userId: number,
+    bankAccountId: number,
+    type: TransferType,
+    amount: number,
+    currency: string,
+  ): Promise<CreateIntentResult>;
+
+  reviewTransfer(intentId: number, userId: number): Promise<ReviewResult>;
+
+  confirmTransfer(intentId: number, userId: number): Promise<ConfirmResult>;
+
+  executeTransfer(intentId: number, userId: number): Promise<never>;
+
+  handleWebhookEvent(rawPayload: string, signature: string): Promise<WebhookResult>;
+}
 ```
-TransferProvider (interface)
-├── createIntent()        → Insert draft intent. No external call. No balance change.
-├── reviewTransfer()      → Return review details and region-appropriate consent language.
-├── confirmTransfer()     → Record consent_confirmed_at. Set status='ready'. No external call.
-├── executeTransfer()     → Initiate real transfer. Live providers only. Sandbox throws.
-└── handleWebhookEvent()  → Process settlement/failure events. Live providers update status + balance.
+
+`executeTransfer` is typed as `Promise<never>` — every call must either complete the transfer (live provider) or throw (sandbox). There is no path where it silently returns without action.
+
+### Provider Files
+
+| File | Class | Region | Mode |
+|---|---|---|---|
+| `lib/transfers/sandbox-us.ts` | `SandboxUSProvider` | US | sandbox |
+| `lib/transfers/sandbox-ca.ts` | `SandboxCAProvider` | CA | sandbox |
+| `lib/transfers/plaid-transfer.ts` | `PlaidTransferProvider` | US | live (not yet built) |
+| `lib/transfers/canadian-eft.ts` | `CanadianEFTProvider` | CA | live (not yet built) |
+
+### Router (`lib/transfers/router.ts`)
+
+```typescript
+export function getTransferProvider(region: UserRegion): TransferProvider {
+  if (region === 'US') return new SandboxUSProvider();
+  return new SandboxCAProvider();
+}
+
+export function regionFromCountry(country: string): UserRegion {
+  return country === 'US' ? 'US' : 'CA';
+}
 ```
 
-**Provider routing** (`lib/transfers/router.ts`):
+When a live provider is ready, swap it in here behind an environment gate:
 
+```typescript
+if (region === 'US') {
+  return process.env.USE_LIVE_PLAID === 'true'
+    ? new PlaidTransferProvider()
+    : new SandboxUSProvider();
+}
 ```
-getTransferProvider(region)
-  'US'  → SandboxUSProvider     today
-          PlaidTransferProvider  when PLAID_TRANSFER_LIVE=true
-  'CA'  → SandboxCAProvider     today
-          CanadianEFTProvider    when CA_EFT_LIVE=true
-```
 
-To add a live provider: implement `TransferProvider` in a new file, add an env-gated condition to `router.ts`. The API routes and UI do not change.
+The rest of the codebase — API routes, UI, audit logging — does not change when swapping providers.
 
-**File locations:**
+### Provider Contract Rules
 
-| File | Purpose |
-|---|---|
-| `lib/transfers/types.ts` | `TransferProvider` interface and all shared types |
-| `lib/transfers/router.ts` | Maps user region → provider instance |
-| `lib/transfers/sandbox-us.ts` | US sandbox (simulates Plaid Transfer ACH) |
-| `lib/transfers/sandbox-ca.ts` | CA sandbox (simulates Canadian EFT) |
-| `lib/transfers/plaid-transfer.ts` | *(future)* US live ACH via Plaid Transfer |
-| `lib/transfers/canadian-eft.ts` | *(future)* CA live: Stripe ACSS + VoPay Interac |
+- `providerName`, `providerRegion`, and `executionMode` are `readonly` — set once at class definition, never changed at runtime.
+- `provider_region` is written to `transfer_intents` at intent creation and never updated. The same provider class used at creation is re-selected for review and confirm by reading this column.
+- CA providers must never generate ACH language. US providers must never generate EFT language.
+- Sandbox providers must throw in `executeTransfer()` with a message identifying the sandbox class.
 
 ---
 
-## 3. Transfer Flow — 3 Steps
+## 3. Ledger Model
 
-Every transfer — regardless of region, provider, or direction — follows this sequence:
+Manna uses a dual-currency ledger. Each user holds two balances in the `users` table.
 
-```
-Step 1: POST /api/transfers/intent
-  ├── Auth gate
-  ├── KYC gate
-  ├── Encrypted bank account gate
-  ├── Velocity check (not recorded yet)
-  ├── provider.createIntent()
-  └── Returns: { intent_id, status: 'draft', provider_name, provider_region, execution_mode }
+### Balance Columns
 
-Step 2: GET /api/transfers/:id/review
-  ├── Auth gate
-  ├── Ownership check (intent.user_id = auth user)
-  ├── Status check (must be 'draft')
-  ├── provider.reviewTransfer()
-  └── Returns: { review: { amount, currency, bank_account, consent_language, settlement_estimate, ... } }
-
-Step 3: POST /api/transfers/:id/confirm
-  ├── Auth gate
-  ├── Ownership check
-  ├── Status check (must be 'draft')
-  ├── provider.confirmTransfer()
-  │     └── Records consent_confirmed_at, sets status='ready'
-  └── Returns: { status: 'ready', message }
-
-Step 4 (live only): POST /api/transfers/:id/execute    ← NOT YET BUILT
-  ├── Auth gate
-  ├── Status check (must be 'ready')
-  ├── provider.executeTransfer()
-  │     ├── Calls real payment API
-  │     ├── Sets status='processing', stores provider_reference_id
-  │     └── Records velocity (recordVelocity called here, not at step 1)
-  └── Returns: { status: 'processing', provider_reference_id }
-```
-
-**UI flow** (`app/(app)/transfers/page.tsx`):
-```
-Form → "Continue to Review" → Review screen with consent language → "Confirm Transfer" → Confirmed screen
-```
-
-The `/transfers` page reads `?type=add_money` or `?type=cash_out` from the query string, set by the "+ Add Money" and "Cash Out" profile page buttons.
-
----
-
-## 4. Status State Machine
-
-```
-                     ┌──────────────────────────────┐
-                     │          draft               │  ← created at Step 1
-                     └───────────────┬──────────────┘
-                                     │ confirmTransfer()
-                     ┌───────────────▼──────────────┐
-                     │          ready               │  ← consent recorded
-                     └───────────────┬──────────────┘
-                                     │ executeTransfer() [live only]
-                     ┌───────────────▼──────────────┐
-                     │        processing            │  ← real transfer initiated
-                     └───────┬───────────┬──────────┘
-                             │           │
-              ┌──────────────▼──┐    ┌───▼──────────────┐
-              │    settled      │    │     failed        │
-              │ balance updated │    │ failure_reason set│
-              └─────────────────┘    └───────────────────┘
-                                             │
-                                     ┌───────▼──────────┐
-                                     │    returned      │  ← NSF, account closed, etc.
-                                     │ balance reversed │
-                                     └──────────────────┘
-
-Special:
-  draft → blocked     (authorization declined at execute time)
-  draft → cancelled   (user cancels before confirm)
-```
-
----
-
-## 5. Current State — Sandbox
-
-**Both providers are `execution_mode = 'sandbox'` today.** No money moves. No external API calls.
-
-| Provider | Region | Add Money | Cash Out | Balance change |
-|---|---|---|---|---|
-| `SandboxUSProvider` | US | ✅ simulated | ✅ simulated | Never |
-| `SandboxCAProvider` | CA | ✅ simulated | ✅ simulated | Never |
-
-Sandbox consent language:
-- US: "This is a US transfer simulation — no money will move."
-- CA: "This is a sandbox simulation — no money will move." (Canadian EFT framing, never ACH)
-
-To validate sandbox in production, run the 3-step flow as a US user and separately as a CA user. Confirm `transfer_intents` row shows `execution_mode = 'sandbox'` and balance is unchanged after each step.
-
----
-
-## 6. US Live Integration Plan — Plaid Transfer
-
-**Provider:** Plaid Transfer API (ACH debit and credit)  
-**File to create:** `lib/transfers/plaid-transfer.ts`  
-**Activation:** Set `PLAID_TRANSFER_LIVE=true` in Vercel env, swap in `router.ts`
-
-### Prerequisites (all required before writing code)
-
-- [ ] Add `Products.Transfer` to `PLAID_PRODUCTS` in `lib/plaid.ts` and `app/api/plaid/create-link-token/route.ts`
-- [ ] All US users must re-link their bank accounts (existing accounts lack the Transfer product)
-- [ ] `PLAID_WEBHOOK_SECRET` set in Vercel (for webhook signature verification)
-- [ ] Plaid webhook URL registered: `https://carloscab74.vercel.app/api/webhooks/plaid`
-- [ ] `reverseVelocity()` function built in `lib/auth.ts` before any live transfers go live
-
-### Execute flow (Add Money — ACH debit)
-
-```
-provider.executeTransfer(intentId, userId)
-  1. requireEncryptedBankToken(userId, bankAccountId)     ← decrypts Plaid token
-  2. plaidClient.transferAuthorizationCreate({
-       access_token, account_id, type: 'debit',
-       network: 'ach', amount, ach_class: 'ppd',
-       user: { legal_name }, idempotency_key
-     })
-  3. If authorization.decision !== 'authorized': set status='blocked', store rationale, return
-  4. plaidClient.transferCreate({
-       access_token, account_id, authorization_id,
-       type: 'debit', network: 'ach', amount,
-       description: 'Manna Add Money', idempotency_key
-     })
-  5. UPDATE transfer_intents SET
-       status = 'processing',
-       provider_reference_id = plaid_transfer_id,
-       plaid_authorization_id = authorization_id
-  6. recordVelocity(userId, amount, currency)
-```
-
-### Execute flow (Cash Out — ACH credit)
-
-Same as above with `type: 'credit'`. Plaid Transfer supports both directions with the same API.
-
-### Settlement timing
-
-- ACH debit (Add Money): T+1 to T+3 business days
-- ACH credit (Cash Out): T+1 business day
-
-### Return codes to handle
-
-| Plaid event | R-code examples | Action |
+| Column | Type | Currency |
 |---|---|---|
-| `returned` | R01 NSF, R02 Account Closed | `status='returned'`; notify user; no balance change |
-| `failed` | API-level failure | `status='failed'`; log; notify user |
-| `cancelled` | Cancelled before settlement | `status='cancelled'` |
+| `balance_cad` | `NUMERIC(12,2)` | Canadian dollars |
+| `balance_usd` | `NUMERIC(12,2)` | US dollars |
 
-### New columns required
+The legacy `balance` column must never be used in new code. It predates the dual-currency migration and contains stale values.
 
-```sql
-ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS plaid_transfer_id TEXT;
-ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS plaid_authorization_id TEXT;
-```
+### Balance Update Rules
 
----
+1. **Atomic SQL only.** Balances are updated in a single SQL statement using relative arithmetic:
+   ```sql
+   UPDATE users SET balance_cad = balance_cad + ${amount} WHERE id = ${userId}
+   ```
+   Never: read the balance into application memory, add to it, then write back. That pattern creates a race condition under concurrent requests.
 
-## 7. Canadian Live Integration Plan
+2. **No optimistic updates.** Balances are only modified when a webhook confirms settlement. Pending or processing transfers do not touch balances.
 
-**Providers (two, for different directions):**
+3. **Cross-border transfers** use `buildFxQuote()` from `lib/fx.ts` to get a live Wise rate before debiting the sender. The quote's `fx_rate`, `fx_fee`, `sender_amount`, and `receiver_amount` are recorded on the `transactions` row.
 
-### Add Money — Stripe ACSS Debit (Pre-Authorized Debit / PAD)
+4. **Transfer intents do not modify balances.** Creating, reviewing, or confirming a `transfer_intent` row has zero effect on `balance_cad` or `balance_usd`. Balances change only on settled webhook events.
 
-**Why Stripe:** Already integrated (`lib/stripe.ts`). Best-in-class mandate handling. PAD Rule H1 compliance absorbed by Stripe. Webhook model matches existing Stripe KYC handler.
+### Seed Balance
 
-**Limitation:** ACSS is pull-only. Cannot push to bank accounts.
+New users receive a seed balance at registration: $100 CAD for CA users, $100 USD for US users. This is set directly in the INSERT during registration and is not a transfer.
 
-**File to create:** Route-specific logic inside `lib/transfers/canadian-eft.ts` for `type = 'add_money'`
+### Transaction Ledger
 
-**Mandate requirement (PAD Rule H1):**  
-A signed Pre-Authorized Debit mandate must be collected before the first debit. Stripe hosts this flow. The mandate must include: amount or amount range, frequency, institution name, transit/institution/account numbers, user's right to cancel within 10 business days of first debit.
+The `transactions` table records every P2P payment. It is append-only — rows are never updated after creation except to change `status` (pending → completed / declined). Cross-border transactions record:
 
-**Execute flow:**
-```
-1. Ensure PAD mandate exists for this bank account (check pad_mandate_id column)
-   If not: create Stripe SetupIntent with payment_method_types: ['acss_debit']
-           collect mandate via Stripe Elements hosted flow
-           store mandate ID in bank_accounts.pad_mandate_id
-2. Create Stripe PaymentIntent:
-     amount (in cents), currency: 'cad',
-     payment_method_types: ['acss_debit'],
-     payment_method: stripe_pm_id,
-     mandate: pad_mandate_id,
-     confirm: true,
-     idempotency_key
-3. UPDATE transfer_intents SET
-     status = 'processing',
-     provider_reference_id = stripe_payment_intent_id,
-     provider_rail = 'stripe_acss'
-4. recordVelocity(userId, amount, 'CAD')
-```
-
-**Settlement timing:** T+3–5 business days for first debit; T+2 for subsequent with established mandate.
-
-**Webhook:** `payment_intent.succeeded` → `status='settled'`, update `balance_cad`. `payment_intent.payment_failed` → `status='failed'` or `status='returned'` depending on failure code.
+- `fx_rate` — exchange rate at time of transfer
+- `fx_fee` — Wise transfer fee
+- `sender_amount` / `sender_currency`
+- `receiver_amount` / `receiver_currency`
+- `is_cross_border` — boolean flag
+- `payment_rail` — e.g. `wise`
+- `estimated_settlement` — ISO timestamp from Wise quote
 
 ---
 
-### Cash Out — VoPay (Interac e-Transfer preferred, EFT credit fallback)
+## 4. Webhook Processing
 
-**Why VoPay:** Only startup-accessible provider offering both Interac e-Transfer API and EFT credit. Interac is near-instant for Cash Out (vs. T+1–3 for EFT credit) — a significant UX advantage for Canadian users.
+Webhooks are the authoritative signal for transfer outcomes. No transfer status should change without a verified webhook event.
 
-**File to create:** Route-specific logic inside `lib/transfers/canadian-eft.ts` for `type = 'cash_out'`
-
-**Execute flow (Interac — preferred):**
-```
-1. POST https://api.vopay.com/api/1/eft/fund-account (or Interac endpoint)
-   Params: AccountNumber, InstitutionNumber, TransitNumber,
-           Amount, Currency: 'CAD',
-           ClientReferenceNumber: idempotency_key,
-           InteracEnabled: true
-2. Store VoPay transaction ID as provider_reference_id
-3. UPDATE transfer_intents SET status='processing', provider_rail='vopay_interac'
-4. recordVelocity(userId, amount, 'CAD')
-```
-
-**Execute flow (EFT credit — fallback if Interac unavailable):**  
-Same call with `InteracEnabled: false`. Settlement T+1 business day.
-
-**Settlement timing:**
-- Interac e-Transfer: minutes to 30 minutes
-- EFT credit: T+1 business day
-
-**Return codes:** VoPay uses 900-series Canadian EFT return codes. 905 = NSF, 903 = Account Closed, 914 = Stop Payment. Webhook delivers `TransactionStatus: Declined` with return code. Action: `status='returned'`, reverse balance if any was pre-applied (it should not be — see Principle 1).
-
-### New columns required for Canadian live
-
-```sql
-ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS provider_rail TEXT;
-ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS pad_mandate_id TEXT;
-ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS pad_mandate_accepted_at TIMESTAMPTZ;
-ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS interac_reference_id TEXT;
-
-ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS pad_mandate_id TEXT;
-ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS pad_mandate_accepted_at TIMESTAMPTZ;
-ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS stripe_payment_method_id TEXT;
-```
-
----
-
-## 8. Database Schema
-
-### `transfer_intents` — current columns
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | SERIAL | Primary key |
-| `user_id` | INTEGER | FK → users.id |
-| `bank_account_id` | INTEGER | FK → bank_accounts.id; set at intent creation |
-| `type` | TEXT | `add_money` or `cash_out` |
-| `amount` | REAL | Transfer amount in the specified currency |
-| `currency` | TEXT | `CAD` or `USD` |
-| `status` | TEXT | See state machine above |
-| `provider_region` | TEXT | `US` or `CA`; set at creation, immutable |
-| `provider_name` | TEXT | `sandbox_us`, `sandbox_ca`, `plaid_transfer`, `canadian_eft` |
-| `execution_mode` | TEXT | `sandbox` or `live` |
-| `provider_reference_id` | TEXT | External transfer ID (Plaid transfer ID, Stripe PI ID, VoPay tx ID) |
-| `failure_reason` | TEXT | Human-readable failure description |
-| `consent_confirmed_at` | TIMESTAMPTZ | Timestamp user confirmed consent language |
-| `idempotency_key` | TEXT | Unique key per intent; prevents duplicate API calls on retry |
-| `created_at` | TIMESTAMPTZ | |
-| `updated_at` | TIMESTAMPTZ | |
-
-### `transfer_intents` — planned columns (added when live providers built)
-
-| Column | Type | Notes |
-|---|---|---|
-| `provider_rail` | TEXT | `stripe_acss`, `vopay_eft`, `vopay_interac`, `plaid_transfer` |
-| `plaid_transfer_id` | TEXT | Plaid's transfer object ID |
-| `plaid_authorization_id` | TEXT | Plaid's authorization ID |
-| `pad_mandate_id` | TEXT | Stripe mandate ID for ACSS debit |
-| `pad_mandate_accepted_at` | TIMESTAMPTZ | Mandate acceptance timestamp |
-| `interac_reference_id` | TEXT | VoPay Interac reference number |
-
-### `bank_accounts` — planned columns
-
-| Column | Type | Notes |
-|---|---|---|
-| `pad_mandate_id` | TEXT | Stripe mandate ID for this account |
-| `pad_mandate_accepted_at` | TIMESTAMPTZ | When mandate was accepted |
-| `stripe_payment_method_id` | TEXT | Stripe PM ID created during mandate setup |
-
-### `plaid_transfer_events` — planned new table
-
-```sql
-CREATE TABLE plaid_transfer_events (
-  id SERIAL PRIMARY KEY,
-  plaid_event_id TEXT UNIQUE NOT NULL,   -- prevents reprocessing on webhook retry
-  plaid_transfer_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  raw_payload JSONB NOT NULL,
-  processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-)
-```
-
-Store every raw Plaid webhook event before processing. Enables safe reprocessing if the handler crashes mid-execution.
-
----
-
-## 9. Webhook Architecture
-
-### Pattern (same for all providers)
+### Processing Pipeline
 
 ```
 POST /api/webhooks/<provider>
-  1. Read raw body as text (required for signature verification)
-  2. Verify signature header using provider-specific secret
-  3. If signature invalid: return 400, log, do not process
-  4. Parse event
-  5. INSERT raw event into audit table (idempotency guard)
-  6. Match event to transfer_intent via provider_reference_id
-  7. Apply state transition
-  8. Return 200 always — providers retry on non-200; log errors internally
+  │
+  ├── 1. Read raw body (before JSON.parse) — required for signature verification
+  ├── 2. Verify signature (provider-specific HMAC or JWT)
+  │       └── 400 if invalid — do not process
+  ├── 3. Parse event type and transfer reference ID
+  ├── 4. Idempotency check — have we processed this event ID before?
+  │       └── 200 if duplicate — do not process again
+  ├── 5. Look up transfer_intents row by provider_reference_id
+  │       └── Log + 200 if not found (unknown transfer)
+  ├── 6. Verify current status allows the transition
+  │       └── Log + 200 if status is already terminal
+  ├── 7. Execute state transition (settled / failed / returned)
+  ├── 8. If settled: update balance atomically, record velocity
+  ├── 9. If returned: reverse balance atomically, call reverseVelocity()
+  ├── 10. Create notification for user
+  └── 11. Return 200 — always (see Retry Strategy)
 ```
 
-### Existing webhooks
+### Stripe Webhook (KYC)
 
-| Route | Provider | Events handled |
-|---|---|---|
-| `POST /api/webhooks/stripe` | Stripe | `identity.verification_session.verified`, `identity.verification_session.requires_input` |
+The existing Stripe webhook at `POST /api/webhooks/stripe` handles KYC events only:
+- `identity.verification_session.verified` → set `kyc_status = 'verified'`
+- `identity.verification_session.requires_input` → set `kyc_status = 'rejected'`, store `kyc_rejection_reason`
 
-### Planned webhooks
+Signature verification uses `stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET)`. The raw body must be read before any JSON parsing — use `req.text()` not `req.json()`.
 
-| Route | Provider | Events to handle |
-|---|---|---|
-| `POST /api/webhooks/plaid` | Plaid Transfer | `TRANSFER_EVENTS_UPDATE` → `settled`, `failed`, `returned`, `cancelled` |
-| `POST /api/webhooks/stripe` (extended) | Stripe ACSS | `payment_intent.succeeded`, `payment_intent.payment_failed`, `mandate.updated` |
-| `POST /api/webhooks/vopay` | VoPay | Transfer status updates, Interac delivery confirmations, return events |
+### Plaid Webhook (future — transfer events)
 
-### Balance update rule
+Plaid sends transfer events to a configured webhook URL. Each event includes:
+- `webhook_type: 'TRANSFER'`
+- `webhook_code: 'TRANSFER_EVENTS_UPDATE'`
+- `transfer_id`: Plaid's transfer reference
 
-**Only apply balance changes inside webhook handlers, on settlement events, never before.**
+On receipt, call `plaid.transferEventSync()` to pull new events since the last cursor. Each event has an `event_type` field (`settled`, `failed`, `returned`, `swept`, etc.).
+
+Store the Plaid `event_id` in a `plaid_transfer_events` table before processing to prevent duplicate handling.
+
+---
+
+## 5. Settlement Flow
+
+Settlement is triggered by a provider webhook confirming that funds have cleared.
+
+### On `settled` event
+
+```
+1. Verify webhook signature
+2. Idempotency check on event_id
+3. Match transfer_intents row by provider_reference_id
+4. Verify status = 'processing'
+5. Atomic balance update:
+   - add_money: balance_cad += amount  (or balance_usd for US)
+   - cash_out: no balance change (funds left the account at execute)
+6. Set transfer_intents.status = 'settled'
+7. recordVelocity(userId, amount)
+8. Write audit_log entry
+9. Create notification: "Your transfer of $X has settled"
+10. Return 200
+```
+
+For `add_money`, the user's balance increases when funds clear from their bank. For `cash_out`, the balance was already debited at execute time — no additional balance change on settlement.
+
+### Settlement Timing
+
+| Rail | Typical settlement |
+|---|---|
+| Plaid Transfer (ACH) | 1–3 business days |
+| Stripe ACSS (Canadian debit) | 2–5 business days |
+| VoPay Interac e-Transfer | Minutes to hours |
+| Sandbox | Immediate (simulated) |
+
+Settlement estimates are returned in `reviewTransfer()` as human-readable strings. They are informational only — never used to trigger balance changes.
+
+---
+
+## 6. Reversal Flow
+
+Reversals occur when a settled transfer is clawed back — typically due to NSF (non-sufficient funds) or a bank dispute.
+
+### On `returned` event
+
+```
+1. Verify webhook signature
+2. Idempotency check on event_id
+3. Match transfer_intents row
+4. Verify status = 'settled' (only settled transfers can be returned)
+5. Reverse balance:
+   - add_money reversal: balance_cad -= amount  (funds were never real)
+   - cash_out reversal: balance_cad += amount   (funds came back)
+6. Set transfer_intents.status = 'returned'
+7. Store failure_reason (bank return code if available)
+8. reverseVelocity(userId, amount)  ← not yet built
+9. Write audit_log entry
+10. Create notification: "Your transfer of $X was returned: <reason>"
+11. Return 200
+```
+
+### `reverseVelocity()` — Not Yet Built
+
+`reverseVelocity(userId, amount)` must be implemented in `lib/auth.ts` before any live transfer goes to production. Without it, returned transfers permanently consume velocity budget for the rolling window period.
+
+The function should decrement the rolling totals in `velocity_checks` by the reversed amount, not below zero:
+
+```sql
+UPDATE velocity_checks
+SET hourly_amount  = GREATEST(0, hourly_amount  - ${amount}),
+    daily_amount   = GREATEST(0, daily_amount   - ${amount}),
+    weekly_amount  = GREATEST(0, weekly_amount  - ${amount})
+WHERE user_id = ${userId}
+```
+
+### Balance Floor
+
+Balance updates must never push a user below zero. Add a check before decrementing:
+
+```sql
+UPDATE users
+SET balance_cad = balance_cad - ${amount}
+WHERE id = ${userId} AND balance_cad >= ${amount}
+RETURNING balance_cad
+```
+
+If the RETURNING clause returns no rows, the debit was rejected. This can happen during reversals if the user has spent the deposited funds before the bank return arrives.
+
+---
+
+## 7. Retry Strategy
+
+### Webhook Retries (Inbound)
+
+Always return HTTP 200 to the payment provider, even if internal processing fails. If a non-200 is returned, the provider will retry — potentially many times — causing duplicate processing.
+
+The correct pattern:
+```typescript
+try {
+  await processWebhookEvent(event);
+} catch (err) {
+  await logFailedWebhookEvent(event, err);  // store for manual recovery
+}
+return NextResponse.json({ received: true }, { status: 200 });
+```
+
+Failed webhook events stored for manual recovery must include: raw payload, event_id, provider, error message, timestamp.
+
+### API Call Retries (Outbound)
+
+When calling Plaid, Wise, or Stripe APIs, use exponential backoff with jitter:
+- Attempt 1: immediate
+- Attempt 2: 1s delay
+- Attempt 3: 2s delay
+- Attempt 4: 4s delay
+- Give up after 4 attempts; set `status = 'failed'` on the intent
+
+Only retry on transient errors (5xx, network timeout, rate limit 429). Never retry on 4xx client errors — those indicate a data problem that will not resolve on retry.
+
+### Idempotency on Retry
+
+All outbound API calls use the `idempotency_key` stored on the `transfer_intents` row. On retry:
+- Plaid Transfer: pass `idempotency_key` in the request body
+- Stripe: pass as `Idempotency-Key` header
+- Wise: pass as `X-idempotence-uuid` header
+
+The provider deduplicates and returns the same result for repeated calls with the same key.
+
+---
+
+## 8. Idempotency
+
+Idempotency prevents duplicate transfers when a client retries a request or a webhook fires more than once.
+
+### Transfer Intent Idempotency Key
+
+Every `transfer_intents` row has an `idempotency_key` set at creation:
 
 ```typescript
-// Correct — atomic, no TOCTOU race
-await sql`
-  UPDATE users
-  SET balance_cad = balance_cad + ${amount}, updated_at = NOW()
-  WHERE id = ${userId}
-`;
-
-// Wrong — race condition under concurrent transfers
-const user = await getUser(userId);
-await updateUser(userId, { balance_cad: user.balance_cad + amount });
+const idempotencyKey = `${region}_${userId}_${Date.now()}`;
 ```
 
----
+This key is passed to the payment provider when `executeTransfer()` is called. If the call is retried (e.g. network timeout, server restart), the provider recognizes the key and returns the existing transfer instead of creating a new one.
 
-## 10. Velocity Limits
+### Webhook Event Deduplication
 
-Defined in `lib/auth.ts`. Checked at intent creation. Recorded at execute (not at confirm, not at intent).
+Payment providers may deliver the same webhook event more than once. Before processing any event, check whether the `event_id` has already been handled.
 
-| User tier | Hourly | Daily | Daily count | Weekly |
-|---|---|---|---|---|
-| Unverified (`kyc_status != 'verified'`) | $500 | $1,000 | 5 | $2,500 |
-| KYC Verified | $5,000 | $10,000 | 25 | $25,000 |
+**Schema (to be added to `initializeSchema()` and `/api/migrate`):**
+```sql
+CREATE TABLE IF NOT EXISTS provider_webhook_events (
+  id           SERIAL PRIMARY KEY,
+  provider     TEXT NOT NULL,
+  event_id     TEXT NOT NULL,
+  event_type   TEXT NOT NULL,
+  processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (provider, event_id)
+);
+```
 
-**On failed or returned transfer:** Call `reverseVelocity(userId, amount, currency)` *(not yet built)* to deduct the recorded amount from the rolling window. Without this, failed transfers permanently consume velocity budget until the window resets.
+**Processing:**
+```typescript
+const existing = await sql`
+  INSERT INTO provider_webhook_events (provider, event_id, event_type)
+  VALUES (${provider}, ${eventId}, ${eventType})
+  ON CONFLICT (provider, event_id) DO NOTHING
+  RETURNING id
+`;
+if (existing.length === 0) {
+  return NextResponse.json({ received: true, duplicate: true });
+}
+```
 
-**`reverseVelocity()` must be built before any live transfer goes to production.**
+Using `ON CONFLICT DO NOTHING` with `RETURNING` makes the deduplication check atomic — no race condition if two webhook deliveries arrive simultaneously.
 
----
+### Client-Side Idempotency
 
-## 11. Compliance Obligations
-
-### FINTRAC (Canada — applies immediately upon handling CAD)
-
-Manna must register as a Money Services Business (MSB) with FINTRAC before any live Canadian money movement.
-
-- **Registration:** fintrac-canafe.gc.ca — allow 4–8 weeks
-- **Obligations once registered:** Large cash transaction reports (≥$10,000 CAD), suspicious transaction reports, record-keeping (5 years), KYC on all clients, compliance program documentation
-- **Trigger:** Registration is required as soon as Manna transmits or receives money on behalf of clients in Canada, even in test/beta. Do not defer this.
-
-### Payments Canada — PAD Rule H1 (Canadian debit)
-
-Every PAD (Pre-Authorized Debit) requires:
-- A signed mandate from the user before the first debit
-- Mandate must state: amount or range, frequency, institution name, user's right to cancel within 10 business days of first debit
-- User may request a copy of the mandate at any time
-- Stripe ACSS Debit handles mandate collection and storage; Manna must not bypass this
-
-### FinCEN / US regulations (US — applies if US users transmit money)
-
-- Money Transmitter License (MTL) required in most US states for money transmission
-- FinCEN MSB registration required
-- This is separate from Plaid Transfer integration and is required at the company/product level
-- Consult legal counsel before US live launch
-
-### KYC (both regions)
-
-- `kyc_status = 'verified'` (Stripe Identity) is required before any transfer
-- This is enforced server-side in every transfer route — never bypassed
-- KYC records must be retained per FINTRAC (5 years CA) and FinCEN (5 years US) requirements
-
-### Velocity limits as AML controls
-
-The velocity limits in `lib/auth.ts` also serve as anti-money-laundering controls. They must not be removed or raised without compliance review. They are not just rate limits.
+The transfer UI disables the Confirm button after the first click and shows a loading state. This prevents accidental double-submits, but the server must also guard against them via idempotency — UI safeguards are not sufficient on their own.
 
 ---
 
-## 12. Launch Sequencing
+## 9. Failure Recovery
 
-### Phase 1 — Current (complete)
+Each failure state has a defined recovery path.
 
-- Sandbox transfer layer live in production
-- 3-step flow (intent → review → confirm) validated for US and CA users
-- KYC verified (Stripe Identity) live in production
-- No real money movement
+### `failed` — Provider rejected the transfer before processing
 
-### Phase 2 — US Live ACH (next)
+**Cause:** Invalid account number, account type mismatch, provider validation error.  
+**Balance effect:** None (transfer was rejected before funds moved).  
+**User action:** Check bank account details, re-link if necessary, create a new intent.  
+**Recovery:** No automated recovery. User must initiate a new intent.
 
-Prerequisites before writing a line of live code:
-1. Add `Products.Transfer` to Plaid Link products
-2. All existing US users re-link bank accounts
-3. `PLAID_WEBHOOK_SECRET` set in Vercel
-4. Plaid webhook URL registered
-5. `reverseVelocity()` built in `lib/auth.ts`
-6. FinCEN MSB registration status confirmed with legal
+### `returned` — Funds were accepted then clawed back
 
-Implementation:
-1. Create `lib/transfers/plaid-transfer.ts` implementing `TransferProvider`
-2. Create `POST /api/transfers/[id]/execute` route
-3. Create `POST /api/webhooks/plaid` route
-4. Create `plaid_transfer_events` table
-5. Add `plaid_transfer_id`, `plaid_authorization_id` columns to `transfer_intents`
-6. Set `PLAID_TRANSFER_LIVE=true` in Vercel (env-gate in `router.ts`)
-7. Validate in Plaid sandbox environment end-to-end before production
+**Cause:** NSF, account closed, fraud hold.  
+**Balance effect:** Reversal applied (see Section 6). `reverseVelocity()` called.  
+**User action:** Resolve issue with bank, re-link if account is closed, try again.  
+**Recovery:** No automated re-submission. A returned transfer is final.
 
-### Phase 3 — Canadian Live (parallel development, after US live)
+### `blocked` — Velocity limit exceeded
 
-Prerequisites:
-1. FINTRAC MSB registration completed
-2. Stripe ACSS enabled on Stripe account (may require Stripe contact)
-3. VoPay account approved and Interac e-Transfer enabled
-4. `pad_mandate_id` columns added to `bank_accounts`
-5. `reverseVelocity()` already built (Phase 2)
+**Cause:** User exceeded hourly, daily, or weekly transfer volume limit.  
+**Balance effect:** None.  
+**User action:** Wait for the window to expire, or contact support for a limit review.  
+**Recovery:** Automatic — limit windows expire. No manual intervention needed.
 
-Implementation:
-1. Create `lib/transfers/canadian-eft.ts` implementing `TransferProvider`
-   - `add_money`: Stripe ACSS — PAD mandate collection + PaymentIntent
-   - `cash_out`: VoPay Interac e-Transfer (EFT credit fallback)
-2. Extend `POST /api/webhooks/stripe` to handle ACSS `payment_intent.*` events
-3. Create `POST /api/webhooks/vopay` route
-4. Add `provider_rail`, `pad_mandate_id`, `interac_reference_id` columns to `transfer_intents`
-5. Set `CA_EFT_LIVE=true` in Vercel (env-gate in `router.ts`)
+### `processing` stuck — Execute succeeded but no webhook received
 
-**Canada launches after US. FINTRAC registration must be filed immediately — it does not wait for US launch.**
+**Cause:** Webhook delivery failure, provider delay, network issue.  
+**Balance effect:** None (balances only change on settlement, not on execute).  
+**Recovery path:**
+1. Query provider API directly for current transfer status.
+2. If settled: apply settlement manually via admin route (to be built).
+3. If failed: set intent to `failed`, restore velocity if already recorded.
+4. If still pending: wait; re-query after provider's expected settlement window.
+
+### Corrupt or unprocessable webhook
+
+**Cause:** Malformed payload, signature mismatch, unknown transfer ID.  
+**Recovery:** Log the raw payload and error with the event_id for manual review.
 
 ---
 
-## 13. Adding a New Provider
+## 10. Compliance Responsibilities
 
-1. Create `lib/transfers/<provider-name>.ts`
-2. Implement all five methods of `TransferProvider` (see `lib/transfers/types.ts`)
-3. `executeTransfer()` must make the real API call and set `status='processing'`
-4. `handleWebhookEvent()` must update `transfer_intents.status` and user balance atomically on settlement
-5. Add the provider to `ProviderName` type in `lib/transfers/types.ts`
-6. Add an env-gated condition to `lib/transfers/router.ts`
-7. Add new schema columns to `lib/db.ts` (initializeSchema) AND `app/api/migrate/route.ts`
-8. Register the webhook route at `app/api/webhooks/<provider>/route.ts`
-9. Add required env vars to `BANKING_ARCHITECTURE.md` § 14
+### FINTRAC (Canada) — Money Services Business Registration
 
-The API routes (`/api/transfers/intent`, `/api/transfers/[id]/review`, `/api/transfers/[id]/confirm`, `/api/transfers/[id]/execute`) do not change when a new provider is added.
+Any platform that facilitates money transfers in Canada must register as an MSB (Money Services Business) with FINTRAC. This is a legal requirement, not optional.
 
----
+**File immediately.** Allow 30 days for processing. Required before any Canadian user sends or receives a real transfer.
 
-## 14. Environment Variables
+**Ongoing obligations:**
+- Keep KYC records for 5 years after the last transaction.
+- Report suspicious transactions (STRs) within 30 days.
+- Report large cash transactions (LCTRs) for transactions > CAD 10,000.
+- File an annual MSB compliance report.
 
-### Currently set in Vercel
+### PAD Mandate (Canada) — Payments Canada Rule H1
 
-| Variable | Purpose |
+Pre-Authorized Debit (PAD) requires explicit written authorization before debiting a Canadian bank account. The mandate must include:
+
+- Amount or amount range
+- Frequency (one-time or recurring)
+- Bank account details
+- Right to cancel within 30 days
+- Contact information for disputes
+
+The `consent_confirmed_at` timestamp on `transfer_intents` records when the user confirmed the transfer. The consent language displayed in the Review step must satisfy PAD Rule H1 requirements. For Add Money (bank debit), this is a one-time PAD mandate — the user must re-authorize each transfer individually.
+
+### FinCEN / MTL (United States) — Money Transmitter License
+
+Facilitating money transfers in the US requires FinCEN registration and state-level Money Transmitter Licenses (MTLs) in most states. Requirements vary by state.
+
+**Alternative:** Operating under Plaid's own MTL coverage when using Plaid Transfer — confirm coverage scope with Plaid legal before launch.
+
+### KYC Retention
+
+- Stripe Identity session IDs and verification results must be retained for 5 years.
+- `kyc_verified_at`, `kyc_status`, and `kyc_rejection_reason` are stored on `users` and must not be deleted.
+- User account deletion must archive KYC records, not destroy them.
+
+### Velocity Limits as AML Controls
+
+The `velocity_checks` table implements rolling hourly/daily/weekly volume limits. These serve as the primary AML (Anti-Money Laundering) control layer.
+
+| KYC Status | Can transfer |
 |---|---|
-| `PLAID_CLIENT_ID` | Plaid API client ID |
-| `PLAID_SECRET` | Plaid API secret |
-| `NEXT_PUBLIC_PLAID_ENV` | `production` — Plaid environment |
-| `PLAID_TOKEN_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM Plaid token encryption |
-| `STRIPE_SECRET_KEY` | Stripe API key (KYC + future ACSS) |
-| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (KYC events) |
+| `unverified` | No — blocked at KYC gate |
+| `pending` | No — blocked at KYC gate |
+| `verified` | Yes — subject to velocity limits |
 
-### Required for US live (Phase 2)
+Limits are enforced in `checkVelocityLimit()` in `lib/auth.ts`. Unverified users cannot initiate any transfers — this is enforced at both the velocity check and the explicit KYC gate in the intent route.
 
-| Variable | Purpose |
-|---|---|
-| `PLAID_WEBHOOK_SECRET` | Plaid webhook signature verification |
-| `PLAID_TRANSFER_LIVE` | Set to `true` to activate `PlaidTransferProvider` |
+---
 
-### Required for Canadian live (Phase 3)
+## 11. Future Provider Integrations
 
-| Variable | Purpose |
-|---|---|
-| `VOPAY_ACCOUNT_ID` | VoPay account identifier |
-| `VOPAY_API_KEY` | VoPay API key |
-| `VOPAY_API_SECRET` | VoPay API secret |
-| `VOPAY_WEBHOOK_SECRET` | VoPay webhook signature verification |
-| `STRIPE_ACSS_WEBHOOK_SECRET` | Separate Stripe webhook secret for ACSS events (different endpoint config from KYC webhook) |
-| `CA_EFT_LIVE` | Set to `true` to activate `CanadianEFTProvider` |
+### Adding a New Provider — Checklist
+
+1. **Create the provider file** in `lib/transfers/`. Export a single class implementing `TransferProvider`.
+
+2. **Implement all 5 interface methods.** `executeTransfer` must make the real API call for live providers — it must not throw.
+
+3. **Add the provider name to `ProviderName`** in `lib/transfers/types.ts`:
+   ```typescript
+   export type ProviderName = 'sandbox_us' | 'sandbox_ca' | 'plaid_transfer' | 'canadian_eft';
+   ```
+
+4. **Wire the provider in `router.ts`** behind an env gate:
+   ```typescript
+   if (region === 'US' && process.env.PLAID_TRANSFER_LIVE === 'true') {
+     return new PlaidTransferProvider();
+   }
+   ```
+
+5. **Add the webhook handler** at `POST /api/webhooks/<provider>`. Follow the webhook processing pipeline in Section 4.
+
+6. **Add `provider_webhook_events` deduplication** with the provider name as the `provider` column value.
+
+7. **Implement `reverseVelocity()`** in `lib/auth.ts` before any live provider goes to production.
+
+8. **Add required env vars** to Vercel dashboard and to the env var table in `CLAUDE.md`.
+
+9. **Add migration** to `app/api/migrate/route.ts` and `lib/db.ts` for any new tables.
+
+### PlaidTransferProvider (US ACH)
+
+**Status:** Not yet built.
+
+**Prerequisites before building:**
+- Plaid Link config must include `Transfer` in the products array. All existing US bank accounts were linked with `[Auth, Transactions]` only — all US users must re-link.
+- `reverseVelocity()` must be implemented.
+- US MTL or Plaid's MTL coverage must be confirmed with Plaid legal.
+
+**Implementation sketch:**
+```typescript
+async executeTransfer(intentId: number, userId: number): Promise<ExecuteResult> {
+  const intent = await getIntent(intentId, userId);
+  const token = await requireEncryptedBankToken(userId, intent.bank_account_id);
+
+  const response = await plaid.transferCreate({
+    access_token: token,
+    account_id: intent.plaid_account_id,
+    type: intent.type === 'add_money' ? 'debit' : 'credit',
+    network: 'ach',
+    amount: intent.amount.toFixed(2),
+    ach_class: 'ppd',
+    user: { legal_name: intent.user_legal_name },
+    idempotency_key: intent.idempotency_key,
+  });
+
+  await sql`
+    UPDATE transfer_intents
+    SET status = 'processing',
+        provider_reference_id = ${response.data.transfer.id}
+    WHERE id = ${intentId}
+  `;
+
+  return { provider_reference_id: response.data.transfer.id };
+}
+```
+
+**Webhook:** Plaid sends `TRANSFER_EVENTS_UPDATE` to a configured URL. Call `plaid.transferEventSync()` with a stored cursor to pull events. Events: `settled`, `failed`, `returned`.
+
+### CanadianEFTProvider (CA)
+
+**Status:** Not yet built.
+
+Two vendors are needed because ACSS is pull-only and cannot credit accounts.
+
+| Operation | Vendor | Rail | Settlement |
+|---|---|---|---|
+| Add Money (bank debit) | Stripe ACSS | PAD | 2–5 business days |
+| Cash Out (bank credit) | VoPay Interac | e-Transfer | Minutes to hours |
+
+**Stripe ACSS (Add Money):**
+- Create a `PaymentIntent` with `payment_method_types: ['acss_debit']`.
+- On first debit, Stripe presents a mandate acceptance flow satisfying PAD Rule H1.
+- Webhook events: `payment_intent.succeeded`, `payment_intent.payment_failed`.
+
+**VoPay Interac (Cash Out):**
+- Send an Interac e-Transfer to the user's registered email via VoPay API.
+- No re-linking required — uses email, not bank credentials.
+- Provider-specific webhook events; check VoPay API documentation.
+
+**Prerequisites:**
+- FINTRAC MSB registration must be active before any Canadian transfer goes live.
+
+### Provider Environment Gates
+
+```
+PLAID_TRANSFER_LIVE=true   → enables PlaidTransferProvider for US
+CA_EFT_LIVE=true           → enables CanadianEFTProvider for CA
+```
+
+Never set both `_LIVE` flags until the corresponding provider has been fully tested end-to-end in the provider's own sandbox environment.
+
+---
+
+*For current operational state, see `CURRENT_STATUS.md`. For session history and decision log, see `PROJECT_MEMORY.md`.*
