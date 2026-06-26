@@ -60,15 +60,15 @@ Last updated: 2026-06-26
 
 ---
 
+- **Transfer provider architecture** (2026-06-26): Region-aware `TransferProvider` interface in `lib/transfers/`; `SandboxUSProvider` for US (simulates Plaid Transfer) and `SandboxCAProvider` for CA (simulates Canadian EFT); provider router in `lib/transfers/router.ts`; 3-step flow: `POST /api/transfers/intent` → `GET /api/transfers/[id]/review` → `POST /api/transfers/[id]/confirm`; `transfer_intents` extended with `provider_region`, `provider_name`, `execution_mode`, `consent_confirmed_at`, `idempotency_key`, `bank_account_id`; no money movement, no external API calls; lint clean, build clean
+
 ## In Progress / Next
 
-Before any real money movement can be enabled, these 5 things must be completed in order:
-
-1. **Resolve sandbox intent PASS/FAIL items** — Confirm whether Add Money and Cash Out intents are creating successfully in production; check `/transfers` page and audit_logs for failures
-2. **End-to-end KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook; run a real Identity verification in sandbox
-3. **Plaid Transfer integration (Add Money)** — Wire `POST /api/transfers/intent` to call Plaid Transfer API for ACH debit when `status='draft'` is promoted to `status='processing'`; gate behind feature flag or separate route
-4. **Plaid Transfer integration (Cash Out)** — Same as above for ACH credit; requires Plaid Transfer eligibility check
-5. **Webhook handler for transfer status updates** — Create `POST /api/webhooks/plaid` to receive Plaid transfer webhooks and update `transfer_intents.status` + user balances on settlement
+1. **Run `/api/migrate` in production** — Adds new `transfer_intents` columns; required before 3-step flow works in production
+2. **Validate 3-step flow in production** — US and CA user paths; confirm regional consent language correct
+3. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`; register Stripe webhook
+4. **PlaidTransferProvider** — US live ACH; requires Plaid Link products updated to include `Transfer`; `reverseVelocity()` must be built first
+5. **CanadianEFTProvider** — CA live EFT; separate integration from Plaid ACH
 
 ---
 

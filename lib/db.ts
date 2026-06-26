@@ -116,13 +116,18 @@ export async function initializeSchema() {
     CREATE TABLE IF NOT EXISTS transfer_intents (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id),
+      bank_account_id INTEGER REFERENCES bank_accounts(id),
       type TEXT NOT NULL,
       amount REAL NOT NULL,
       currency TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'draft',
-      provider TEXT,
+      provider_region TEXT NOT NULL DEFAULT 'CA',
+      provider_name TEXT NOT NULL DEFAULT 'sandbox_ca',
+      execution_mode TEXT NOT NULL DEFAULT 'sandbox',
       provider_reference_id TEXT,
       failure_reason TEXT,
+      consent_confirmed_at TIMESTAMPTZ,
+      idempotency_key TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )

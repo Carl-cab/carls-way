@@ -9,7 +9,11 @@ export async function GET() {
 
     const sql = getSql();
     const transfers = await sql`
-      SELECT id, type, amount, currency, status, provider, provider_reference_id, failure_reason, created_at, updated_at
+      SELECT id, type, amount, currency, status,
+             provider_region, provider_name, execution_mode,
+             provider_reference_id, failure_reason,
+             bank_account_id, consent_confirmed_at, idempotency_key,
+             created_at, updated_at
       FROM transfer_intents
       WHERE user_id = ${user.userId}
       ORDER BY created_at DESC

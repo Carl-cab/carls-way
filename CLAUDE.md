@@ -42,6 +42,10 @@ Client (React 19)
 | `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
 | `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
+| `lib/transfers/types.ts` | `TransferProvider` interface, all transfer types and status enums |
+| `lib/transfers/router.ts` | Routes US users → SandboxUSProvider, CA users → SandboxCAProvider |
+| `lib/transfers/sandbox-us.ts` | US sandbox provider — simulates Plaid Transfer, no real API calls |
+| `lib/transfers/sandbox-ca.ts` | CA sandbox provider — simulates Canadian EFT, no real API calls |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 
 ---
@@ -110,12 +114,37 @@ All previously tracked issues (request acceptance legacy balance, Plaid plaintex
 
 ---
 
+## Transfer Provider Architecture
+
+Transfers use a provider abstraction in `lib/transfers/`. All providers implement `TransferProvider` (see `lib/transfers/types.ts`). Provider routing is in `lib/transfers/router.ts`:
+
+- US users (`country = 'US'`) → `SandboxUSProvider` (future: `PlaidTransferProvider`)
+- CA users (`country = 'CA'`) → `SandboxCAProvider` (future: `CanadianEFTProvider`)
+
+**Transfer flow (3 steps):**
+1. `POST /api/transfers/intent` — creates `status='draft'`, routes to correct provider
+2. `GET /api/transfers/[id]/review` — returns review details + region-appropriate consent language
+3. `POST /api/transfers/[id]/confirm` — records `consent_confirmed_at`, sets `status='ready'`
+
+**Rules:**
+- Both sandbox providers are execution_mode='sandbox' — no money moves, no external API calls
+- `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
+- Velocity is checked at intent creation but only recorded at confirm (future: at execute)
+- Balance is never mutated by any current transfer route
+- CA users see "Canadian transfer simulation" language — never ACH language
+- US users see "US transfer simulation" language
+
+**To add a live provider:** Create `lib/transfers/plaid-transfer.ts` implementing `TransferProvider`, swap it into `router.ts` behind an env-gated condition. The interface and API routes do not change.
+
 ## Current Priorities
 
 The following tasks are ordered by business impact and should be worked in sequence:
 
-1. **Implement Add Money / Cash Out** — Wire up the inert "+ Add Money" and "Cash Out" buttons on the profile page to a Plaid Transfer or Stripe ACH integration.
-2. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; run `/api/migrate`; register Stripe webhook endpoint; run a sandbox Identity flow end-to-end.
+1. **Run `/api/migrate`** — Apply new `transfer_intents` columns (`provider_region`, `provider_name`, `execution_mode`, `consent_confirmed_at`, `idempotency_key`, `bank_account_id`) to production
+2. **Validate 3-step transfer flow in production** — US and CA user paths through intent → review → confirm
+3. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook
+4. **Implement PlaidTransferProvider** — US live ACH debit/credit (after Plaid products updated to include Transfer)
+5. **Implement CanadianEFTProvider** — CA live EFT integration
 
 ---
 
@@ -162,7 +191,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `friends` | Social graph with request approval flow |
 | `notifications` | In-app notifications for transactions and friend events |
 | `password_reset_tokens` | One-time password reset tokens (hashed, 1-hour expiry) |
-| `transfer_intents` | Sandbox transfer intent records (no real money movement) |
+| `transfer_intents` | Transfer intent records — draft → reviewed → ready → processing → settled/failed/returned |
 | `velocity_checks` | Rolling transaction volume per user for rate limiting |
 | `audit_logs` | Immutable system audit trail |
 

@@ -8,11 +8,18 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { id } = await params;
+    const intentId = parseInt(id);
+    if (isNaN(intentId)) return NextResponse.json({ error: 'Invalid intent ID' }, { status: 400 });
+
     const sql = getSql();
     const transfers = await sql`
-      SELECT id, type, amount, currency, status, provider, provider_reference_id, failure_reason, created_at, updated_at
+      SELECT id, type, amount, currency, status,
+             provider_region, provider_name, execution_mode,
+             provider_reference_id, failure_reason,
+             bank_account_id, consent_confirmed_at, idempotency_key,
+             created_at, updated_at
       FROM transfer_intents
-      WHERE id = ${parseInt(id)} AND user_id = ${user.userId}
+      WHERE id = ${intentId} AND user_id = ${user.userId}
     `;
 
     if (transfers.length === 0) {

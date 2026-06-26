@@ -68,17 +68,30 @@ export async function GET() {
       CREATE TABLE IF NOT EXISTS transfer_intents (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id),
+        bank_account_id INTEGER REFERENCES bank_accounts(id),
         type TEXT NOT NULL,
         amount REAL NOT NULL,
         currency TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'draft',
-        provider TEXT,
+        provider_region TEXT NOT NULL DEFAULT 'CA',
+        provider_name TEXT NOT NULL DEFAULT 'sandbox_ca',
+        execution_mode TEXT NOT NULL DEFAULT 'sandbox',
         provider_reference_id TEXT,
         failure_reason TEXT,
+        consent_confirmed_at TIMESTAMPTZ,
+        idempotency_key TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+
+    // Add new transfer_intents columns for existing production tables
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS bank_account_id INTEGER REFERENCES bank_accounts(id)`;
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS provider_region TEXT NOT NULL DEFAULT 'CA'`;
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS provider_name TEXT NOT NULL DEFAULT 'sandbox_ca'`;
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'sandbox'`;
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS consent_confirmed_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS idempotency_key TEXT`;
 
     // Add missing columns to transactions table if they don't exist
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS sender_currency TEXT NOT NULL DEFAULT 'CAD'`;

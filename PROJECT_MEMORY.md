@@ -88,12 +88,11 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 
 ## 9. Current Priorities
 
-Before any real money movement, complete in order:
-1. **Resolve sandbox intent PASS/FAIL items** — Confirm Add Money and Cash Out intents create successfully in production; check `/transfers` page and `audit_logs` for errors
-2. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook at `/api/webhooks/stripe`; run a real sandbox Identity verification end-to-end
-3. **Plaid Transfer — Add Money** — Promote `transfer_intents` from `status='draft'` to `status='processing'` by calling Plaid Transfer API (ACH debit); gate behind a new route, not the existing intent route
-4. **Plaid Transfer — Cash Out** — Same pattern for ACH credit; requires Plaid Transfer eligibility check per user
-5. **Plaid webhook handler** — `POST /api/webhooks/plaid` to receive transfer status events and update `transfer_intents.status` + `balance_cad`/`balance_usd` on settlement
+1. **Run `/api/migrate` in production** — Adds new `transfer_intents` columns; required before 3-step flow works in production
+2. **Validate 3-step flow in production** — US and CA users through intent → review → confirm; confirm regional consent language
+3. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook at `/api/webhooks/stripe`
+4. **PlaidTransferProvider** — US live ACH in `lib/transfers/plaid-transfer.ts` implementing `TransferProvider`; swap into router behind env gate; requires Plaid Link products updated to include `Transfer` + all users re-link; build `reverseVelocity()` first
+5. **CanadianEFTProvider** — CA live EFT in `lib/transfers/canadian-eft.ts` implementing `TransferProvider`; separate from Plaid
 
 ---
 
@@ -120,3 +119,4 @@ Before any real money movement, complete in order:
 - **Public feed fixed**: New `/api/feed` route returns public transactions only (`WHERE privacy = 'public' AND status = 'completed'`); feed page now calls `/api/feed` instead of `/api/transactions?feed=true`; non-parties viewing a public transaction receipt see friendly "Receipt is private to participants" message with sender/receiver info
 - **In-app notifications**: `notifications` table added to schema + migrate; `lib/notifications.ts` helper (non-blocking); notifications created on friend request send, friend accept, payment received, money requested; `GET /api/notifications`, `POST /api/notifications/[id]/read`, `POST /api/notifications/read-all` added; `/notifications` page with click-to-navigate; unread badge with 30s polling in layout nav
 - **Sandbox transfer readiness layer — security fixes + production validation** (2026-06-26): Cash Out button fixed to become Link when `canTransfer` is true (was permanently disabled); `recordVelocity()` removed from sandbox intent creation (drafts no longer consume real velocity budget); `provider` set to `NULL` for sandbox intents (not `'simulated'`); production validated — KYC gate ✅, encrypted bank gate ✅, Add Money button active ✅, Cash Out button active ✅, `transfer_intents` table live ✅, balance unchanged after intent ✅; merged to master and deployed
+- **Transfer provider architecture** (2026-06-26): `TransferProvider` interface (`lib/transfers/types.ts`) with `createIntent`, `reviewTransfer`, `confirmTransfer`, `executeTransfer`, `handleWebhookEvent`; `SandboxUSProvider` (US, simulates ACH, no real calls) and `SandboxCAProvider` (CA, simulates EFT, no real calls); provider router (`lib/transfers/router.ts`) maps `country='US'` → US provider, all others → CA provider; 3-step UI flow (form → review with consent language → confirmed); two new API routes: `GET /api/transfers/[id]/review`, `POST /api/transfers/[id]/confirm`; `transfer_intents` extended: `provider_region`, `provider_name`, `execution_mode`, `consent_confirmed_at`, `idempotency_key`, `bank_account_id`; CA users never see ACH language; `executeTransfer()` throws on both sandbox providers; no balance mutations anywhere; lint clean, build clean
