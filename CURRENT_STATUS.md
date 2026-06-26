@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-16
+Last updated: 2026-06-26
 
 ---
 
@@ -18,7 +18,17 @@ Last updated: 2026-06-16
   - Production validated: accept ✅ decline ✅ self-add blocked ✅ duplicate blocked ✅
 - **Bank linking**: Plaid Link flow, token exchange; tokens AES-256-GCM encrypted at rest (`is_token_encrypted = true` set on every new account)
 - **KYC**: Stripe Identity session creation, webhook handler updating `kyc_status` server-side, profile KYC card with live states
-- **Sandbox transfer readiness**: `transfer_intents` table with draft/blocked/ready/simulated/failed statuses; `POST /api/transfers/intent` creates intents with full security gates (auth, KYC verified, encrypted bank, velocity limits) but no real money movement; `/transfers` page for sandbox simulation; buttons enabled on profile only when KYC verified + encrypted account exists; audit logging on all attempts
+- **Sandbox transfer readiness**: Production validated 2026-06-26
+  - KYC verified gate ✅
+  - Plaid sandbox bank linking ✅
+  - Encrypted bank account gate (`is_token_encrypted = true`) ✅
+  - Add Money button enables when gates pass ✅
+  - Cash Out button enables when gates pass ✅
+  - `transfer_intents` table live in production (migration applied) ✅
+  - No balance changes after intent creation ✅
+  - `POST /api/transfers/intent` creates `status='draft'`, `provider=NULL` ✅
+  - Velocity limit gate in place (sandbox intents do NOT consume real velocity budget) ✅
+  - Audit logging on intent creation and blocked attempts ✅
 - **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table
 
 ---
@@ -32,6 +42,7 @@ Last updated: 2026-06-16
 - Plaid access token never returned to the browser
 - `JWT_SECRET` missing in production throws at request time
 - Friend accept/decline: server enforces recipient-only authorization (`friend_id = user.userId`)
+- Transfer intents: auth → KYC verified → encrypted bank account → velocity check → draft insert only (no money movement)
 
 ---
 
@@ -43,15 +54,21 @@ Last updated: 2026-06-16
 - Plaid access tokens stored in plaintext — fixed (AES-256-GCM)
 - `JWT_SECRET` silent dev fallback in production — fixed
 - Friends auto-accepted with no approval flow — fixed
+- Cash Out button permanently disabled even when gates passed — fixed
+- Sandbox intents consuming real velocity budget — fixed (recordVelocity skipped for drafts)
+- Sandbox provider field set to `'simulated'` string — fixed (now NULL to distinguish from real providers)
 
 ---
 
 ## In Progress / Next
 
-1. **Add Money / Cash Out** — profile buttons still inert; no API routes exist yet
-   - Must check `kyc_status === 'verified'` before any transfer
-   - Must call `requireEncryptedBankToken()` — do not read `plaid_access_token_enc` directly
-2. **KYC live test** — set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook
+Before any real money movement can be enabled, these 5 things must be completed in order:
+
+1. **Resolve sandbox intent PASS/FAIL items** — Confirm whether Add Money and Cash Out intents are creating successfully in production; check `/transfers` page and audit_logs for failures
+2. **End-to-end KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook; run a real Identity verification in sandbox
+3. **Plaid Transfer integration (Add Money)** — Wire `POST /api/transfers/intent` to call Plaid Transfer API for ACH debit when `status='draft'` is promoted to `status='processing'`; gate behind feature flag or separate route
+4. **Plaid Transfer integration (Cash Out)** — Same as above for ACH credit; requires Plaid Transfer eligibility check
+5. **Webhook handler for transfer status updates** — Create `POST /api/webhooks/plaid` to receive Plaid transfer webhooks and update `transfer_intents.status` + user balances on settlement
 
 ---
 

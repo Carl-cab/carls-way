@@ -88,8 +88,12 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 
 ## 9. Current Priorities
 
-1. Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel + register Stripe webhook → test KYC flow end-to-end in sandbox
-2. Implement "Add Money" / "Cash Out" on profile page via Plaid Transfer or Stripe ACH (after KYC live test passes)
+Before any real money movement, complete in order:
+1. **Resolve sandbox intent PASS/FAIL items** — Confirm Add Money and Cash Out intents create successfully in production; check `/transfers` page and `audit_logs` for errors
+2. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook at `/api/webhooks/stripe`; run a real sandbox Identity verification end-to-end
+3. **Plaid Transfer — Add Money** — Promote `transfer_intents` from `status='draft'` to `status='processing'` by calling Plaid Transfer API (ACH debit); gate behind a new route, not the existing intent route
+4. **Plaid Transfer — Cash Out** — Same pattern for ACH credit; requires Plaid Transfer eligibility check per user
+5. **Plaid webhook handler** — `POST /api/webhooks/plaid` to receive transfer status events and update `transfer_intents.status` + `balance_cad`/`balance_usd` on settlement
 
 ---
 
@@ -115,3 +119,4 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 - **Send from friends list**: Send button beside each accepted friend on friends page routes to `/send?to=<username>`; send page reads `?to=` query param via `useSearchParams` and pre-fills the recipient field; no new API routes or money movement logic added; `Suspense` wrapper added to send page to satisfy Next.js `useSearchParams` requirement
 - **Public feed fixed**: New `/api/feed` route returns public transactions only (`WHERE privacy = 'public' AND status = 'completed'`); feed page now calls `/api/feed` instead of `/api/transactions?feed=true`; non-parties viewing a public transaction receipt see friendly "Receipt is private to participants" message with sender/receiver info
 - **In-app notifications**: `notifications` table added to schema + migrate; `lib/notifications.ts` helper (non-blocking); notifications created on friend request send, friend accept, payment received, money requested; `GET /api/notifications`, `POST /api/notifications/[id]/read`, `POST /api/notifications/read-all` added; `/notifications` page with click-to-navigate; unread badge with 30s polling in layout nav
+- **Sandbox transfer readiness layer — security fixes + production validation** (2026-06-26): Cash Out button fixed to become Link when `canTransfer` is true (was permanently disabled); `recordVelocity()` removed from sandbox intent creation (drafts no longer consume real velocity budget); `provider` set to `NULL` for sandbox intents (not `'simulated'`); production validated — KYC gate ✅, encrypted bank gate ✅, Add Money button active ✅, Cash Out button active ✅, `transfer_intents` table live ✅, balance unchanged after intent ✅; merged to master and deployed
