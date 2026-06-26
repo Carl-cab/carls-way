@@ -29,7 +29,16 @@ Last updated: 2026-06-26
   - `POST /api/transfers/intent` creates `status='draft'`, `provider=NULL` ✅
   - Velocity limit gate in place (sandbox intents do NOT consume real velocity budget) ✅
   - Audit logging on intent creation and blocked attempts ✅
-- **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table
+- **Passive audit ledger** (Phase A1): Non-blocking audit log of all financial events
+  - `ledger_entries` table: user_id, transaction_id (nullable), currency, account_type, entry_type, debit/credit, provider, description
+  - `lib/ledger.ts`: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `validateLedgerPair()`, `getUserLedgerEntries()`
+  - Entries created AFTER send-money balance updates (non-blocking, doesn't block transaction on failure)
+  - Same-currency: one pair (debit+credit, same amount); cross-border: two entries (debit in sender currency, credit in receiver currency, amounts differ by FX)
+  - `GET /api/ledger` — read-only, auth required, returns user's ledger entries only
+  - `GET /api/ledger/balance-check` — compares `balance_cad`/`balance_usd` vs ledger totals (warning-only, no balance mutation)
+  - Only for completed `pay` transactions (not requests, intents, failed, or Add Money/Cash Out)
+  - Balance_cad/balance_usd remain authoritative source of truth ✅
+- **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table
 
 ---
 

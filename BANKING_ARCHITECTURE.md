@@ -196,6 +196,44 @@ The `transactions` table records every P2P payment. It is append-only — rows a
 - `payment_rail` — e.g. `wise`
 - `estimated_settlement` — ISO timestamp from Wise quote
 
+### Passive Audit Ledger
+
+A separate `ledger_entries` table records every financial movement for auditability and compliance. This is a passive audit log — it does NOT drive balance changes. The `balance_cad` and `balance_usd` columns on `users` remain the authoritative source of truth.
+
+**Table structure:**
+- `id` — primary key
+- `user_id` — the user involved in this entry
+- `transaction_id` — nullable reference to the `transactions` row that triggered this entry
+- `transfer_intent_id` — nullable reference to the `transfer_intents` row
+- `currency` — CAD or USD
+- `account_type` — e.g. 'wallet' (extensible for future asset types)
+- `entry_type` — e.g. 'payment_sent', 'payment_received' (describes the event)
+- `debit` — amount debited (non-negative, zero if credit entry)
+- `credit` — amount credited (non-negative, zero if debit entry)
+- `provider` — nullable, e.g. 'plaid_transfer', 'stripe_acss' (for future transfers)
+- `provider_reference` — nullable reference ID from external provider
+- `description` — human-readable narrative, includes FX details for cross-border
+- `created_at` — timestamp
+
+**Ledger rules:**
+- Every financial movement creates ledger entries for auditability.
+- Entries are immutable — never updated or deleted (compliance requirement).
+- Debit and credit cannot both be positive on the same row.
+- Same-currency transfers: one pair of entries (sender debit, receiver credit, same amount).
+- Cross-border transfers: two separate entries (sender debit in sender currency, receiver credit in receiver currency), amounts differ due to FX. These entries do not balance in a traditional double-entry sense.
+- Ledger entries are added **only** for completed `type='pay'` transactions. Pending requests, failed transfers, sandbox intents, and Add Money/Cash Out operations do NOT generate ledger entries.
+- Ledger entry creation is non-blocking — if it fails, the transaction still succeeds (balance updates are authoritative).
+
+**Access:**
+- `GET /api/ledger` — read-only, authenticated, returns user's ledger entries.
+- `GET /api/ledger/balance-check` — read-only, authenticated, compares `balance_cad`/`balance_usd` against computed ledger totals (warning only, does not block).
+
+**Future use:**
+- Tax reporting (export ledger to CSV/JSON).
+- Compliance audits (immutable transaction log).
+- Wallet reconciliation (verify balances against ledger).
+- Provider settlement mapping (trace each ledger entry to external provider outcome).
+
 ---
 
 ## 4. Webhook Processing

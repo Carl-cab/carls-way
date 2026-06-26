@@ -3,6 +3,7 @@ import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog, sanitizeString } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
+import { createLedgerPair, createLedgerEntry } from '@/lib/ledger';
 
 export async function GET(req: NextRequest) {
   try {
@@ -64,14 +65,14 @@ export async function POST(req: NextRequest) {
     // Get sender and receiver
     const senderRows = await sql`SELECT * FROM users WHERE id = ${user.userId}`;
     const sender = senderRows[0] as {
-      id: number; balance: number; balance_cad: number; balance_usd: number;
+      id: number; username: string; balance: number; balance_cad: number; balance_usd: number;
       country: string; kyc_status: string;
     } | undefined;
     if (!sender) return NextResponse.json({ error: 'Sender not found' }, { status: 404 });
 
     const receiverRows = await sql`SELECT * FROM users WHERE username = ${receiverUsername}`;
     const receiver = receiverRows[0] as {
-      id: number; balance: number; balance_cad: number; balance_usd: number;
+      id: number; username: string; balance: number; balance_cad: number; balance_usd: number;
       country: string;
     } | undefined;
     if (!receiver) return NextResponse.json({ error: 'User not found' }, { status: 404 });
@@ -144,6 +145,55 @@ export async function POST(req: NextRequest) {
         RETURNING id
       `;
 
+      const txId = result[0].id as number;
+
+      // Create passive ledger entries for auditability
+      try {
+        if (isCrossBorder) {
+          // Cross-border: sender debit in sender currency, receiver credit in receiver currency
+          // These are separate entries because they're in different currencies
+          const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${senderCurrency})`;
+
+          // Sender debit in sender currency
+          await createLedgerEntry(
+            user.userId,
+            senderCurrency,
+            'wallet',
+            'payment_sent',
+            numAmount,
+            0,
+            {
+              transactionId: txId,
+              description: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}; converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
+            }
+          );
+
+          // Receiver credit in receiver currency
+          await createLedgerEntry(
+            receiver.id,
+            receiverCurrency,
+            'wallet',
+            'payment_received',
+            0,
+            receiverAmount,
+            {
+              transactionId: txId,
+              description: `Received ${receiverAmount} ${receiverCurrency} from @${user.username} (converted from ${numAmount} ${senderCurrency} ${fxDescription})`,
+            }
+          );
+        } else {
+          // Same-currency: single pair of entries (debit + credit)
+          await createLedgerPair(user.userId, receiver.id, senderCurrency, numAmount, txId, {
+            entryType: 'payment_sent',
+            senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}`,
+            receiverDescription: `Received ${numAmount} ${senderCurrency} from @${user.username}`,
+          });
+        }
+      } catch (ledgerErr) {
+        console.error('Ledger entry creation failed (non-blocking):', ledgerErr);
+        // Ledger entries are passive/audit-only; failure should not block the transaction
+      }
+
       await recordVelocity(user.userId, numAmount, senderCurrency);
       await auditLog(user.userId, 'payment_sent', {
         receiverId: receiver.id,
@@ -151,8 +201,6 @@ export async function POST(req: NextRequest) {
         currency: senderCurrency,
         isCrossBorder,
       });
-
-      const txId = result[0].id as number;
       const displayAmount = new Intl.NumberFormat('en-CA', { style: 'currency', currency: senderCurrency }).format(numAmount);
       await createNotification({
         userId: receiver.id,

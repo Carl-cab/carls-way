@@ -42,6 +42,7 @@ Client (React 19)
 | `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
 | `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
+| `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()` |
 | `lib/transfers/types.ts` | `TransferProvider` interface, all transfer types and status enums |
 | `lib/transfers/router.ts` | Routes US users → SandboxUSProvider, CA users → SandboxCAProvider |
 | `lib/transfers/sandbox-us.ts` | US sandbox provider — simulates Plaid Transfer, no real API calls |

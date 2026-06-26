@@ -132,6 +132,23 @@ export async function initializeSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS ledger_entries (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      transaction_id INTEGER REFERENCES transactions(id),
+      transfer_intent_id INTEGER REFERENCES transfer_intents(id),
+      currency TEXT NOT NULL,
+      account_type TEXT NOT NULL DEFAULT 'wallet',
+      entry_type TEXT NOT NULL,
+      debit NUMERIC(12,2) NOT NULL DEFAULT 0,
+      credit NUMERIC(12,2) NOT NULL DEFAULT 0,
+      provider TEXT,
+      provider_reference TEXT,
+      description TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
 }
 
 export default getSql;
