@@ -167,6 +167,71 @@ export async function createLedgerPair(
   };
 }
 
+// Create cross-border ledger entries atomically (different currencies, different amounts).
+// Sender debit in sender currency, receiver credit in receiver currency.
+// Both entries are created in a single transaction to prevent partial/incomplete ledger state.
+export async function createCrossBorderLedgerPair(
+  senderUserId: number,
+  senderCurrency: string,
+  senderAmount: number,
+  receiverUserId: number,
+  receiverCurrency: string,
+  receiverAmount: number,
+  transactionId: number,
+  options?: {
+    senderDescription?: string;
+    receiverDescription?: string;
+    provider?: string;
+  }
+): Promise<{ senderEntryId: number; receiverEntryId: number }> {
+  if (senderUserId === receiverUserId) {
+    throw new Error('Cannot create ledger pair where sender and receiver are the same user.');
+  }
+
+  if (senderAmount <= 0 || receiverAmount <= 0) {
+    throw new Error('Both sender and receiver amounts must be greater than zero.');
+  }
+
+  if ((senderCurrency !== 'CAD' && senderCurrency !== 'USD') ||
+      (receiverCurrency !== 'CAD' && receiverCurrency !== 'USD')) {
+    throw new Error('Both currencies must be CAD or USD.');
+  }
+
+  const sql = getSql();
+
+  // Insert both entries in a single transaction for atomicity
+  const results = await sql`
+    WITH sender_entry AS (
+      INSERT INTO ledger_entries (
+        user_id, transaction_id, currency, account_type, entry_type,
+        debit, credit, description, provider
+      ) VALUES (
+        ${senderUserId}, ${transactionId}, ${senderCurrency}, 'wallet', 'payment_sent',
+        ${senderAmount}, 0, ${options?.senderDescription ?? null}, ${options?.provider ?? null}
+      )
+      RETURNING id
+    ),
+    receiver_entry AS (
+      INSERT INTO ledger_entries (
+        user_id, transaction_id, currency, account_type, entry_type,
+        debit, credit, description, provider
+      ) VALUES (
+        ${receiverUserId}, ${transactionId}, ${receiverCurrency}, 'wallet', 'payment_received',
+        0, ${receiverAmount}, ${options?.receiverDescription ?? null}, ${options?.provider ?? null}
+      )
+      RETURNING id
+    )
+    SELECT
+      (SELECT id FROM sender_entry) as sender_id,
+      (SELECT id FROM receiver_entry) as receiver_id
+  `;
+
+  return {
+    senderEntryId: results[0].sender_id as number,
+    receiverEntryId: results[0].receiver_id as number,
+  };
+}
+
 // Get the computed ledger balance for a user in a specific currency.
 // This sums all debits and credits across all ledger entries for the user.
 export async function getLedgerBalance(userId: number, currency: string): Promise<number> {

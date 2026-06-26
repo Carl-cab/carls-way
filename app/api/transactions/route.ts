@@ -3,7 +3,7 @@ import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog, sanitizeString } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
-import { createLedgerPair, createLedgerEntry } from '@/lib/ledger';
+import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
 
 export async function GET(req: NextRequest) {
   try {
@@ -150,39 +150,24 @@ export async function POST(req: NextRequest) {
       // Create passive ledger entries for auditability
       try {
         if (isCrossBorder) {
-          // Cross-border: sender debit in sender currency, receiver credit in receiver currency
-          // These are separate entries because they're in different currencies
+          // Cross-border: atomic creation of sender debit (sender currency) + receiver credit (receiver currency)
           const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${senderCurrency})`;
 
-          // Sender debit in sender currency
-          await createLedgerEntry(
+          await createCrossBorderLedgerPair(
             user.userId,
             senderCurrency,
-            'wallet',
-            'payment_sent',
             numAmount,
-            0,
-            {
-              transactionId: txId,
-              description: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}; converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
-            }
-          );
-
-          // Receiver credit in receiver currency
-          await createLedgerEntry(
             receiver.id,
             receiverCurrency,
-            'wallet',
-            'payment_received',
-            0,
             receiverAmount,
+            txId,
             {
-              transactionId: txId,
-              description: `Received ${receiverAmount} ${receiverCurrency} from @${user.username} (converted from ${numAmount} ${senderCurrency} ${fxDescription})`,
+              senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}; converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
+              receiverDescription: `Received ${receiverAmount} ${receiverCurrency} from @${user.username} (converted from ${numAmount} ${senderCurrency} ${fxDescription})`,
             }
           );
         } else {
-          // Same-currency: single pair of entries (debit + credit)
+          // Same-currency: atomic pair of entries (debit + credit)
           await createLedgerPair(user.userId, receiver.id, senderCurrency, numAmount, txId, {
             entryType: 'payment_sent',
             senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}`,
