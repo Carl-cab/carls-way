@@ -40,8 +40,8 @@ export async function POST(req: Request) {
     }
 
     // Check velocity limits
-    const blocked = await checkVelocityLimit(user.userId, amount, 'transfer');
-    if (blocked) {
+    const velocityResult = await checkVelocityLimit(user.userId, amount, currency);
+    if (!velocityResult.allowed) {
       await sql`
         INSERT INTO audit_logs (user_id, action, metadata)
         VALUES (${user.userId}, 'transfer_intent_blocked', ${JSON.stringify({ type, amount, currency, reason: 'velocity_limit' })})
