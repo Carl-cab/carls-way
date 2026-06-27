@@ -267,3 +267,68 @@ export async function getUserLedgerEntries(userId: number, limit: number = 100):
 
   return entries as unknown as LedgerEntry[];
 }
+
+// Backfill opening balance ledger entries for users with seed balances but no ledger entries.
+// Safe idempotent operation: checks if opening_balance entry exists before creating.
+// Does NOT modify user balances. Called during migration or via admin API.
+// Returns count of entries created.
+export async function backfillOpeningBalances(): Promise<{ cadCount: number; usdCount: number }> {
+  const sql = getSql();
+
+  // Find users with non-zero balance_cad but no opening_balance entry
+  const cadResults = await sql`
+    INSERT INTO ledger_entries (
+      user_id, currency, account_type, entry_type,
+      debit, credit, description
+    )
+    SELECT
+      u.id,
+      'CAD',
+      'wallet',
+      'opening_balance',
+      0,
+      u.balance_cad,
+      'Opening seed balance'
+    FROM users u
+    WHERE u.balance_cad > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM ledger_entries le
+        WHERE le.user_id = u.id
+          AND le.currency = 'CAD'
+          AND le.entry_type = 'opening_balance'
+      )
+    ON CONFLICT DO NOTHING
+    RETURNING user_id
+  `;
+
+  // Find users with non-zero balance_usd but no opening_balance entry
+  const usdResults = await sql`
+    INSERT INTO ledger_entries (
+      user_id, currency, account_type, entry_type,
+      debit, credit, description
+    )
+    SELECT
+      u.id,
+      'USD',
+      'wallet',
+      'opening_balance',
+      0,
+      u.balance_usd,
+      'Opening seed balance'
+    FROM users u
+    WHERE u.balance_usd > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM ledger_entries le
+        WHERE le.user_id = u.id
+          AND le.currency = 'USD'
+          AND le.entry_type = 'opening_balance'
+      )
+    ON CONFLICT DO NOTHING
+    RETURNING user_id
+  `;
+
+  return {
+    cadCount: cadResults.length,
+    usdCount: usdResults.length,
+  };
+}

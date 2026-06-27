@@ -149,6 +149,21 @@ export async function initializeSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS provider_webhook_events (
+      id SERIAL PRIMARY KEY,
+      provider TEXT NOT NULL,
+      provider_event_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      related_provider_reference TEXT,
+      raw_payload JSONB,
+      processing_status TEXT NOT NULL DEFAULT 'received',
+      processing_error TEXT,
+      processed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(provider, provider_event_id)
+    )
+  `;
 }
 
 export default getSql;

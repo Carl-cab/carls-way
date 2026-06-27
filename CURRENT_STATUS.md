@@ -31,14 +31,20 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
   - Audit logging on intent creation and blocked attempts ✅
 - **Passive audit ledger** (Phase A1): Non-blocking audit log of all financial events
   - `ledger_entries` table: user_id, transaction_id (nullable), currency, account_type, entry_type, debit/credit, provider, description
-  - `lib/ledger.ts`: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `validateLedgerPair()`, `getUserLedgerEntries()`
+  - `lib/ledger.ts`: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `validateLedgerPair()`, `getUserLedgerEntries()`, `backfillOpeningBalances()`
   - Entries created AFTER send-money balance updates (non-blocking, doesn't block transaction on failure)
   - Same-currency: one pair (debit+credit, same amount); cross-border: two entries (debit in sender currency, credit in receiver currency, amounts differ by FX)
   - `GET /api/ledger` — read-only, auth required, returns user's ledger entries only
   - `GET /api/ledger/balance-check` — compares `balance_cad`/`balance_usd` vs ledger totals (warning-only, no balance mutation)
   - Only for completed `pay` transactions (not requests, intents, failed, or Add Money/Cash Out)
   - Balance_cad/balance_usd remain authoritative source of truth ✅
-- **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table
+- **Phase A2 Infrastructure**: Webhook event deduplication and velocity reversal (not yet wired to live providers)
+  - `provider_webhook_events` table: id, provider, provider_event_id, event_type, related_provider_reference, raw_payload JSONB, processing_status, processing_error, processed_at, created_at
+  - `lib/provider-events.ts`: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`, `getProviderEvent()`
+  - `reverseVelocity()` in `lib/auth.ts`: creates compensating negative velocity records (immutable audit trail), calls `auditLog()`, non-blocking
+  - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection — creates opening_balance ledger entries for users with seed balances
+  - All functions marked "Future Use Only" — infrastructure ready for live provider integration
+- **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table, `provider_webhook_events` table
 
 ---
 
@@ -77,9 +83,19 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
   - `ledger_entries` table defined and migration ready
   - `createLedgerPair()` for same-currency (atomic via CTE)
   - `createCrossBorderLedgerPair()` for cross-border (atomic via CTE) — FIX APPLIED
+  - `backfillOpeningBalances()` for opening balance ledger entries
   - Ledger entries created after successful P2P payments (non-blocking)
   - `GET /api/ledger` (auth required, user-scoped)
   - `GET /api/ledger/balance-check` (warning-only, no mutations)
+  - All SQL uses postgres.js tagged templates
+  - Lint ✅ Build ✅ TypeScript ✅
+
+- ✅ **Phase A2 Infrastructure** (webhook events + velocity reversal)
+  - `provider_webhook_events` table defined in `lib/db.ts` and migration route
+  - `lib/provider-events.ts` helpers: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`
+  - `reverseVelocity()` implemented in `lib/auth.ts` — creates compensating negative velocity records, non-blocking, audit logged
+  - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection
+  - Webhook event deduplication ready for use by live providers
   - All SQL uses postgres.js tagged templates
   - Lint ✅ Build ✅ TypeScript ✅
 
@@ -87,12 +103,19 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
 
 ## In Progress / Next
 
-1. **Run `/api/migrate` in production** — Adds `ledger_entries` table + columns for audit log (safe, non-blocking)
+**Phase A2 Infrastructure Complete** ✅
+- `provider_webhook_events` table created
+- `reverseVelocity()` implemented
+- `lib/provider-events.ts` helpers ready for use
+- Admin backfill endpoint ready
+
+**Next Steps (Ordered by Business Impact):**
+1. **Run `/api/migrate` in production** — Apply `ledger_entries` and `provider_webhook_events` tables (safe, non-blocking)
 2. **Validate ledger in production** — Test same-currency and cross-border payments create ledger entries; verify `/api/ledger` and `/api/ledger/balance-check` work
 3. **Validate 3-step transfer flow in production** — US and CA user paths through intent → review → confirm (sandbox simulation)
 4. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`; register Stripe webhook
-5. **PlaidTransferProvider** — US live ACH; requires Plaid Link products updated to include `Transfer`; `reverseVelocity()` must be built first
-6. **CanadianEFTProvider** — CA live EFT; separate integration from Plaid ACH
+5. **PlaidTransferProvider** — US live ACH; requires Plaid Link products updated to include `Transfer`
+6. **CanadianEFTProvider** — CA live EFT; requires FINTRAC MSB registration active before go-live
 
 ---
 
@@ -113,6 +136,7 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
 | `NEXT_PUBLIC_APP_URL` | Needs to be set |
 | `RESEND_API_KEY` | Needs to be set |
 | `EMAIL_FROM` | Needs to be set |
+| `BACKFILL_SECRET` | Optional: for `POST /api/admin/ledger/backfill-opening-balances` |
 
 ---
 

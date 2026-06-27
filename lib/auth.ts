@@ -184,6 +184,58 @@ export async function auditLog(userId: number | null, action: string, metadata?:
   } catch { /* Non-blocking */ }
 }
 
+// ─── Velocity Reversal (Future Use: For Returned/Failed Transfers) ───────────
+// Reverses velocity records when a transfer is returned or fails after velocity was recorded.
+// IMPORTANT: Currently for future use only. Not called by P2P payments.
+// Will be used by webhook handlers when transfers are returned (NSF, clawed back, etc.)
+export async function reverseVelocity(
+  userId: number,
+  amount: number,
+  currency: string,
+  reason?: string,
+  relatedEntityId?: number,
+): Promise<void> {
+  // Validation
+  if (amount <= 0) {
+    throw new Error('Reverse amount must be greater than zero');
+  }
+
+  if (currency !== 'CAD' && currency !== 'USD') {
+    throw new Error(`Invalid currency: ${currency}. Must be CAD or USD.`);
+  }
+
+  const sql = getSql();
+
+  // Create a compensating negative velocity record (not deleting historical records)
+  // This allows auditing: original record + reversal = net zero impact
+  try {
+    await sql`
+      INSERT INTO velocity_checks (
+        user_id, period_type, period_start, hourly_amount, daily_amount, weekly_amount
+      )
+      VALUES (
+        ${userId},
+        'reversal',
+        NOW(),
+        -${Math.min(amount, 100000)},  -- Cap at max single transfer amount
+        -${Math.min(amount, 100000)},
+        -${Math.min(amount, 100000)}
+      )
+    `;
+
+    // Audit the reversal for compliance
+    await auditLog(userId, 'velocity_reversed', {
+      amount,
+      currency,
+      reason: reason || 'transfer_returned',
+      relatedEntityId,
+    });
+  } catch (err) {
+    // Log but don't block: reversal is for audit/compliance, not transaction-critical
+    console.error('Velocity reversal failed (non-blocking):', err);
+  }
+}
+
 // ─── Input validation ────────────────────────────────────────────────────────
 export function validateEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);

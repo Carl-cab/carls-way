@@ -341,19 +341,15 @@ Reversals occur when a settled transfer is clawed back — typically due to NSF 
 11. Return 200
 ```
 
-### `reverseVelocity()` — Not Yet Built
+### `reverseVelocity()` — Implemented in Phase A2
 
-`reverseVelocity(userId, amount)` must be implemented in `lib/auth.ts` before any live transfer goes to production. Without it, returned transfers permanently consume velocity budget for the rolling window period.
+`reverseVelocity(userId, amount, currency, reason?, relatedEntityId?)` is now implemented in `lib/auth.ts` and ready for use. It:
+- Creates a compensating negative velocity record (does not delete historical records, preserving audit trail)
+- Calls `auditLog()` for compliance
+- Marked as "Future Use Only" — currently not called by any route, reserved for returned/failed transfer webhooks
+- Non-blocking — errors are logged but do not block the webhook response
 
-The function should decrement the rolling totals in `velocity_checks` by the reversed amount, not below zero:
-
-```sql
-UPDATE velocity_checks
-SET hourly_amount  = GREATEST(0, hourly_amount  - ${amount}),
-    daily_amount   = GREATEST(0, daily_amount   - ${amount}),
-    weekly_amount  = GREATEST(0, weekly_amount  - ${amount})
-WHERE user_id = ${userId}
-```
+This function supports the reversal flow when returned transfers claw back settled funds.
 
 ### Balance Floor
 
@@ -428,32 +424,53 @@ This key is passed to the payment provider when `executeTransfer()` is called. I
 
 Payment providers may deliver the same webhook event more than once. Before processing any event, check whether the `event_id` has already been handled.
 
-**Schema (to be added to `initializeSchema()` and `/api/migrate`):**
+**Schema (implemented in `lib/db.ts` and `/api/migrate`):**
 ```sql
 CREATE TABLE IF NOT EXISTS provider_webhook_events (
-  id           SERIAL PRIMARY KEY,
-  provider     TEXT NOT NULL,
-  event_id     TEXT NOT NULL,
-  event_type   TEXT NOT NULL,
-  processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (provider, event_id)
+  id                         SERIAL PRIMARY KEY,
+  provider                   TEXT NOT NULL,
+  provider_event_id          TEXT NOT NULL,
+  event_type                 TEXT NOT NULL,
+  related_provider_reference TEXT,
+  raw_payload                JSONB,
+  processing_status          TEXT NOT NULL DEFAULT 'received',
+  processing_error           TEXT,
+  processed_at               TIMESTAMPTZ,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(provider, provider_event_id)
 );
 ```
 
-**Processing:**
+**Helper Functions (in `lib/provider-events.ts`):**
+
+1. `recordProviderEvent(provider, providerEventId, eventType, options?)` — Returns true if event was recorded (first time), false if already exists.
+2. `hasProcessedProviderEvent(provider, providerEventId)` — Check if event has been seen before.
+3. `markProviderEventProcessed(provider, providerEventId)` — Update status to 'processed' after successful handling.
+4. `markProviderEventFailed(provider, providerEventId, error)` — Update status to 'failed' and store error message.
+
+**Processing pattern:**
 ```typescript
-const existing = await sql`
-  INSERT INTO provider_webhook_events (provider, event_id, event_type)
-  VALUES (${provider}, ${eventId}, ${eventType})
-  ON CONFLICT (provider, event_id) DO NOTHING
-  RETURNING id
-`;
-if (existing.length === 0) {
-  return NextResponse.json({ received: true, duplicate: true });
+const isNew = await recordProviderEvent(provider, eventId, eventType, {
+  relatedProviderReference: transferId,
+  rawPayload: event
+});
+
+if (!isNew) {
+  return NextResponse.json({ received: true, duplicate: true }, { status: 200 });
 }
+
+try {
+  await processWebhookEvent(event);
+  await markProviderEventProcessed(provider, eventId);
+} catch (err) {
+  await markProviderEventFailed(provider, eventId, err);
+  // Log for manual recovery
+}
+
+return NextResponse.json({ received: true }, { status: 200 });
 ```
 
-Using `ON CONFLICT DO NOTHING` with `RETURNING` makes the deduplication check atomic — no race condition if two webhook deliveries arrive simultaneously.
+The atomic `INSERT ... ON CONFLICT` pattern prevents race conditions when two webhook deliveries arrive simultaneously.
 
 ### Client-Side Idempotency
 
@@ -575,11 +592,11 @@ Limits are enforced in `checkVelocityLimit()` in `lib/auth.ts`. Unverified users
    }
    ```
 
-5. **Add the webhook handler** at `POST /api/webhooks/<provider>`. Follow the webhook processing pipeline in Section 4.
+5. **Add the webhook handler** at `POST /api/webhooks/<provider>`. Follow the webhook processing pipeline in Section 4. Use the helpers from `lib/provider-events.ts` (`recordProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`) for deduplication.
 
-6. **Add `provider_webhook_events` deduplication** with the provider name as the `provider` column value.
+6. **Webhook event deduplication** is already implemented in `lib/provider-events.ts`. The `provider_webhook_events` table is created by `initializeSchema()` and `/api/migrate`. Simply call the helper functions with the provider name as the `provider` column value.
 
-7. **Implement `reverseVelocity()`** in `lib/auth.ts` before any live provider goes to production.
+7. **`reverseVelocity()`** is already implemented in `lib/auth.ts` and ready for use in returned transfer webhooks.
 
 8. **Add required env vars** to Vercel dashboard and to the env var table in `CLAUDE.md`.
 

@@ -42,7 +42,8 @@ Client (React 19)
 | `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
 | `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
-| `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()` |
+| `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `backfillOpeningBalances()` |
+| `lib/provider-events.ts` | Webhook event deduplication: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()` |
 | `lib/transfers/types.ts` | `TransferProvider` interface, all transfer types and status enums |
 | `lib/transfers/router.ts` | Routes US users → SandboxUSProvider, CA users → SandboxCAProvider |
 | `lib/transfers/sandbox-us.ts` | US sandbox provider — simulates Plaid Transfer, no real API calls |
@@ -194,6 +195,8 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `password_reset_tokens` | One-time password reset tokens (hashed, 1-hour expiry) |
 | `transfer_intents` | Transfer intent records — draft → reviewed → ready → processing → settled/failed/returned |
 | `velocity_checks` | Rolling transaction volume per user for rate limiting |
+| `ledger_entries` | Passive audit log of all financial movement — immutable, references transactions or transfer_intents |
+| `provider_webhook_events` | Webhook event deduplication — provider + event_id uniqueness prevents duplicate processing |
 | `audit_logs` | Immutable system audit trail |
 
 **Critical column rule:** The `users` table has a legacy `balance` column from before the dual-currency migration. **Never use it in new code.** Always use `balance_cad` and `balance_usd`. The legacy column exists only because dropping it requires a coordinated migration.

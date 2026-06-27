@@ -123,6 +123,23 @@ export async function GET() {
       )
     `;
 
+    // Create provider_webhook_events table if it doesn't exist
+    await sql`
+      CREATE TABLE IF NOT EXISTS provider_webhook_events (
+        id SERIAL PRIMARY KEY,
+        provider TEXT NOT NULL,
+        provider_event_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        related_provider_reference TEXT,
+        raw_payload JSONB,
+        processing_status TEXT NOT NULL DEFAULT 'received',
+        processing_error TEXT,
+        processed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(provider, provider_event_id)
+      )
+    `;
+
     return NextResponse.json({ success: true, message: 'Schema migration completed successfully' });
   } catch (err) {
     console.error('Migration error:', err);
