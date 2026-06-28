@@ -1,6 +1,6 @@
 # Manna — Banking Architecture
 
-> Engineering reference for the transfer subsystem. Covers the full lifecycle of a transfer from intent creation through settlement or failure, the provider abstraction layer, ledger model, webhook processing, and compliance obligations. Updated: 2026-06-26.
+> Engineering reference for the transfer subsystem. Covers the full lifecycle of a transfer from intent creation through settlement or failure, the provider abstraction layer, ledger model, webhook processing, and compliance obligations. Updated: 2026-06-28 (Phase B1 Webhook Receiver Framework complete).
 
 ---
 

@@ -2,6 +2,8 @@
 
 > Engineering reference for transfer and payment state transitions. Defines all states, valid transitions, who drives each transition, when balances change, when ledger entries are created, and how failures are handled.
 
+Last updated: 2026-06-28 (Phase B1 Webhook Receiver Framework complete)
+
 ---
 
 ## 1. Transfer States
@@ -321,21 +323,59 @@ Provider retries webhook delivery, our server receives event twice.
 - ✅ Non-blocking ledger creation
 - ✅ Read-only ledger APIs
 
-### Phase A2 (Next): Financial State Machine + Add Money/Cash Out Ledger
-- [ ] Implement reverseVelocity() in lib/auth.ts
-- [ ] Add provider_webhook_events table
-- [ ] Add ledger entries for Add Money (add_money intent → settled)
-- [ ] Add ledger entries for Cash Out (cash_out intent → settled)
-- [ ] Add ledger entries for returned transfers (reversal pair)
-- [ ] Add /api/webhooks/{provider}/transfer webhook handler skeleton
+### Phase A2 (Complete): Webhook Infrastructure + Velocity Reversal
+- ✅ Implement `reverseVelocity()` in `lib/auth.ts` (creates compensating negative velocity records)
+- ✅ Add `provider_webhook_events` table with UNIQUE(provider, provider_event_id) constraint
+- ✅ Webhook event deduplication helpers: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`
+- ✅ Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection and ?dryRun=true option
+- ✅ All functions marked "Future Use Only" (not yet wired to live providers)
 
-### Phase B: Live US Provider (PlaidTransferProvider)
-- [ ] Implement executeTransfer() calling Plaid Transfer API
+### Phase A3 (Complete): Provider Execution Framework
+- ✅ `TransferProvider` interface with 7 standardized methods (createIntent, reviewTransfer, confirmTransfer, executeTransfer, cancelTransfer, getTransferStatus, handleWebhookEvent)
+- ✅ `TransferProviderFactory` with centralized provider selection logic
+- ✅ `SandboxUSProvider` — fully implemented, no real API calls, no balance mutations
+- ✅ `SandboxCAProvider` — fully implemented, no real API calls, no balance mutations
+- ✅ `PlaidTransferProvider` — placeholder implementation (throws "Not implemented")
+- ✅ `CanadianEFTProvider` — placeholder implementation (throws "Not implemented")
+- ✅ Backward compatibility via `lib/transfers/router.ts` (re-exports from factory)
+- ✅ Critical constraint enforced: No provider may update balances
+
+### Phase A4 (Complete): Settlement Processor Skeleton
+- ✅ `lib/settlement/types.ts`: Event types, outcome objects, transition rules
+- ✅ `lib/settlement/settlement-rules.ts`: Valid transitions, terminal/processing states
+- ✅ `lib/settlement/SettlementProcessor.ts`: Core processor with state machine logic
+- ✅ `normalizeProviderEvent()`: Converts provider events to canonical form
+- ✅ `validateSettlementTransition()`: Checks if transition is valid
+- ✅ `processSettlementEvent()`: Main processing logic with idempotency support
+- ✅ SettlementOutcome always returns `shouldUpdateBalance: false`, `shouldCreateLedgerEntry: false`
+- ✅ Dev endpoint `/api/dev/settlement-test` validates transitions
+- ✅ No balance updates, no ledger entries, no provider calls
+- ✅ Critical constraint enforced: Settlement processor is pure state machine (structure only)
+
+### Phase B1 (Complete): Webhook Receiver Framework
+- ✅ `POST /api/webhooks/plaid`: HMAC-SHA256 signature verification, event deduplication, idempotency
+- ✅ `POST /api/webhooks/stripe`: KYC logic preserved, financial events recorded
+- ✅ Event intake with raw body for signature verification
+- ✅ UNIQUE(provider, provider_event_id) prevents duplicate processing
+- ✅ All webhooks return 200 (prevents retries on transient errors)
+- ✅ No balance updates, no ledger entries, no settlement logic wired (Phase B2)
+
+### Phase B2 (Next): Settlement Event Processing
+- [ ] Wire SettlementProcessor into Plaid webhook handler
+- [ ] Wire SettlementProcessor into Stripe webhook handler
+- [ ] Implement balance updates (Add Money: += on settled, Cash Out: no change on settled)
+- [ ] Implement ledger entry creation (via Phase A1 helpers)
+- [ ] Implement user notifications on settlement/failure
+- [ ] Implement velocity reversal on returned transfers
+- [ ] Test webhook flow in sandbox for both sandbox providers
+
+### Phase B3: Live US Provider (PlaidTransferProvider)
+- [ ] Implement `executeTransfer()` calling Plaid Transfer API
+- [ ] Implement `handleWebhookEvent()` via webhook routes (reuse B2 logic)
 - [ ] Update Plaid Link to include Transfer product
-- [ ] Update user bank accounts (re-link required)
 - [ ] Production test in Plaid sandbox
 
-### Phase C: Live CA Provider (CanadianEFTProvider)
+### Phase B4: Live CA Provider (CanadianEFTProvider)
 - [ ] Implement Stripe ACSS for Add Money
 - [ ] Implement VoPay Interac for Cash Out
 - [ ] FINTRAC registration complete
