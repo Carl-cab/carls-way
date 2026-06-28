@@ -159,6 +159,85 @@ export async function GET() {
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
     await sql`ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
 
+    // Milestone 4: Create admin tables for RBAC
+    // Admin users separate from customer users - different auth context
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_users (
+        id SERIAL PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        last_login_at TIMESTAMPTZ,
+        failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+        locked_until TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Admin roles: SuperAdmin, OperationsAdmin, FinancialInvestigator, ComplianceOfficer, ReadOnlyAuditor
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_roles (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Permissions: granular access control
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_permissions (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        category TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Join table: roles have permissions
+    await sql`
+      CREATE TABLE IF NOT EXISTS role_permissions (
+        role_id INTEGER NOT NULL REFERENCES admin_roles(id),
+        permission_id INTEGER NOT NULL REFERENCES admin_permissions(id),
+        PRIMARY KEY (role_id, permission_id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Admin sessions for authentication
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        id TEXT PRIMARY KEY,
+        admin_user_id INTEGER NOT NULL REFERENCES admin_users(id),
+        token_hash TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Audit log hooks for Milestone 5 (prepare structure, don't populate yet)
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_audit_logs (
+        id SERIAL PRIMARY KEY,
+        admin_user_id INTEGER NOT NULL REFERENCES admin_users(id),
+        action TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT,
+        changes JSONB,
+        correlation_id VARCHAR(255),
+        ip_address TEXT,
+        user_agent TEXT,
+        status TEXT NOT NULL DEFAULT 'success',
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
     return NextResponse.json({ success: true, message: 'Schema migration completed successfully' });
   } catch (err) {
     console.error('Migration error:', err);
