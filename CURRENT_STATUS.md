@@ -44,6 +44,13 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
   - `reverseVelocity()` in `lib/auth.ts`: creates compensating negative velocity records (immutable audit trail), calls `auditLog()`, non-blocking
   - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection — creates opening_balance ledger entries for users with seed balances
   - All functions marked "Future Use Only" — infrastructure ready for live provider integration
+- ✅ **Phase A3 Provider Execution Framework**: Complete provider abstraction and factory pattern
+  - `lib/providers/TransferProvider.ts`: Core interface with 7 methods (createIntent, reviewTransfer, confirmTransfer, executeTransfer, cancelTransfer, getTransferStatus, handleWebhookEvent)
+  - `lib/providers/TransferProviderFactory.ts`: Central selection logic — US+sandbox→SandboxUS, CA+sandbox→SandboxCA, US+live→Plaid, CA+live→CanadianEFT
+  - `SandboxUSProvider` and `SandboxCAProvider` — fully implemented, behavior unchanged, no real API calls
+  - `PlaidTransferProvider` and `CanadianEFTProvider` — placeholder implementations (throw "Not implemented")
+  - **Critical constraint:** No provider may update balances — all balance changes happen ONLY via settlement webhooks
+  - All provider selection routed through factory — no provider logic elsewhere in application
 - **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table, `provider_webhook_events` table
 
 ---
@@ -79,7 +86,14 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
 
 ## Ready for Production Deploy
 
-- ✅ **Passive audit ledger** (Phase A1 — review complete, bugs fixed)
+- ✅ **Provider Execution Framework** (Phase A3 — complete)
+  - `lib/providers/` directory with 4 providers (2 sandbox, 2 placeholder)
+  - `TransferProvider` interface with 7 required methods
+  - `TransferProviderFactory` for centralized provider selection
+  - All sandbox behavior unchanged, no API calls, no balance mutations
+  - Lint ✅ Build ✅ TypeScript ✅
+
+- ✅ **Phase A2 Infrastructure** (review complete, bugs fixed)
   - `ledger_entries` table defined and migration ready
   - `createLedgerPair()` for same-currency (atomic via CTE)
   - `createCrossBorderLedgerPair()` for cross-border (atomic via CTE) — FIX APPLIED

@@ -1,19 +1,18 @@
-// Canadian sandbox transfer provider.
-// Simulates Canadian EFT (Electronic Funds Transfer) without making any real API calls.
-// No money moves. No balance changes. No external API calls.
-// Replace with CanadianEFTProvider when live CA EFT is ready.
-// NOTE: Plaid Transfer (ACH) is US-only. Canadian users must use this provider.
+// US sandbox transfer provider.
+// Simulates Plaid Transfer (ACH debit/credit) without making any real API calls.
+// No money moves. No balance changes. No Plaid API calls.
+// Replace with PlaidTransferProvider when live US ACH is ready.
 
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import type {
   TransferProvider, TransferType, CreateIntentResult,
-  ReviewResult, ConfirmResult, WebhookResult,
-} from './types';
+  ReviewResult, ConfirmResult, CancelResult, TransferStatusResult, WebhookResult,
+} from './TransferProvider';
 
-export class SandboxCAProvider implements TransferProvider {
-  readonly providerName = 'sandbox_ca' as const;
-  readonly providerRegion = 'CA' as const;
+export class SandboxUSProvider implements TransferProvider {
+  readonly providerName = 'sandbox_us' as const;
+  readonly providerRegion = 'US' as const;
   readonly executionMode = 'sandbox' as const;
 
   async createIntent(
@@ -24,7 +23,7 @@ export class SandboxCAProvider implements TransferProvider {
     currency: string,
   ): Promise<CreateIntentResult> {
     const sql = getSql();
-    const idempotencyKey = `ca_${userId}_${Date.now()}`;
+    const idempotencyKey = `us_${userId}_${Date.now()}`;
 
     const result = await sql`
       INSERT INTO transfer_intents (
@@ -32,7 +31,7 @@ export class SandboxCAProvider implements TransferProvider {
         provider_region, provider_name, execution_mode, idempotency_key
       ) VALUES (
         ${userId}, ${bankAccountId}, ${type}, ${amount}, ${currency}, 'draft',
-        'CA', 'sandbox_ca', 'sandbox', ${idempotencyKey}
+        'US', 'sandbox_us', 'sandbox', ${idempotencyKey}
       )
       RETURNING id
     `;
@@ -40,10 +39,10 @@ export class SandboxCAProvider implements TransferProvider {
     const intentId = result[0].id as number;
     await auditLog(userId, 'transfer_intent_created', {
       intent_id: intentId, type, amount, currency,
-      provider: 'sandbox_ca', mode: 'sandbox',
+      provider: 'sandbox_us', mode: 'sandbox',
     });
 
-    return { intent_id: intentId, status: 'draft', provider_name: 'sandbox_ca', provider_region: 'CA', execution_mode: 'sandbox' };
+    return { intent_id: intentId, status: 'draft', provider_name: 'sandbox_us', provider_region: 'US', execution_mode: 'sandbox' };
   }
 
   async reviewTransfer(intentId: number, userId: number): Promise<ReviewResult> {
@@ -60,8 +59,8 @@ export class SandboxCAProvider implements TransferProvider {
     const row = rows[0];
 
     const consentLanguage = row.type === 'add_money'
-      ? `By confirming, you authorize Manna to initiate a Canadian EFT debit from your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. This is a sandbox simulation — no money will move.`
-      : `By confirming, you authorize Manna to initiate a Canadian EFT credit to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. This is a sandbox simulation — no money will move.`;
+      ? `By confirming, you authorize Manna to debit your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. This is a sandbox simulation — no money will move.`
+      : `By confirming, you authorize Manna to deposit ${row.currency} ${Number(row.amount).toFixed(2)} to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'}. This is a sandbox simulation — no money will move.`;
 
     return {
       intent_id: intentId,
@@ -77,8 +76,8 @@ export class SandboxCAProvider implements TransferProvider {
           account_mask: row.account_mask,
           currency: row.account_currency,
         },
-        provider_name: 'sandbox_ca',
-        provider_region: 'CA',
+        provider_name: 'sandbox_us',
+        provider_region: 'US',
         execution_mode: 'sandbox',
         settlement_estimate: 'Sandbox — no settlement (simulation only)',
         consent_language: consentLanguage,
@@ -103,21 +102,21 @@ export class SandboxCAProvider implements TransferProvider {
     `;
 
     await auditLog(userId, 'transfer_intent_confirmed', {
-      intent_id: intentId, provider: 'sandbox_ca', mode: 'sandbox',
+      intent_id: intentId, provider: 'sandbox_us', mode: 'sandbox',
     });
 
     return {
       intent_id: intentId,
       status: 'ready',
-      message: 'Canadian transfer simulation confirmed. No money moved — sandbox mode.',
+      message: 'US transfer simulation confirmed. No money moved — sandbox mode.',
     };
   }
 
   async executeTransfer(): Promise<never> {
-    throw new Error('SandboxCAProvider does not support live execution. Switch to CanadianEFTProvider for real transfers.');
+    throw new Error('SandboxUSProvider does not support live execution. Switch to PlaidTransferProvider for real transfers.');
   }
 
-  async cancelTransfer(intentId: number, userId: number) {
+  async cancelTransfer(intentId: number, userId: number): Promise<CancelResult> {
     const sql = getSql();
     const rows = await sql`
       SELECT id, status FROM transfer_intents
@@ -138,17 +137,17 @@ export class SandboxCAProvider implements TransferProvider {
     `;
 
     await auditLog(userId, 'transfer_intent_cancelled', {
-      intent_id: intentId, provider: 'sandbox_ca', previous_status: currentStatus,
+      intent_id: intentId, provider: 'sandbox_us', previous_status: currentStatus,
     });
 
     return {
       intent_id: intentId,
-      status: 'cancelled' as const,
+      status: 'cancelled',
       message: `Transfer cancelled (was ${currentStatus}).`,
     };
   }
 
-  async getTransferStatus(intentId: number, userId: number) {
+  async getTransferStatus(intentId: number, userId: number): Promise<TransferStatusResult> {
     const sql = getSql();
     const rows = await sql`
       SELECT id, status, provider_reference_id, failure_reason, updated_at

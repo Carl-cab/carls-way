@@ -116,6 +116,57 @@ export class SandboxUSProvider implements TransferProvider {
     throw new Error('SandboxUSProvider does not support live execution. Switch to PlaidTransferProvider for real transfers.');
   }
 
+  async cancelTransfer(intentId: number, userId: number) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, status FROM transfer_intents
+      WHERE id = ${intentId} AND user_id = ${userId}
+    `;
+
+    if (!rows[0]) throw new Error('Transfer intent not found');
+    const currentStatus = rows[0].status;
+
+    if (currentStatus !== 'draft' && currentStatus !== 'ready') {
+      throw new Error(`Cannot cancel transfer in status: ${currentStatus}`);
+    }
+
+    await sql`
+      UPDATE transfer_intents
+      SET status = 'cancelled', updated_at = NOW()
+      WHERE id = ${intentId} AND user_id = ${userId}
+    `;
+
+    await auditLog(userId, 'transfer_intent_cancelled', {
+      intent_id: intentId, provider: 'sandbox_us', previous_status: currentStatus,
+    });
+
+    return {
+      intent_id: intentId,
+      status: 'cancelled' as const,
+      message: `Transfer cancelled (was ${currentStatus}).`,
+    };
+  }
+
+  async getTransferStatus(intentId: number, userId: number) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, status, provider_reference_id, failure_reason, updated_at
+      FROM transfer_intents
+      WHERE id = ${intentId} AND user_id = ${userId}
+    `;
+
+    if (!rows[0]) throw new Error('Transfer intent not found');
+    const row = rows[0];
+
+    return {
+      intent_id: intentId,
+      status: row.status,
+      provider_reference_id: row.provider_reference_id,
+      failure_reason: row.failure_reason,
+      updated_at: row.updated_at,
+    };
+  }
+
   async handleWebhookEvent(): Promise<WebhookResult> {
     return { processed: false, message: 'Sandbox provider does not process webhooks' };
   }

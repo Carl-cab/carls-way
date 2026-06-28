@@ -44,10 +44,13 @@ Client (React 19)
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
 | `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `backfillOpeningBalances()` |
 | `lib/provider-events.ts` | Webhook event deduplication: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()` |
-| `lib/transfers/types.ts` | `TransferProvider` interface, all transfer types and status enums |
-| `lib/transfers/router.ts` | Routes US users → SandboxUSProvider, CA users → SandboxCAProvider |
-| `lib/transfers/sandbox-us.ts` | US sandbox provider — simulates Plaid Transfer, no real API calls |
-| `lib/transfers/sandbox-ca.ts` | CA sandbox provider — simulates Canadian EFT, no real API calls |
+| `lib/providers/TransferProvider.ts` | Core `TransferProvider` interface — all 7 methods each provider must implement |
+| `lib/providers/TransferProviderFactory.ts` | Central provider selection logic — no other code should select providers |
+| `lib/providers/SandboxUSProvider.ts` | US sandbox provider — simulates Plaid Transfer ACH, no real API calls |
+| `lib/providers/SandboxCAProvider.ts` | CA sandbox provider — simulates Canadian EFT, no real API calls |
+| `lib/providers/PlaidTransferProvider.ts` | Placeholder for US live ACH (throws "Not implemented") |
+| `lib/providers/CanadianEFTProvider.ts` | Placeholder for CA live EFT (throws "Not implemented") |
+| `lib/transfers/router.ts` | Compatibility layer — re-exports from `lib/providers/TransferProviderFactory` (DEPRECATED) |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 
 ---

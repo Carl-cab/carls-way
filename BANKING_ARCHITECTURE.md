@@ -80,9 +80,9 @@ Terminal states: `settled`, `failed`, `returned`, `cancelled`, `blocked`.
 
 ## 2. Provider Abstraction
 
-All payment rail logic is isolated behind the `TransferProvider` interface. API routes never import provider classes directly — they call `getTransferProvider(region)` from the router.
+All payment rail logic is isolated behind the `TransferProvider` interface. API routes use `getTransferProvider()` from the **TransferProviderFactory**. No provider classes are imported directly anywhere else in the application.
 
-### Interface (`lib/transfers/types.ts`)
+### Interface (`lib/providers/TransferProvider.ts`)
 
 ```typescript
 export interface TransferProvider {
@@ -90,66 +90,59 @@ export interface TransferProvider {
   readonly providerRegion: ProviderRegion;
   readonly executionMode: ExecutionMode;
 
-  createIntent(
-    userId: number,
-    bankAccountId: number,
-    type: TransferType,
-    amount: number,
-    currency: string,
-  ): Promise<CreateIntentResult>;
-
-  reviewTransfer(intentId: number, userId: number): Promise<ReviewResult>;
-
-  confirmTransfer(intentId: number, userId: number): Promise<ConfirmResult>;
-
-  executeTransfer(intentId: number, userId: number): Promise<never>;
-
-  handleWebhookEvent(rawPayload: string, signature: string): Promise<WebhookResult>;
+  createIntent(userId, bankAccountId, type, amount, currency): Promise<CreateIntentResult>;
+  reviewTransfer(intentId, userId): Promise<ReviewResult>;
+  confirmTransfer(intentId, userId): Promise<ConfirmResult>;
+  executeTransfer(intentId, userId): Promise<never>;
+  cancelTransfer(intentId, userId): Promise<CancelResult>;
+  getTransferStatus(intentId, userId): Promise<TransferStatusResult>;
+  handleWebhookEvent(rawPayload): Promise<WebhookResult>;
 }
 ```
 
-`executeTransfer` is typed as `Promise<never>` — every call must either complete the transfer (live provider) or throw (sandbox). There is no path where it silently returns without action.
+**Method Rules:**
+- `createIntent()` — no external call, no balance change
+- `reviewTransfer()` — no external call, no balance change
+- `confirmTransfer()` — no external call, no balance change, records consent
+- `executeTransfer()` — sandbox throws; live providers call payment rail and set status='processing'
+- `cancelTransfer()` — allowed in draft/ready states only
+- `getTransferStatus()` — read-only, returns current status
+- `handleWebhookEvent()` — sandbox no-op; live providers update status based on provider response
+- **CRITICAL:** No provider may update balances. Balance changes happen ONLY via settlement webhooks.
+
+### Provider Factory (`lib/providers/TransferProviderFactory.ts`)
+
+Central provider selection logic:
+
+```typescript
+export function getTransferProvider(region: 'US' | 'CA', mode: 'sandbox' | 'live' = 'sandbox'): TransferProvider
+```
+
+**Factory Rules:**
+| Region | Sandbox | Live |
+|--------|---------|------|
+| US | SandboxUSProvider | PlaidTransferProvider (if `PLAID_TRANSFER_LIVE=true`) |
+| CA | SandboxCAProvider | CanadianEFTProvider (if `CA_EFT_LIVE=true`) |
+
+Falls back to sandbox if live env var not set.
 
 ### Provider Files
 
-| File | Class | Region | Mode |
-|---|---|---|---|
-| `lib/transfers/sandbox-us.ts` | `SandboxUSProvider` | US | sandbox |
-| `lib/transfers/sandbox-ca.ts` | `SandboxCAProvider` | CA | sandbox |
-| `lib/transfers/plaid-transfer.ts` | `PlaidTransferProvider` | US | live (not yet built) |
-| `lib/transfers/canadian-eft.ts` | `CanadianEFTProvider` | CA | live (not yet built) |
-
-### Router (`lib/transfers/router.ts`)
-
-```typescript
-export function getTransferProvider(region: UserRegion): TransferProvider {
-  if (region === 'US') return new SandboxUSProvider();
-  return new SandboxCAProvider();
-}
-
-export function regionFromCountry(country: string): UserRegion {
-  return country === 'US' ? 'US' : 'CA';
-}
-```
-
-When a live provider is ready, swap it in here behind an environment gate:
-
-```typescript
-if (region === 'US') {
-  return process.env.USE_LIVE_PLAID === 'true'
-    ? new PlaidTransferProvider()
-    : new SandboxUSProvider();
-}
-```
-
-The rest of the codebase — API routes, UI, audit logging — does not change when swapping providers.
+| File | Class | Region | Mode | Status |
+|---|---|---|---|---|
+| `lib/providers/SandboxUSProvider.ts` | `SandboxUSProvider` | US | sandbox | ✅ Live |
+| `lib/providers/SandboxCAProvider.ts` | `SandboxCAProvider` | CA | sandbox | ✅ Live |
+| `lib/providers/PlaidTransferProvider.ts` | `PlaidTransferProvider` | US | live | ⏳ Placeholder (not implemented) |
+| `lib/providers/CanadianEFTProvider.ts` | `CanadianEFTProvider` | CA | live | ⏳ Placeholder (not implemented) |
 
 ### Provider Contract Rules
 
 - `providerName`, `providerRegion`, and `executionMode` are `readonly` — set once at class definition, never changed at runtime.
 - `provider_region` is written to `transfer_intents` at intent creation and never updated. The same provider class used at creation is re-selected for review and confirm by reading this column.
-- CA providers must never generate ACH language. US providers must never generate EFT language.
+- **No provider may update balances directly.** All balance changes happen via settlement webhooks only.
 - Sandbox providers must throw in `executeTransfer()` with a message identifying the sandbox class.
+- CA providers must never generate ACH language. US providers must never generate EFT language.
+- Live providers throw "Not implemented" until development begins.
 
 ---
 
@@ -576,31 +569,37 @@ Limits are enforced in `checkVelocityLimit()` in `lib/auth.ts`. Unverified users
 
 ### Adding a New Provider — Checklist
 
-1. **Create the provider file** in `lib/transfers/`. Export a single class implementing `TransferProvider`.
+1. **Create the provider file** in `lib/providers/`. Export a single class implementing `TransferProvider`.
 
-2. **Implement all 5 interface methods.** `executeTransfer` must make the real API call for live providers — it must not throw.
+2. **Implement all 7 interface methods:**
+   - `createIntent()` — no real API calls
+   - `reviewTransfer()` — no real API calls
+   - `confirmTransfer()` — no real API calls
+   - `executeTransfer()` — sandbox throws; live calls payment rail, returns never
+   - `cancelTransfer()` — no real API calls
+   - `getTransferStatus()` — read-only
+   - `handleWebhookEvent()` — sandbox no-op; live updates status
 
-3. **Add the provider name to `ProviderName`** in `lib/transfers/types.ts`:
+3. **Update `TransferProviderFactory.ts`** to wire the provider behind an env gate:
    ```typescript
-   export type ProviderName = 'sandbox_us' | 'sandbox_ca' | 'plaid_transfer' | 'canadian_eft';
-   ```
-
-4. **Wire the provider in `router.ts`** behind an env gate:
-   ```typescript
-   if (region === 'US' && process.env.PLAID_TRANSFER_LIVE === 'true') {
-     return new PlaidTransferProvider();
+   if (region === 'US' && mode === 'live') {
+     if (process.env.PLAID_TRANSFER_LIVE === 'true') {
+       return new PlaidTransferProvider();
+     }
    }
    ```
 
-5. **Add the webhook handler** at `POST /api/webhooks/<provider>`. Follow the webhook processing pipeline in Section 4. Use the helpers from `lib/provider-events.ts` (`recordProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`) for deduplication.
+4. **Add the webhook handler** at `POST /api/webhooks/<provider>`. Use the helpers from `lib/provider-events.ts` (`recordProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`) for deduplication.
 
-6. **Webhook event deduplication** is already implemented in `lib/provider-events.ts`. The `provider_webhook_events` table is created by `initializeSchema()` and `/api/migrate`. Simply call the helper functions with the provider name as the `provider` column value.
+5. **Webhook event deduplication** is already implemented. The `provider_webhook_events` table is created by `initializeSchema()` and `/api/migrate`. Call the helpers with the provider name.
 
-7. **`reverseVelocity()`** is already implemented in `lib/auth.ts` and ready for use in returned transfer webhooks.
+6. **`reverseVelocity()`** is implemented and ready for returned transfer webhooks.
 
-8. **Add required env vars** to Vercel dashboard and to the env var table in `CLAUDE.md`.
+7. **Balance updates** must happen ONLY in webhook handlers after settlement confirmation. Never in provider code.
 
-9. **Add migration** to `app/api/migrate/route.ts` and `lib/db.ts` for any new tables.
+8. **Add required env vars** to Vercel dashboard and to `CLAUDE.md`.
+
+9. **Add migrations** to `app/api/migrate/route.ts` and `lib/db.ts` for any new tables.
 
 ### PlaidTransferProvider (US ACH)
 

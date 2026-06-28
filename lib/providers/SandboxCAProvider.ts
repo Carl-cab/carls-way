@@ -8,8 +8,8 @@ import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import type {
   TransferProvider, TransferType, CreateIntentResult,
-  ReviewResult, ConfirmResult, WebhookResult,
-} from './types';
+  ReviewResult, ConfirmResult, CancelResult, TransferStatusResult, WebhookResult,
+} from './TransferProvider';
 
 export class SandboxCAProvider implements TransferProvider {
   readonly providerName = 'sandbox_ca' as const;
@@ -117,7 +117,7 @@ export class SandboxCAProvider implements TransferProvider {
     throw new Error('SandboxCAProvider does not support live execution. Switch to CanadianEFTProvider for real transfers.');
   }
 
-  async cancelTransfer(intentId: number, userId: number) {
+  async cancelTransfer(intentId: number, userId: number): Promise<CancelResult> {
     const sql = getSql();
     const rows = await sql`
       SELECT id, status FROM transfer_intents
@@ -143,12 +143,12 @@ export class SandboxCAProvider implements TransferProvider {
 
     return {
       intent_id: intentId,
-      status: 'cancelled' as const,
+      status: 'cancelled',
       message: `Transfer cancelled (was ${currentStatus}).`,
     };
   }
 
-  async getTransferStatus(intentId: number, userId: number) {
+  async getTransferStatus(intentId: number, userId: number): Promise<TransferStatusResult> {
     const sql = getSql();
     const rows = await sql`
       SELECT id, status, provider_reference_id, failure_reason, updated_at
