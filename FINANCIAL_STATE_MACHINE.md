@@ -369,14 +369,34 @@ Provider retries webhook delivery, our server receives event twice.
 - ✅ Pure planning layer: no execution, no side effects
 - ✅ Webhook handlers can return SettlementPlan for Phase B3 execution
 
-### Phase B3 (Next): Settlement Execution
-- [ ] Wire orchestrator into webhook handlers (return SettlementPlan)
-- [ ] Implement execution of plans: balance updates, ledger entries, notifications
-- [ ] Implement velocity reversal on returned transfers
-- [ ] Implement transfer_intents status updates
-- [ ] Test webhook flow in sandbox: event → plan → execute → verify
+### Phase B3.1 (Complete): Settlement Status Executor
+- ✅ `lib/settlement/SettlementExecutor.ts`: Core executor with `executeSettlementPlan()`
+- ✅ `SettlementExecutionResult`: success, intentId, previousStatus, newStatus, updated, reason, error
+- ✅ Updates `transfer_intents.status` and `transfer_intents.updated_at` only
+- ✅ Idempotent: if already at target status, returns success without updating
+- ✅ Wired into `POST /api/webhooks/plaid`: TRANSFER/STATUS_UPDATE handler
+- ✅ `handleTransferEventStatusUpdate()`: Creates NormalizedEvent, calls orchestrator, calls executor
+- ✅ `mapPlaidTransferStatus()`: Maps Plaid statuses to SettlementEventType
+- ✅ Constraint: Status transitions only — NO balance, NO ledger, NO notifications, NO velocity
+
+### Phase B3.2 (Next): Balance & Ledger Executor
+- [ ] Implement `executeBalanceUpdate()` — atomic UPDATE to users.balance_X
+- [ ] Implement `createSettlementLedgerEntries()` — INSERT ledger entries atomically
+- [ ] Verify balance never negative before debit
+- [ ] Link ledger entries to transfer_intents via transfer_intent_id
+- [ ] Support entry types: transfer_settlement, transfer_reversal
+
+### Phase B3.3 (Next): Notification & Velocity Executor
+- [ ] Implement `notifyUser()` — create notification if plan.notifyUser
+- [ ] Implement `reverseVelocity()` execution — compensating records for returned transfers
+- [ ] Non-blocking: notification/velocity failures don't fail settlement
+
+### Phase B3 Integration
+- [ ] Test webhook flow in sandbox: event → orchestrate → execute (B3.1, B3.2, B3.3)
+- [ ] Verify status transitions recorded correctly
 - [ ] Verify balance changes ONLY on settled webhooks
 - [ ] Verify ledger entries created with correct amounts
+- [ ] Verify velocity reversed on returned transfers
 
 ### Phase B4: Live US Provider (PlaidTransferProvider)
 - [ ] Implement `executeTransfer()` calling Plaid Transfer API

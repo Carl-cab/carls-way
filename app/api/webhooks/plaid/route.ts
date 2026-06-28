@@ -3,6 +3,8 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { createHash, timingSafeEqual } from 'crypto';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
+import type { SettlementEventType } from '@/lib/settlement';
 
 // ─── JWK cache ────────────────────────────────────────────────────────────────
 // Plaid rotates keys infrequently; cache the JWKS for the lifetime of the
@@ -196,6 +198,88 @@ async function handleItemPendingExpiration(payload: PlaidWebhookPayload) {
   });
 }
 
+async function handleTransferEventStatusUpdate(
+  payload: PlaidWebhookPayload,
+  webhookId: string
+) {
+  // Phase B3.1: Handle transfer settlement events
+  // Extract transfer_id from payload data
+  const transferId = (payload.data as Record<string, unknown>)?.transfer_id as
+    | string
+    | undefined;
+  if (!transferId) {
+    console.warn('[plaid-webhook] TRANSFER event missing transfer_id');
+    return;
+  }
+
+  try {
+    const eventStatus = (payload.data as Record<string, unknown>)?.status as
+      | string
+      | undefined;
+
+    // Create normalized event for settlement orchestration
+    const normalizedEvent = {
+      provider: 'plaid',
+      provider_event_id: webhookId,
+      provider_reference_id: transferId,
+      eventType: mapPlaidTransferStatus(eventStatus),
+      timestamp: new Date(),
+      isRetry: false, // TODO: track retry status from Plaid headers if available
+    };
+
+    // B2: Get settlement plan
+    const orchestrator = new SettlementOrchestrator();
+    const plan = await orchestrator.orchestrateSettlement(normalizedEvent);
+
+    // B3.1: Execute status transition
+    const executor = new SettlementExecutor();
+    const result = await executor.executeSettlementPlan(plan);
+
+    // Log execution result
+    console.log(
+      `[plaid-webhook] Transfer settlement executed: ${transferId} → ${result.newStatus}`,
+      result
+    );
+
+    await auditLog(
+      0, // Will be replaced by intent owner in future phases
+      'transfer_settlement_executed',
+      {
+        transfer_id: transferId,
+        status_transition: `${result.previousStatus} → ${result.newStatus}`,
+        updated: result.updated,
+      }
+    );
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[plaid-webhook] Transfer event handler error: ${errMsg}`, err);
+  }
+}
+
+function mapPlaidTransferStatus(status: string | undefined): SettlementEventType {
+  // Map Plaid transfer status to settlement event type
+  switch (status) {
+    case 'submitted':
+      return 'submitted';
+    case 'authorized':
+      return 'authorized';
+    case 'pending':
+      return 'pending';
+    case 'posted':
+      return 'posted';
+    case 'settled':
+      return 'settled';
+    case 'failed':
+      return 'failed';
+    case 'returned':
+      return 'returned';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return 'submitted';
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface PlaidWebhookPayload {
@@ -206,6 +290,7 @@ interface PlaidWebhookPayload {
   removed_transactions?: string[];
   error?: { error_code?: string; error_message?: string } | null;
   consent_expiration_time?: string;
+  data?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -276,6 +361,8 @@ export async function POST(req: NextRequest) {
         await handleItemError(payload);
       } else if (webhook_type === 'ITEM' && webhook_code === 'PENDING_EXPIRATION') {
         await handleItemPendingExpiration(payload);
+      } else if (webhook_type === 'TRANSFER' && webhook_code === 'STATUS_UPDATE') {
+        await handleTransferEventStatusUpdate(payload, webhookId);
       } else {
         // Unhandled event type — log and acknowledge
         console.log(`[plaid-webhook] Unhandled event: ${eventType}`);

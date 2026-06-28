@@ -54,6 +54,7 @@ Client (React 19)
 | `lib/settlement/settlement-rules.ts` | State transition validators and terminal/processing state checkers |
 | `lib/settlement/SettlementProcessor.ts` | Core settlement processor — validates transitions, prepares outcomes, no balance mutations |
 | `lib/settlement/SettlementOrchestrator.ts` | Settlement orchestrator — queries intents, plans outcomes, no side effects (pure planning) |
+| `lib/settlement/SettlementExecutor.ts` | Settlement executor — applies status transitions from plans, idempotent status-only updates (Phase B3.1) |
 | `lib/transfers/router.ts` | Compatibility layer — re-exports from `lib/providers/TransferProviderFactory` (DEPRECATED) |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 

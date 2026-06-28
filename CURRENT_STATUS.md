@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase B2 Settlement Orchestrator complete)
+Last updated: 2026-06-28 (Phase B3.1 Settlement Status Executor complete)
 
 ---
 
@@ -165,41 +165,40 @@ Last updated: 2026-06-28 (Phase B2 Settlement Orchestrator complete)
 
 ## In Progress / Next
 
-**Phase B2 Settlement Orchestrator Complete** ✅
-- `SettlementOrchestrator.orchestrateSettlement()`: Queries intent, validates transition, produces plan
-- `SettlementPlan`: Contains previousStatus, nextStatus, updateBalance (instruction), createLedgerEntries (instruction), notifyUser, reverseVelocity, requiresManualReview
-- No balance updates, no ledger entries, no notifications, no velocity reversal, no provider execution
-- Pure planning layer ready for Phase B3 execution
-- Lint ✅ Build ✅ TypeScript ✅
+- ✅ **Phase B3.1 Settlement Status Executor**: Execute status transitions only
+  - `lib/settlement/SettlementExecutor.ts`: Core executor with `executeSettlementPlan()`
+  - `SettlementExecutionResult`: success, intentId, previousStatus, newStatus, updated, reason, error
+  - Updates `transfer_intents.status` and `transfer_intents.updated_at` only
+  - Idempotent: if already at target status, returns success without updating
+  - Handles plan errors gracefully, returns structured responses
+  - Wired into `POST /api/webhooks/plaid`: `TRANSFER`/`STATUS_UPDATE` handler
+  - `handleTransferEventStatusUpdate()`: Creates NormalizedEvent, calls orchestrator, calls executor, logs result
+  - `mapPlaidTransferStatus()`: Maps Plaid transfer status to SettlementEventType
+  - **Critical constraint:** Only status transitions — NO balance, NO ledger, NO notifications, NO velocity, NO provider calls
+  - Lint ✅ Build ✅ TypeScript ✅
 
-**Safe Next Milestone: Phase B3 — Settlement Execution**
+**Safe Next Milestone: Phase B3.2 — Balance & Ledger Executor**
 
-Execute settlement plans from SettlementOrchestrator:
+Execute balance updates and ledger entries from SettlementPlan:
 
-1. **Webhook handlers return SettlementPlan**
-   - Call orchestrator.orchestrateSettlement(event)
-   - Return plan to client (for Phase B3 execution)
-
-2. **Implement settlement execution** (Phase B3)
+1. **Implement balance executor** (Phase B3.2)
    - Execute balance updates from plan.updateBalance
+   - Atomic: single UPDATE to users.balance_X based on operation (add/subtract)
+   - Only for settled transfers (plan.updateBalance.shouldUpdate === true)
+   - Verify balance never goes negative before debit
+
+2. **Implement ledger executor** (Phase B3.2)
    - Create ledger entries from plan.createLedgerEntries
+   - Atomic: INSERT entries in single transaction
+   - Link to transfer_intents via transfer_intent_id
+   - Entry types: transfer_settlement, transfer_reversal
+
+3. **Implement notification & velocity executors** (Phase B3.3)
    - Send notifications if plan.notifyUser
-   - Reverse velocity if plan.reverseVelocity
-   - Update transfer_intents status to plan.nextStatus
-
-3. **Test settlement flow** (sandbox)
-   - Send Plaid webhook → orchestrate → execute
-   - Verify balance updated correctly
-   - Verify ledger entries created with correct amounts
-   - Verify notifications sent
-   - Verify status transitions recorded
-
-4. **Then: Live Provider Implementation**
-   - Implement `executeTransfer()` calling real APIs
-   - Integrate with webhook flow for settlement
+   - Reverse velocity if plan.reverseVelocity (returned transfers only)
 
 **Critical Path:**
-Event intake (B1) ✅ → Settlement planning (B2) ✅ → Settlement execution (B3) → Live providers
+Event intake (B1) ✅ → Settlement planning (B2) ✅ → Status transitions (B3.1) ✅ → Balance/Ledger (B3.2) → Notifications/Velocity (B3.3) → Live providers
 
 ---
 
