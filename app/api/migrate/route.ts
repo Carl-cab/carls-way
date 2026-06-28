@@ -153,6 +153,12 @@ export async function GET() {
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processed_at TIMESTAMPTZ`;
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processing_error TEXT`;
 
+    // Milestone 2: Add correlation IDs for request tracing
+    // Correlation IDs allow tracking a financial event through its entire lifecycle
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+    await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+    await sql`ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+
     return NextResponse.json({ success: true, message: 'Schema migration completed successfully' });
   } catch (err) {
     console.error('Migration error:', err);
