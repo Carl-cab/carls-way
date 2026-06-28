@@ -17,6 +17,7 @@ export interface SettlementPlan {
   // Provider context for idempotency
   provider: string;
   provider_event_id: string;
+  provider_reference_id: string;
   updateBalance: {
     shouldUpdate: boolean;
     currency?: string;
@@ -69,6 +70,7 @@ export class SettlementOrchestrator {
           transition: 'draft→draft (not found)',
           provider: event.provider,
           provider_event_id: event.provider_event_id,
+          provider_reference_id: event.provider_reference_id,
           updateBalance: { shouldUpdate: false },
           createLedgerEntries: { shouldCreate: false },
           notifyUser: false,
@@ -104,7 +106,8 @@ export class SettlementOrchestrator {
       const plan = this.enrichOutcomeWithSideEffects(
         intent,
         outcome.nextStatus,
-        event
+        event,
+        intent.provider_reference_id
       );
 
       return plan;
@@ -117,6 +120,7 @@ export class SettlementOrchestrator {
         transition: 'draft→draft (error)',
         provider: event.provider,
         provider_event_id: event.provider_event_id,
+        provider_reference_id: event.provider_reference_id,
         updateBalance: { shouldUpdate: false },
         createLedgerEntries: { shouldCreate: false },
         notifyUser: false,
@@ -144,7 +148,8 @@ export class SettlementOrchestrator {
       status: SettlementStatus;
     },
     nextStatus: SettlementStatus,
-    event: NormalizedEvent
+    event: NormalizedEvent,
+    providerReferenceId: string
   ): SettlementPlan {
     // Determine balance update instructions based on transition
     const updateBalance = this.planBalanceUpdate(intent, nextStatus);
@@ -168,6 +173,7 @@ export class SettlementOrchestrator {
       transition: `${intent.status}→${nextStatus}`,
       provider: event.provider,
       provider_event_id: event.provider_event_id,
+      provider_reference_id: providerReferenceId,
       updateBalance,
       createLedgerEntries,
       notifyUser,

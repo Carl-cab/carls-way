@@ -393,10 +393,36 @@ export class SettlementExecutor {
 
       // Special handling for Returned: only reverse if balance was previously applied
       if (plan.nextStatus === 'returned') {
-        // Check if a balance_processed_at exists for a previous settlement
-        // For now, we assume if we're at returned status, balance was applied at settled
-        // This would need more sophisticated tracking in production
-        // For this phase, we'll apply the reversal atomically
+        // Verify a prior settlement balance update exists
+        try {
+          const priorSettledEvents = await sql`
+            SELECT COUNT(*) as count
+            FROM provider_webhook_events
+            WHERE provider = ${plan.provider}
+              AND related_provider_reference = ${plan.provider_reference_id}
+              AND event_type LIKE '%settled%'
+              AND balance_processed_at IS NOT NULL
+            LIMIT 1
+          `;
+
+          const eventCount = (priorSettledEvents[0] as { count: number }).count;
+          if (eventCount === 0) {
+            // No prior balance update found — return skipped
+            return {
+              success: true,
+              intentId: plan.intentId,
+              balanceUpdated: false,
+              currency,
+              reason: `Skipped: returned status but no prior settlement balance update found`,
+            };
+          }
+        } catch (err) {
+          // Log but continue with reversal — be lenient on check failure
+          const checkErr = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[settlement] Warning: Could not verify prior settlement balance for returned transfer ${plan.intentId}: ${checkErr}`
+          );
+        }
       }
 
       // Prepare balance column name
