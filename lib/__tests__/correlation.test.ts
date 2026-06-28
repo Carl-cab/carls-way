@@ -101,8 +101,8 @@ describe('Correlation ID Utilities', () => {
     });
 
     it('should reject null or undefined', () => {
-      expect(isValidCorrelationId(null as unknown as string)).toBe(false);
-      expect(isValidCorrelationId(undefined as unknown as string)).toBe(false);
+      expect(isValidCorrelationId(null)).toBe(false);
+      expect(isValidCorrelationId(undefined)).toBe(false);
     });
 
     it('should reject IDs longer than 255 characters', () => {

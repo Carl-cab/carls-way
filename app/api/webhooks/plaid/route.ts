@@ -200,7 +200,8 @@ async function handleItemPendingExpiration(payload: PlaidWebhookPayload) {
 
 async function handleTransferEventStatusUpdate(
   payload: PlaidWebhookPayload,
-  webhookId: string
+  webhookId: string,
+  correlationId: string
 ) {
   // Phase B3.1/B3.2a/B3.2b: Handle transfer settlement events
   // Extract transfer_id from payload data
@@ -383,7 +384,7 @@ export async function POST(req: NextRequest) {
       } else if (webhook_type === 'ITEM' && webhook_code === 'PENDING_EXPIRATION') {
         await handleItemPendingExpiration(payload);
       } else if (webhook_type === 'TRANSFER' && webhook_code === 'STATUS_UPDATE') {
-        await handleTransferEventStatusUpdate(payload, webhookId);
+        await handleTransferEventStatusUpdate(payload, webhookId, correlationId);
       } else {
         // Unhandled event type — log and acknowledge
         console.log(`[plaid-webhook] Unhandled event: ${eventType}`);
