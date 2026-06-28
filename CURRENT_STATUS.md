@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
+Last updated: 2026-06-28 (Phase A3 Provider Execution Framework deployed)
 
 ---
 
@@ -117,19 +117,47 @@ Last updated: 2026-06-26 (Phase A1 passive ledger complete and reviewed)
 
 ## In Progress / Next
 
-**Phase A2 Infrastructure Complete** ✅
-- `provider_webhook_events` table created
-- `reverseVelocity()` implemented
-- `lib/provider-events.ts` helpers ready for use
-- Admin backfill endpoint ready
+**Phase A3 Provider Execution Framework Complete** ✅
+- `lib/providers/` directory with 4 providers
+- `TransferProvider` interface with 7 standardized methods
+- `TransferProviderFactory` for centralized selection
+- `SandboxUSProvider` and `SandboxCAProvider` fully implemented
+- `PlaidTransferProvider` and `CanadianEFTProvider` as placeholders
+- Backward compatibility maintained — all existing routes work
+- Lint ✅ Build ✅ TypeScript ✅
 
-**Next Steps (Ordered by Business Impact):**
-1. **Run `/api/migrate` in production** — Apply `ledger_entries` and `provider_webhook_events` tables (safe, non-blocking)
-2. **Validate ledger in production** — Test same-currency and cross-border payments create ledger entries; verify `/api/ledger` and `/api/ledger/balance-check` work
-3. **Validate 3-step transfer flow in production** — US and CA user paths through intent → review → confirm (sandbox simulation)
-4. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`; register Stripe webhook
-5. **PlaidTransferProvider** — US live ACH; requires Plaid Link products updated to include `Transfer`
-6. **CanadianEFTProvider** — CA live EFT; requires FINTRAC MSB registration active before go-live
+**Safe Next Milestone: Phase B1 — Webhook Receiver Framework**
+
+Before building PlaidTransferProvider, implement the webhook infrastructure:
+
+1. **Create webhook receiver routes** (`/api/webhooks/plaid`, `/api/webhooks/stripe`)
+   - Signature verification (Plaid HMAC, Stripe JWT)
+   - Event deduplication via `provider_webhook_events`
+   - Status updates (draft → processing → settled/failed/returned)
+   - Error handling and logging
+
+2. **Implement settlement balance updates** (after webhook confirmation)
+   - Add Money: `balance_cad/usd += amount` on settled webhook
+   - Cash Out: balance already debited at execute; no change on settled
+   - Returned: reverse balance change, call `reverseVelocity()`
+
+3. **Test webhook flow in sandbox**
+   - Simulate webhook events for both sandbox providers
+   - Verify status updates (ready → processing → settled)
+   - Verify balance changes ONLY after webhook
+
+4. **Documentation**
+   - Update BANKING_ARCHITECTURE.md webhook processing section
+   - Add webhook testing guide
+
+**Then: PlaidTransferProvider**
+- Implement `executeTransfer()` calling Plaid Transfer API
+- Implement `handleWebhookEvent()` processing Plaid webhooks
+- Verify Plaid Link includes Transfer product
+- Sandbox test in Plaid's environment
+
+**Critical Path:**
+Webhooks first → then execute → then live providers
 
 ---
 
