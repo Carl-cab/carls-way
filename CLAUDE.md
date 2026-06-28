@@ -53,8 +53,8 @@ Client (React 19)
 | `lib/settlement/types.ts` | Settlement event types, outcome objects, transition rules |
 | `lib/settlement/settlement-rules.ts` | State transition validators and terminal/processing state checkers |
 | `lib/settlement/SettlementProcessor.ts` | Core settlement processor — validates transitions, prepares outcomes, no balance mutations |
-| `lib/settlement/SettlementOrchestrator.ts` | Settlement orchestrator — queries intents, plans outcomes, no side effects (pure planning) |
-| `lib/settlement/SettlementExecutor.ts` | Settlement executor — applies status transitions from plans, idempotent status-only updates (Phase B3.1) |
+| `lib/settlement/SettlementOrchestrator.ts` | Settlement orchestrator — queries intents, plans outcomes, no side effects (pure planning); passes provider/provider_event_id for idempotency |
+| `lib/settlement/SettlementExecutor.ts` | Settlement executor — executes settlement plans; Phase B3.1 executes status transitions, Phase B3.2a executes ledger entries; both idempotent |
 | `lib/transfers/router.ts` | Compatibility layer — re-exports from `lib/providers/TransferProviderFactory` (DEPRECATED) |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 

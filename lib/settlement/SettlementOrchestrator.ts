@@ -14,6 +14,9 @@ export interface SettlementPlan {
   previousStatus: SettlementStatus;
   nextStatus: SettlementStatus;
   transition: string;
+  // Provider context for idempotency
+  provider: string;
+  provider_event_id: string;
   updateBalance: {
     shouldUpdate: boolean;
     currency?: string;
@@ -64,6 +67,8 @@ export class SettlementOrchestrator {
           previousStatus: 'draft' as SettlementStatus,
           nextStatus: 'draft' as SettlementStatus,
           transition: 'draft→draft (not found)',
+          provider: event.provider,
+          provider_event_id: event.provider_event_id,
           updateBalance: { shouldUpdate: false },
           createLedgerEntries: { shouldCreate: false },
           notifyUser: false,
@@ -98,7 +103,8 @@ export class SettlementOrchestrator {
       // 3. Enrich outcome with side effect instructions
       const plan = this.enrichOutcomeWithSideEffects(
         intent,
-        outcome.nextStatus
+        outcome.nextStatus,
+        event
       );
 
       return plan;
@@ -109,6 +115,8 @@ export class SettlementOrchestrator {
         previousStatus: 'draft' as SettlementStatus,
         nextStatus: 'draft' as SettlementStatus,
         transition: 'draft→draft (error)',
+        provider: event.provider,
+        provider_event_id: event.provider_event_id,
         updateBalance: { shouldUpdate: false },
         createLedgerEntries: { shouldCreate: false },
         notifyUser: false,
@@ -135,7 +143,8 @@ export class SettlementOrchestrator {
       currency: string;
       status: SettlementStatus;
     },
-    nextStatus: SettlementStatus
+    nextStatus: SettlementStatus,
+    event: NormalizedEvent
   ): SettlementPlan {
     // Determine balance update instructions based on transition
     const updateBalance = this.planBalanceUpdate(intent, nextStatus);
@@ -157,6 +166,8 @@ export class SettlementOrchestrator {
       previousStatus: intent.status,
       nextStatus,
       transition: `${intent.status}→${nextStatus}`,
+      provider: event.provider,
+      provider_event_id: event.provider_event_id,
       updateBalance,
       createLedgerEntries,
       notifyUser,

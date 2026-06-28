@@ -145,8 +145,10 @@ export async function initializeSchema() {
       credit NUMERIC(12,2) NOT NULL DEFAULT 0,
       provider TEXT,
       provider_reference TEXT,
+      provider_event_id TEXT,
       description TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(transfer_intent_id, provider_event_id, entry_type)
     )
   `;
   await sql`

@@ -202,7 +202,7 @@ async function handleTransferEventStatusUpdate(
   payload: PlaidWebhookPayload,
   webhookId: string
 ) {
-  // Phase B3.1: Handle transfer settlement events
+  // Phase B3.1/B3.2a: Handle transfer settlement events
   // Extract transfer_id from payload data
   const transferId = (payload.data as Record<string, unknown>)?.transfer_id as
     | string
@@ -233,12 +233,18 @@ async function handleTransferEventStatusUpdate(
 
     // B3.1: Execute status transition
     const executor = new SettlementExecutor();
-    const result = await executor.executeSettlementPlan(plan);
+    const statusResult = await executor.executeSettlementPlan(plan);
 
-    // Log execution result
+    // B3.2a: Execute ledger creation
+    const ledgerResult = await executor.executeLedgerCreation(plan);
+
+    // Log execution results
     console.log(
-      `[plaid-webhook] Transfer settlement executed: ${transferId} → ${result.newStatus}`,
-      result
+      `[plaid-webhook] Transfer settlement executed: ${transferId} → ${statusResult.newStatus}`,
+      {
+        status: statusResult,
+        ledger: ledgerResult,
+      }
     );
 
     await auditLog(
@@ -246,8 +252,9 @@ async function handleTransferEventStatusUpdate(
       'transfer_settlement_executed',
       {
         transfer_id: transferId,
-        status_transition: `${result.previousStatus} → ${result.newStatus}`,
-        updated: result.updated,
+        status_transition: `${statusResult.previousStatus} → ${statusResult.newStatus}`,
+        status_updated: statusResult.updated,
+        ledger_entries_created: ledgerResult.entriesCreated,
       }
     );
   } catch (err) {

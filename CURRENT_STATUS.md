@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase B3.1 Settlement Status Executor complete)
+Last updated: 2026-06-28 (Phase B3.2a Settlement Ledger Executor complete)
 
 ---
 
@@ -170,35 +170,41 @@ Last updated: 2026-06-28 (Phase B3.1 Settlement Status Executor complete)
   - `SettlementExecutionResult`: success, intentId, previousStatus, newStatus, updated, reason, error
   - Updates `transfer_intents.status` and `transfer_intents.updated_at` only
   - Idempotent: if already at target status, returns success without updating
-  - Handles plan errors gracefully, returns structured responses
   - Wired into `POST /api/webhooks/plaid`: `TRANSFER`/`STATUS_UPDATE` handler
-  - `handleTransferEventStatusUpdate()`: Creates NormalizedEvent, calls orchestrator, calls executor, logs result
-  - `mapPlaidTransferStatus()`: Maps Plaid transfer status to SettlementEventType
   - **Critical constraint:** Only status transitions — NO balance, NO ledger, NO notifications, NO velocity, NO provider calls
   - Lint ✅ Build ✅ TypeScript ✅
 
-**Safe Next Milestone: Phase B3.2 — Balance & Ledger Executor**
+- ✅ **Phase B3.2a Settlement Ledger Executor**: Create ledger entries only
+  - `lib/settlement/SettlementExecutor.ts` extended with `executeLedgerCreation(plan)`
+  - `LedgerExecutionResult`: success, intentId, entriesCreated, reason, error
+  - `ledger_entries` table updated: added `provider_event_id` column
+  - UNIQUE constraint: `(transfer_intent_id, provider_event_id, entry_type)` prevents duplicate entries
+  - Maps entry_type from plan format to database format (add_money_settled, cash_out_settled, transfer_returned, transfer_failed)
+  - Links ledger entries to transfer_intents via transfer_intent_id
+  - Includes provider, provider_reference, provider_event_id for audit trail
+  - Atomic: all entries inserted or none (ON CONFLICT DO NOTHING pattern)
+  - Idempotent: duplicate webhooks cannot create duplicate ledger entries
+  - Wired into webhook handler: status executor → ledger executor
+  - **Critical constraint:** Ledger entries only — NO balance updates, NO notifications, NO velocity, NO provider calls
+  - Lint ✅ Build ✅ TypeScript ✅
 
-Execute balance updates and ledger entries from SettlementPlan:
+**Safe Next Milestone: Phase B3.2b — Balance Executor**
 
-1. **Implement balance executor** (Phase B3.2)
+Execute balance updates from SettlementPlan:
+
+1. **Implement balance executor** (Phase B3.2b)
    - Execute balance updates from plan.updateBalance
    - Atomic: single UPDATE to users.balance_X based on operation (add/subtract)
    - Only for settled transfers (plan.updateBalance.shouldUpdate === true)
    - Verify balance never goes negative before debit
+   - Use provider_event_id for idempotency (prevent duplicate balance updates)
 
-2. **Implement ledger executor** (Phase B3.2)
-   - Create ledger entries from plan.createLedgerEntries
-   - Atomic: INSERT entries in single transaction
-   - Link to transfer_intents via transfer_intent_id
-   - Entry types: transfer_settlement, transfer_reversal
-
-3. **Implement notification & velocity executors** (Phase B3.3)
+2. **Then: Notification & Velocity Executors** (Phase B3.3)
    - Send notifications if plan.notifyUser
    - Reverse velocity if plan.reverseVelocity (returned transfers only)
 
 **Critical Path:**
-Event intake (B1) ✅ → Settlement planning (B2) ✅ → Status transitions (B3.1) ✅ → Balance/Ledger (B3.2) → Notifications/Velocity (B3.3) → Live providers
+Event intake (B1) ✅ → Settlement planning (B2) ✅ → Status transitions (B3.1) ✅ → Ledger entries (B3.2a) ✅ → Balance updates (B3.2b) → Notifications/Velocity (B3.3) → Live providers
 
 ---
 

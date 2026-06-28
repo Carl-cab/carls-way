@@ -120,10 +120,15 @@ export async function GET() {
         credit NUMERIC(12,2) NOT NULL DEFAULT 0,
         provider TEXT,
         provider_reference TEXT,
+        provider_event_id TEXT,
         description TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(transfer_intent_id, provider_event_id, entry_type)
       )
     `;
+
+    // Add provider_event_id column to ledger_entries if it doesn't exist
+    await sql`ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS provider_event_id TEXT`;
 
     // Create provider_webhook_events table if it doesn't exist
     await sql`
