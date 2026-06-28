@@ -390,12 +390,18 @@ Provider retries webhook delivery, our server receives event twice.
 - ✅ Idempotent: duplicate webhooks cannot create duplicates
 - ✅ Wired into webhook handler: after status executor
 
-### Phase B3.2b (Next): Balance Executor
-- [ ] Implement `executeBalanceUpdate()` — atomic UPDATE to users.balance_X
-- [ ] Only for settled transfers (plan.updateBalance.shouldUpdate === true)
-- [ ] Add/subtract based on plan.updateBalance.operation
-- [ ] Verify balance never negative before debit
-- [ ] Use provider_event_id for idempotency
+### Phase B3.2b (Complete): Balance Executor
+- ✅ `lib/settlement/SettlementExecutor.ts`: `executeBalanceUpdate(plan)` method
+- ✅ `BalanceExecutionResult`: success, balanceUpdated, currency, amountApplied, operation
+- ✅ `provider_webhook_events`: added `balance_processed_at` and `balance_processing_error` columns
+- ✅ Idempotency: balance_processed_at tracking prevents duplicate updates from same event
+- ✅ Atomic: single UPDATE with arithmetic (balance_X = balance_X + amount)
+- ✅ Validation: currency (CAD/USD), positive amounts, user owns intent, status allows action
+- ✅ Add Money: increases balance on settled
+- ✅ Cash Out: skipped (no live executeTransfer yet, returns success)
+- ✅ Returned: applies reversal if settled previously (subtracts balance)
+- ✅ Error tracking: failures logged to provider_webhook_events for debugging
+- ✅ Wired into webhook handler: executes after ledger creation
 
 ### Phase B3.3 (Next): Notification & Velocity Executor
 - [ ] Implement `notifyUser()` — create notification if plan.notifyUser

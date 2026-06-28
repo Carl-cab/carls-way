@@ -22,4 +22,4 @@ export type {
   SettlementTransitionRule,
 } from './types';
 export type { SettlementPlan } from './SettlementOrchestrator';
-export type { SettlementExecutionResult, LedgerExecutionResult } from './SettlementExecutor';
+export type { SettlementExecutionResult, LedgerExecutionResult, BalanceExecutionResult } from './SettlementExecutor';

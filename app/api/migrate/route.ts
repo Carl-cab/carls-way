@@ -142,10 +142,16 @@ export async function GET() {
         processing_status TEXT NOT NULL DEFAULT 'received',
         processing_error TEXT,
         processed_at TIMESTAMPTZ,
+        balance_processed_at TIMESTAMPTZ,
+        balance_processing_error TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(provider, provider_event_id)
       )
     `;
+
+    // Add balance tracking columns to provider_webhook_events if they don't exist
+    await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processed_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processing_error TEXT`;
 
     return NextResponse.json({ success: true, message: 'Schema migration completed successfully' });
   } catch (err) {

@@ -162,6 +162,8 @@ export async function initializeSchema() {
       processing_status TEXT NOT NULL DEFAULT 'received',
       processing_error TEXT,
       processed_at TIMESTAMPTZ,
+      balance_processed_at TIMESTAMPTZ,
+      balance_processing_error TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(provider, provider_event_id)
     )

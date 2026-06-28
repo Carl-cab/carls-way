@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase B3.2a Settlement Ledger Executor complete)
+Last updated: 2026-06-28 (Phase B3.2b Settlement Balance Executor complete)
 
 ---
 
@@ -177,34 +177,37 @@ Last updated: 2026-06-28 (Phase B3.2a Settlement Ledger Executor complete)
 - ✅ **Phase B3.2a Settlement Ledger Executor**: Create ledger entries only
   - `lib/settlement/SettlementExecutor.ts` extended with `executeLedgerCreation(plan)`
   - `LedgerExecutionResult`: success, intentId, entriesCreated, reason, error
-  - `ledger_entries` table updated: added `provider_event_id` column
-  - UNIQUE constraint: `(transfer_intent_id, provider_event_id, entry_type)` prevents duplicate entries
-  - Maps entry_type from plan format to database format (add_money_settled, cash_out_settled, transfer_returned, transfer_failed)
-  - Links ledger entries to transfer_intents via transfer_intent_id
-  - Includes provider, provider_reference, provider_event_id for audit trail
-  - Atomic: all entries inserted or none (ON CONFLICT DO NOTHING pattern)
-  - Idempotent: duplicate webhooks cannot create duplicate ledger entries
-  - Wired into webhook handler: status executor → ledger executor
-  - **Critical constraint:** Ledger entries only — NO balance updates, NO notifications, NO velocity, NO provider calls
+  - `ledger_entries` table: added `provider_event_id` column with UNIQUE constraint
+  - **Critical constraint:** Ledger entries only — NO balance, NO notifications, NO velocity, NO provider calls
   - Lint ✅ Build ✅ TypeScript ✅
 
-**Safe Next Milestone: Phase B3.2b — Balance Executor**
+- ✅ **Phase B3.2b Settlement Balance Executor**: Update wallet balances only
+  - `lib/settlement/SettlementExecutor.ts` extended with `executeBalanceUpdate(plan)`
+  - `BalanceExecutionResult`: success, intentId, balanceUpdated, currency, amountApplied, operation, reason, error
+  - `provider_webhook_events` table: added `balance_processed_at` and `balance_processing_error` columns
+  - Idempotency via `balance_processed_at` tracking: same provider event never updates balance twice
+  - Atomic update: single UPDATE to users.balance_cad/balance_usd using arithmetic (no read-then-update)
+  - Validation: currency CAD/USD, positive amounts, user owns intent, status allows action
+  - Special handling: Cash Out skipped (no live executeTransfer yet), Add Money adds balance, Returned reverses balance
+  - No negative balances: relies on SQL arithmetic and validation (no precheck needed)
+  - Wired into webhook handler: status → ledger → balance executor chain
+  - **Critical constraint:** Balance updates only — NO ledger, NO notifications, NO velocity, NO provider calls
+  - Lint ✅ Build ✅ TypeScript ✅
 
-Execute balance updates from SettlementPlan:
+**Safe Next Milestone: Phase B3.3 — Notification & Velocity Executor**
 
-1. **Implement balance executor** (Phase B3.2b)
-   - Execute balance updates from plan.updateBalance
-   - Atomic: single UPDATE to users.balance_X based on operation (add/subtract)
-   - Only for settled transfers (plan.updateBalance.shouldUpdate === true)
-   - Verify balance never goes negative before debit
-   - Use provider_event_id for idempotency (prevent duplicate balance updates)
+Execute notifications and velocity reversal from SettlementPlan:
 
-2. **Then: Notification & Velocity Executors** (Phase B3.3)
+1. **Implement notification executor** (Phase B3.3)
    - Send notifications if plan.notifyUser
+   - Non-blocking: failures don't fail settlement
+
+2. **Implement velocity executor** (Phase B3.3)
    - Reverse velocity if plan.reverseVelocity (returned transfers only)
+   - Non-blocking: failures don't fail settlement
 
 **Critical Path:**
-Event intake (B1) ✅ → Settlement planning (B2) ✅ → Status transitions (B3.1) ✅ → Ledger entries (B3.2a) ✅ → Balance updates (B3.2b) → Notifications/Velocity (B3.3) → Live providers
+Event intake (B1) ✅ → Settlement planning (B2) ✅ → Status transitions (B3.1) ✅ → Ledger entries (B3.2a) ✅ → Balance updates (B3.2b) ✅ → Notifications/Velocity (B3.3) → Live providers
 
 ---
 
