@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase B1 Webhook Receiver Framework complete)
+Last updated: 2026-06-28 (Phase B2 Settlement Orchestrator complete)
 
 ---
 
@@ -65,6 +65,15 @@ Last updated: 2026-06-28 (Phase B1 Webhook Receiver Framework complete)
   - **Idempotency:** UNIQUE(provider, provider_event_id) enforces single processing per event; duplicate webhook delivery returns 200 immediately without re-processing
   - **Phase B1 scope:** Event intake and storage only — NO balance updates, NO ledger entries, NO settlement logic wired yet
   - Phase B2 will wire SettlementProcessor into webhook handlers to apply settlement side effects
+- ✅ **Phase B2 Settlement Orchestrator**: Orchestration layer that plans settlement outcomes without executing them
+  - `lib/settlement/SettlementOrchestrator.ts`: `orchestrateSettlement()` queries `transfer_intents`, calls `SettlementProcessor`, produces `SettlementPlan`
+  - `SettlementPlan` contains: previousStatus, nextStatus, updateBalance (instructions, not execution), createLedgerEntries (instructions, not execution), notifyUser, reverseVelocity, requiresManualReview, idempotent, reason
+  - `planBalanceUpdate()`: Describes Add Money/Cash Out balance changes (currency, amount, operation) but does not execute
+  - `planLedgerEntries()`: Describes ledger entries (debit, credit, entryType) but does not create
+  - `shouldNotify()`: Determines notification requirement (not sent, just flagged)
+  - **Critical constraint:** All planning functions are purely informational — NO balance updates, NO ledger entries, NO notifications sent, NO velocity reversal, NO provider execution
+  - Webhook handlers can use this to return settlement plans for Phase B3 execution
+  - Phase B3 will implement balance updates, ledger creation, notifications, velocity reversal
 - **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table, `provider_webhook_events` table
 
 ---
@@ -142,47 +151,55 @@ Last updated: 2026-06-28 (Phase B1 Webhook Receiver Framework complete)
   - All SQL uses postgres.js tagged templates
   - Lint ✅ Build ✅ TypeScript ✅
 
+- ✅ **Settlement Orchestrator** (Phase B2 — complete)
+  - `lib/settlement/SettlementOrchestrator.ts`: Queries transfer_intents, calls SettlementProcessor, produces SettlementPlan
+  - `planBalanceUpdate()`: Describes balance changes (Add Money: +, Cash Out: -) without executing
+  - `planLedgerEntries()`: Describes ledger entries (debit, credit, type) without creating
+  - `shouldNotify()`: Determines notification requirement (not sent, just flagged)
+  - Pure planning layer: no balance updates, no ledger entries, no notifications, no velocity reversal, no provider execution
+  - Webhook handlers can return SettlementPlan for Phase B3 execution
+  - All SQL uses postgres.js tagged templates
+  - Lint ✅ Build ✅ TypeScript ✅
+
 ---
 
 ## In Progress / Next
 
-**Phase B1 Webhook Receiver Framework Complete** ✅
-- `POST /api/webhooks/plaid`: Signature verification ready, event recording with idempotency
-- `POST /api/webhooks/stripe`: KYC logic preserved, financial events recorded
-- Event deduplication via UNIQUE constraint (no duplicate processing)
-- Returns 200 for all events (prevents webhook service retries)
-- Structure ready for Phase B2 settlement processor wiring
+**Phase B2 Settlement Orchestrator Complete** ✅
+- `SettlementOrchestrator.orchestrateSettlement()`: Queries intent, validates transition, produces plan
+- `SettlementPlan`: Contains previousStatus, nextStatus, updateBalance (instruction), createLedgerEntries (instruction), notifyUser, reverseVelocity, requiresManualReview
+- No balance updates, no ledger entries, no notifications, no velocity reversal, no provider execution
+- Pure planning layer ready for Phase B3 execution
 - Lint ✅ Build ✅ TypeScript ✅
 
-**Safe Next Milestone: Phase B2 — Settlement Event Processing**
+**Safe Next Milestone: Phase B3 — Settlement Execution**
 
-Wire settlement processor into webhook handlers:
+Execute settlement plans from SettlementOrchestrator:
 
-1. **Plaid webhook processing** (`POST /api/webhooks/plaid`)
-   - Fetch transfer_intents row by provider_reference_id
-   - Call SettlementProcessor.processSettlementEvent()
-   - If outcome.shouldUpdateBalance: update balance_cad/usd
-   - If outcome.shouldCreateLedgerEntry: create ledger entries (Phase A1 helpers)
-   - If outcome.shouldNotifyUser: create notification
+1. **Webhook handlers return SettlementPlan**
+   - Call orchestrator.orchestrateSettlement(event)
+   - Return plan to client (for Phase B3 execution)
 
-2. **Stripe webhook processing** (`POST /api/webhooks/stripe`)
-   - Handle charge.succeeded, charge.failed, payout.paid, payout.failed events
-   - Fetch Add Money / Cash Out intents
-   - Apply balance updates and ledger entries per processor outcome
-   - Notify user on settlement or failure
+2. **Implement settlement execution** (Phase B3)
+   - Execute balance updates from plan.updateBalance
+   - Create ledger entries from plan.createLedgerEntries
+   - Send notifications if plan.notifyUser
+   - Reverse velocity if plan.reverseVelocity
+   - Update transfer_intents status to plan.nextStatus
 
-3. **Test webhook flow** (sandbox)
-   - Simulate Plaid Transfer webhooks (event API or webhook simulator)
-   - Verify status transitions (submitted → authorized → pending → posted → settled)
-   - Verify balance changes ONLY after settled webhook
-   - Verify ledger entries created with correct FX
+3. **Test settlement flow** (sandbox)
+   - Send Plaid webhook → orchestrate → execute
+   - Verify balance updated correctly
+   - Verify ledger entries created with correct amounts
+   - Verify notifications sent
+   - Verify status transitions recorded
 
-4. **Then: PlaidTransferProvider / CanadianEFTProvider**
-   - Implement `executeTransfer()` calling real APIs (when ready)
-   - Implement `handleWebhookEvent()` via webhook routes (reuse B2 logic)
+4. **Then: Live Provider Implementation**
+   - Implement `executeTransfer()` calling real APIs
+   - Integrate with webhook flow for settlement
 
 **Critical Path:**
-Event intake (B1) ✅ → Event processing (B2) → Execute transfers (B3) → Live providers
+Event intake (B1) ✅ → Settlement planning (B2) ✅ → Settlement execution (B3) → Live providers
 
 ---
 

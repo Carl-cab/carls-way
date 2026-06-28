@@ -1,7 +1,9 @@
-// Settlement processor module exports.
+// Settlement module exports.
 // Phase A4: Settlement Processor Skeleton (structure only, no side effects).
+// Phase B2: Settlement Orchestrator (plans outcomes without executing).
 
 export { default as SettlementProcessor } from './SettlementProcessor';
+export { default as SettlementOrchestrator } from './SettlementOrchestrator';
 export {
   isValidTransition,
   getTransitionRule,
@@ -17,3 +19,4 @@ export type {
   NormalizedEvent,
   SettlementTransitionRule,
 } from './types';
+export type { SettlementPlan } from './SettlementOrchestrator';
