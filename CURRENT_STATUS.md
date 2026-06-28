@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase A4 Settlement Processor Skeleton complete)
+Last updated: 2026-06-28 (Phase B1 Webhook Receiver Framework complete)
 
 ---
 
@@ -58,6 +58,13 @@ Last updated: 2026-06-28 (Phase A4 Settlement Processor Skeleton complete)
   - Dev endpoint: `GET /api/dev/settlement-test` runs 6 transition validation tests (valid/invalid/idempotent cases)
   - **Critical constraint:** All methods return structured outcomes, never update balances, never create ledger entries, never call providers
   - Skeleton ready for Phase B1 (webhook handlers will use this processor to validate and prepare settlement events)
+- ✅ **Phase B1 Webhook Receiver Framework**: Safe webhook intake with signature verification and idempotency
+  - `POST /api/webhooks/plaid`: Plaid Transfer webhook receiver with HMAC-SHA256 signature verification (TODO: confirm signature format in sandbox), event deduplication via `provider_webhook_events`, stores raw event, marks as processed
+  - `POST /api/webhooks/stripe`: Updated to handle financial events (charge.*, payout.*, etc.) while preserving KYC webhook logic (identity.verification_session.*), records events for Phase B2 processing
+  - **Security:** No user auth required (webhooks are unauthenticated), raw body used for signatures, no secrets logged, all events returned 200 (prevents webhook retries on transient errors)
+  - **Idempotency:** UNIQUE(provider, provider_event_id) enforces single processing per event; duplicate webhook delivery returns 200 immediately without re-processing
+  - **Phase B1 scope:** Event intake and storage only — NO balance updates, NO ledger entries, NO settlement logic wired yet
+  - Phase B2 will wire SettlementProcessor into webhook handlers to apply settlement side effects
 - **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table, `provider_webhook_events` table
 
 ---
@@ -128,49 +135,54 @@ Last updated: 2026-06-28 (Phase A4 Settlement Processor Skeleton complete)
   - No balance updates, no ledger entries, no provider calls — pure state machine
   - Lint ✅ Build ✅ TypeScript ✅
 
+- ✅ **Webhook Receiver Framework** (Phase B1 — complete)
+  - `POST /api/webhooks/plaid`: HMAC-SHA256 signature verification (ready for sandbox testing), event deduplication via UNIQUE(provider, provider_event_id), stores raw event payload
+  - `POST /api/webhooks/stripe`: Updated to record financial events (charge.*, payout.*) while preserving KYC logic (identity.verification_session.*)
+  - Event intake infrastructure: no balance updates, no ledger entries, no settlement logic wired (Phase B2)
+  - All SQL uses postgres.js tagged templates
+  - Lint ✅ Build ✅ TypeScript ✅
+
 ---
 
 ## In Progress / Next
 
-**Phase A4 Settlement Processor Skeleton Complete** ✅
-- `lib/settlement/` module with types, rules, and processor
-- State transitions: draft → reviewed → confirmed → submitted → authorized → pending → posted → settled/failed
-- Outcome objects with settlement flags (always `shouldUpdateBalance: false`, `shouldCreateLedgerEntry: false`)
-- Skeleton ready for Phase B1 webhook handlers
+**Phase B1 Webhook Receiver Framework Complete** ✅
+- `POST /api/webhooks/plaid`: Signature verification ready, event recording with idempotency
+- `POST /api/webhooks/stripe`: KYC logic preserved, financial events recorded
+- Event deduplication via UNIQUE constraint (no duplicate processing)
+- Returns 200 for all events (prevents webhook service retries)
+- Structure ready for Phase B2 settlement processor wiring
 - Lint ✅ Build ✅ TypeScript ✅
 
-**Safe Next Milestone: Phase B1 — Webhook Receiver Framework**
+**Safe Next Milestone: Phase B2 — Settlement Event Processing**
 
-Before building PlaidTransferProvider, implement the webhook infrastructure:
+Wire settlement processor into webhook handlers:
 
-1. **Create webhook receiver routes** (`/api/webhooks/plaid`, `/api/webhooks/stripe`)
-   - Signature verification (Plaid HMAC, Stripe JWT)
-   - Event deduplication via `provider_webhook_events`
-   - Status updates (draft → processing → settled/failed/returned)
-   - Error handling and logging
+1. **Plaid webhook processing** (`POST /api/webhooks/plaid`)
+   - Fetch transfer_intents row by provider_reference_id
+   - Call SettlementProcessor.processSettlementEvent()
+   - If outcome.shouldUpdateBalance: update balance_cad/usd
+   - If outcome.shouldCreateLedgerEntry: create ledger entries (Phase A1 helpers)
+   - If outcome.shouldNotifyUser: create notification
 
-2. **Implement settlement balance updates** (after webhook confirmation)
-   - Add Money: `balance_cad/usd += amount` on settled webhook
-   - Cash Out: balance already debited at execute; no change on settled
-   - Returned: reverse balance change, call `reverseVelocity()`
+2. **Stripe webhook processing** (`POST /api/webhooks/stripe`)
+   - Handle charge.succeeded, charge.failed, payout.paid, payout.failed events
+   - Fetch Add Money / Cash Out intents
+   - Apply balance updates and ledger entries per processor outcome
+   - Notify user on settlement or failure
 
-3. **Test webhook flow in sandbox**
-   - Simulate webhook events for both sandbox providers
-   - Verify status updates (ready → processing → settled)
-   - Verify balance changes ONLY after webhook
+3. **Test webhook flow** (sandbox)
+   - Simulate Plaid Transfer webhooks (event API or webhook simulator)
+   - Verify status transitions (submitted → authorized → pending → posted → settled)
+   - Verify balance changes ONLY after settled webhook
+   - Verify ledger entries created with correct FX
 
-4. **Documentation**
-   - Update BANKING_ARCHITECTURE.md webhook processing section
-   - Add webhook testing guide
-
-**Then: PlaidTransferProvider**
-- Implement `executeTransfer()` calling Plaid Transfer API
-- Implement `handleWebhookEvent()` processing Plaid webhooks
-- Verify Plaid Link includes Transfer product
-- Sandbox test in Plaid's environment
+4. **Then: PlaidTransferProvider / CanadianEFTProvider**
+   - Implement `executeTransfer()` calling real APIs (when ready)
+   - Implement `handleWebhookEvent()` via webhook routes (reuse B2 logic)
 
 **Critical Path:**
-Webhooks first → then execute → then live providers
+Event intake (B1) ✅ → Event processing (B2) → Execute transfers (B3) → Live providers
 
 ---
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getStripe } from '@/lib/stripe';
 import { auditLog } from '@/lib/auth';
+import { recordProviderEvent, markProviderEventProcessed } from '@/lib/provider-events';
 
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -30,6 +31,7 @@ export async function POST(req: NextRequest) {
   const sql = getSql();
 
   try {
+    // Handle KYC events (existing logic)
     if (event.type === 'identity.verification_session.verified') {
       const session = event.data.object as { id: string };
 
@@ -67,10 +69,46 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Handle financial events (Phase B1: record only, no execution)
+    if (isFinancialEvent(event.type)) {
+      // Record event for future processing (Phase B2)
+      // No settlement logic yet, just store the event
+      const providerEventId = event.id || `stripe-${event.type}-${Date.now()}`;
+      const dataObject = event.data.object as unknown;
+      const relatedRef = (dataObject as Record<string, unknown> | null)?.id as string | undefined;
+
+      await recordProviderEvent('stripe', providerEventId, event.type, {
+        relatedProviderReference: relatedRef,
+        rawPayload: event as unknown as Record<string, unknown>,
+      });
+
+      // Phase B2: Will call SettlementProcessor and apply side effects
+      // For now, just mark as processed (structure ready)
+      await markProviderEventProcessed('stripe', providerEventId);
+    }
+
     return NextResponse.json({ received: true });
   } catch (err) {
     console.error('Stripe webhook handler error:', err);
     // Return 200 so Stripe does not retry — log the error for investigation
     return NextResponse.json({ received: true, warning: 'Handler error' });
   }
+}
+
+/**
+ * Check if event is a financial event (not KYC).
+ * Phase B1: Record for future processing, Phase B2 will execute settlement logic.
+ */
+function isFinancialEvent(eventType: string): boolean {
+  // Add financial event types that Phase B2 will handle
+  const financialEventTypes = [
+    'charge.updated',
+    'charge.succeeded',
+    'charge.failed',
+    'payout.created',
+    'payout.paid',
+    'payout.failed',
+  ];
+
+  return financialEventTypes.includes(eventType);
 }
