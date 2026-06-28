@@ -50,6 +50,9 @@ Client (React 19)
 | `lib/providers/SandboxCAProvider.ts` | CA sandbox provider — simulates Canadian EFT, no real API calls |
 | `lib/providers/PlaidTransferProvider.ts` | Placeholder for US live ACH (throws "Not implemented") |
 | `lib/providers/CanadianEFTProvider.ts` | Placeholder for CA live EFT (throws "Not implemented") |
+| `lib/settlement/types.ts` | Settlement event types, outcome objects, transition rules |
+| `lib/settlement/settlement-rules.ts` | State transition validators and terminal/processing state checkers |
+| `lib/settlement/SettlementProcessor.ts` | Core settlement processor — validates transitions, prepares outcomes, no balance mutations |
 | `lib/transfers/router.ts` | Compatibility layer — re-exports from `lib/providers/TransferProviderFactory` (DEPRECATED) |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 

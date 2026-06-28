@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase A3 Provider Execution Framework deployed)
+Last updated: 2026-06-28 (Phase A4 Settlement Processor Skeleton complete)
 
 ---
 
@@ -51,6 +51,13 @@ Last updated: 2026-06-28 (Phase A3 Provider Execution Framework deployed)
   - `PlaidTransferProvider` and `CanadianEFTProvider` — placeholder implementations (throw "Not implemented")
   - **Critical constraint:** No provider may update balances — all balance changes happen ONLY via settlement webhooks
   - All provider selection routed through factory — no provider logic elsewhere in application
+- ✅ **Phase A4 Settlement Processor Skeleton**: State machine and settlement event processing structure
+  - `lib/settlement/types.ts`: Event types (submitted, authorized, pending, posted, settled, failed, returned, cancelled), outcome objects, transition rules
+  - `lib/settlement/settlement-rules.ts`: Valid state transitions, terminal states, processing states, transition validation
+  - `lib/settlement/SettlementProcessor.ts`: Core processor with `normalizeProviderEvent()`, `validateSettlementTransition()`, `processSettlementEvent()`, outcome preparation
+  - Dev endpoint: `GET /api/dev/settlement-test` runs 6 transition validation tests (valid/invalid/idempotent cases)
+  - **Critical constraint:** All methods return structured outcomes, never update balances, never create ledger entries, never call providers
+  - Skeleton ready for Phase B1 (webhook handlers will use this processor to validate and prepare settlement events)
 - **Schema migration**: `/api/migrate` applied successfully in production — `friends.requested_by`, `friends.updated_at`, `bank_accounts.is_token_encrypted`, all KYC user columns live, `password_reset_tokens` table, `transfer_intents` table, `ledger_entries` table, `provider_webhook_events` table
 
 ---
@@ -113,17 +120,23 @@ Last updated: 2026-06-28 (Phase A3 Provider Execution Framework deployed)
   - All SQL uses postgres.js tagged templates
   - Lint ✅ Build ✅ TypeScript ✅
 
+- ✅ **Settlement Processor Skeleton** (Phase A4 — complete)
+  - `lib/settlement/types.ts`: Event types, outcome objects, transition rules
+  - `lib/settlement/settlement-rules.ts`: Valid transitions, terminal/processing states, validators
+  - `lib/settlement/SettlementProcessor.ts`: Core processor, no balance mutations, no ledger entries
+  - Dev endpoint: `GET /api/dev/settlement-test` validates 6 test cases (returns 404 in production)
+  - No balance updates, no ledger entries, no provider calls — pure state machine
+  - Lint ✅ Build ✅ TypeScript ✅
+
 ---
 
 ## In Progress / Next
 
-**Phase A3 Provider Execution Framework Complete** ✅
-- `lib/providers/` directory with 4 providers
-- `TransferProvider` interface with 7 standardized methods
-- `TransferProviderFactory` for centralized selection
-- `SandboxUSProvider` and `SandboxCAProvider` fully implemented
-- `PlaidTransferProvider` and `CanadianEFTProvider` as placeholders
-- Backward compatibility maintained — all existing routes work
+**Phase A4 Settlement Processor Skeleton Complete** ✅
+- `lib/settlement/` module with types, rules, and processor
+- State transitions: draft → reviewed → confirmed → submitted → authorized → pending → posted → settled/failed
+- Outcome objects with settlement flags (always `shouldUpdateBalance: false`, `shouldCreateLedgerEntry: false`)
+- Skeleton ready for Phase B1 webhook handlers
 - Lint ✅ Build ✅ TypeScript ✅
 
 **Safe Next Milestone: Phase B1 — Webhook Receiver Framework**

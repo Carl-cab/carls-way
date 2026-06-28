@@ -2,7 +2,7 @@
 
 > Engineering reference for transfer and payment state transitions. Defines all states, valid transitions, who drives each transition, when balances change, when ledger entries are created, and how failures are handled.
 
-Last updated: 2026-06-28 (Phase A3 Provider Execution Framework deployed)
+Last updated: 2026-06-28 (Phase A4 Settlement Processor Skeleton complete)
 
 ---
 
@@ -339,6 +339,18 @@ Provider retries webhook delivery, our server receives event twice.
 - ✅ `CanadianEFTProvider` — placeholder implementation (throws "Not implemented")
 - ✅ Backward compatibility via `lib/transfers/router.ts` (re-exports from factory)
 - ✅ Critical constraint enforced: No provider may update balances
+
+### Phase A4 (Complete): Settlement Processor Skeleton
+- ✅ `lib/settlement/types.ts`: Event types, outcome objects, transition rules
+- ✅ `lib/settlement/settlement-rules.ts`: Valid transitions, terminal/processing states
+- ✅ `lib/settlement/SettlementProcessor.ts`: Core processor with state machine logic
+- ✅ `normalizeProviderEvent()`: Converts provider events to canonical form
+- ✅ `validateSettlementTransition()`: Checks if transition is valid
+- ✅ `processSettlementEvent()`: Main processing logic with idempotency support
+- ✅ SettlementOutcome always returns `shouldUpdateBalance: false`, `shouldCreateLedgerEntry: false`
+- ✅ Dev endpoint `/api/dev/settlement-test` validates transitions
+- ✅ No balance updates, no ledger entries, no provider calls
+- ✅ Critical constraint enforced: Settlement processor is pure state machine (structure only)
 
 ### Phase B1 (Next): Webhook Receiver Framework
 - [ ] Create webhook receiver routes (`/api/webhooks/plaid`, `/api/webhooks/stripe`)
