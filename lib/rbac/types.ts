@@ -128,11 +128,12 @@ export interface AdminSession {
 }
 
 /**
- * Audit log entry (hooks prepared for Milestone 5).
+ * Audit log entry (immutable, append-only).
  */
 export interface AdminAuditLog {
   id: number;
   admin_user_id: number;
+  session_id?: string;
   action: string;
   resource_type: string;
   resource_id?: string;
@@ -140,9 +141,30 @@ export interface AdminAuditLog {
   correlation_id?: string;
   ip_address?: string;
   user_agent?: string;
-  status: 'success' | 'failure';
+  role?: string;
+  status: 'success' | 'failed';
   error_message?: string;
-  created_at: string;
+  request_duration_ms?: number;
+  created_at: Date;
+}
+
+/**
+ * Input for creating audit log entry.
+ */
+export interface AdminAuditLogInput {
+  admin_user_id: number;
+  session_id?: string;
+  action: string;
+  resource_type: string;
+  resource_id?: string;
+  changes?: Record<string, unknown>;
+  correlation_id?: string;
+  ip_address?: string;
+  user_agent?: string;
+  role?: string;
+  status?: 'success' | 'failed';
+  error_message?: string;
+  request_duration_ms?: number;
 }
 
 /**
@@ -152,6 +174,7 @@ export interface AdminAuditLog {
  */
 export interface AdminContext {
   adminUser: AdminUser;
+  sessionId: string;
   permissions: Permission[];
   correlationId?: string;
   sourceIp?: string;

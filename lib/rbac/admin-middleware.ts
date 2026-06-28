@@ -93,6 +93,7 @@ async function verifyAdminSession(req: NextRequest): Promise<AdminContext | null
 
     return {
       adminUser,
+      sessionId,
       permissions,
       correlationId: req.headers.get('x-correlation-id') || undefined,
       sourceIp: req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown',
