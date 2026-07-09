@@ -5,6 +5,7 @@
 
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import { settleSandboxTransfer } from './sandbox-settlement';
 import type {
   TransferProvider, TransferType, CreateIntentResult,
   ReviewResult, ConfirmResult, CancelResult, TransferStatusResult, WebhookResult,
@@ -59,8 +60,8 @@ export class SandboxUSProvider implements TransferProvider {
     const row = rows[0];
 
     const consentLanguage = row.type === 'add_money'
-      ? `By confirming, you authorize Manna to debit your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. This is a sandbox simulation — no money will move.`
-      : `By confirming, you authorize Manna to deposit ${row.currency} ${Number(row.amount).toFixed(2)} to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'}. This is a sandbox simulation — no money will move.`;
+      ? `By confirming, you authorize Manna to debit your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)} and credit your Manna balance. Sandbox mode: no real bank funds move, but your Manna balance will update.`
+      : `By confirming, you authorize Manna to deposit ${row.currency} ${Number(row.amount).toFixed(2)} to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} and debit your Manna balance. Sandbox mode: no real bank funds move, but your Manna balance will update.`;
 
     return {
       intent_id: intentId,
@@ -79,7 +80,7 @@ export class SandboxUSProvider implements TransferProvider {
         provider_name: 'sandbox_us',
         provider_region: 'US',
         execution_mode: 'sandbox',
-        settlement_estimate: 'Sandbox — no settlement (simulation only)',
+        settlement_estimate: 'Sandbox — settles instantly to your Manna balance',
         consent_language: consentLanguage,
       },
     };
@@ -105,10 +106,15 @@ export class SandboxUSProvider implements TransferProvider {
       intent_id: intentId, provider: 'sandbox_us', mode: 'sandbox',
     });
 
+    // Sandbox settles immediately: credit/debit the platform balance and record
+    // the ledger entry so the link-bank -> add-money -> send loop works end-to-end.
+    const settlement = await settleSandboxTransfer(intentId, userId, 'sandbox_us');
+
     return {
       intent_id: intentId,
-      status: 'ready',
-      message: 'US transfer simulation confirmed. No money moved — sandbox mode.',
+      status: 'settled',
+      new_balance: settlement.new_balance,
+      message: settlement.message,
     };
   }
 

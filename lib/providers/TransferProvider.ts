@@ -66,6 +66,9 @@ export interface ConfirmResult {
   intent_id: number;
   status: TransferStatus;
   message: string;
+  // Present when confirmation also settles (sandbox mode): the user's updated
+  // platform balance in the transfer currency after settlement.
+  new_balance?: number;
 }
 
 export interface CancelResult {

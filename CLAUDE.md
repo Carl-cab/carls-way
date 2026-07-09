@@ -134,13 +134,13 @@ Transfers use a provider abstraction in `lib/transfers/`. All providers implemen
 **Transfer flow (3 steps):**
 1. `POST /api/transfers/intent` — creates `status='draft'`, routes to correct provider
 2. `GET /api/transfers/[id]/review` — returns review details + region-appropriate consent language
-3. `POST /api/transfers/[id]/confirm` — records `consent_confirmed_at`, sets `status='ready'`
+3. `POST /api/transfers/[id]/confirm` — records `consent_confirmed_at`, then settles: the sandbox provider credits (add_money) / debits (cash_out) the platform balance and writes a ledger entry, setting `status='settled'`
 
 **Rules:**
-- Both sandbox providers are execution_mode='sandbox' — no money moves, no external API calls
+- Both sandbox providers are execution_mode='sandbox' — no real bank/external API calls
 - `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
 - Velocity is checked at intent creation but only recorded at confirm (future: at execute)
-- Balance is never mutated by any current transfer route
+- Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
 

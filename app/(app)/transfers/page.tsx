@@ -165,7 +165,7 @@ function TransfersPageInner() {
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
         <p className="text-sm font-semibold text-blue-900 mb-0.5">Sandbox Mode</p>
         <p className="text-sm text-blue-800">
-          This is a transfer simulation environment. No money will actually move. US users see US transfer simulation; Canadian users see Canadian transfer simulation.
+          No real bank funds move in sandbox, but your Manna balance updates instantly so you can add money, cash out, and send end-to-end. US users use the US rail; Canadian users use the Canadian EFT rail.
         </p>
       </div>
 
