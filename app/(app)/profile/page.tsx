@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import PlaidLinkButton from '@/components/PlaidLinkButton';
 
 interface User {
   id: number; name: string; username: string; email: string; phone: string;
@@ -254,7 +255,14 @@ export default function ProfilePage() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
         <div className="flex justify-between items-center mb-3">
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Linked Banks</h3>
-          <button className="text-xs text-red-700 font-semibold hover:text-red-800">+ Link Account</button>
+          <PlaidLinkButton
+            userCountry={user.country}
+            onSuccess={() => {
+              fetch('/api/bank-accounts').then(r => r.json()).then((data: BankAccount[]) => {
+                setBankAccounts(Array.isArray(data) ? data : []);
+              });
+            }}
+          />
         </div>
         {bankAccounts.length === 0 ? (
           <div className="text-center py-4">
