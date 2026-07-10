@@ -153,6 +153,13 @@ export async function GET() {
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processed_at TIMESTAMPTZ`;
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processing_error TEXT`;
 
+    // Phase C1: Live provider columns
+    // bank_accounts: Plaid account_id (for Transfer API) and Stripe payment method (for ACSS)
+    await sql`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS plaid_account_id TEXT`;
+    await sql`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS stripe_payment_method_id TEXT`;
+    // users: Stripe customer_id (for ACSS debit mandate)
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT`;
+
     return NextResponse.json({ success: true, message: 'Schema migration completed successfully' });
   } catch (err) {
     console.error('Migration error:', err);
