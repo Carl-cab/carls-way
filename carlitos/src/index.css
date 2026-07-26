@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Carlitos runs dark-first; light tokens kept for completeness. */
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 38 92% 50%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+    --success: 142 71% 45%;
+    --success-foreground: 210 40% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 222 47% 11%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 38 92% 50%;
+    --radius: 0.65rem;
+  }
+
+  .dark {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 96%;
+    --card: 222 40% 9%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 44% 8%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 38 92% 55%;
+    --primary-foreground: 222 47% 8%;
+    --secondary: 217 33% 15%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 20% 62%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 63% 40%;
+    --destructive-foreground: 210 40% 98%;
+    --success: 142 64% 42%;
+    --success-foreground: 144 61% 12%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 222 47% 8%;
+    --border: 217 33% 18%;
+    --input: 217 33% 18%;
+    --ring: 38 92% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  ::selection {
+    @apply bg-primary/30;
+  }
+}
+
+/* Subtle grid backdrop for the mission-control feel */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, hsl(var(--border) / 0.35) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(var(--border) / 0.35) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
