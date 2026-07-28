@@ -40,55 +40,89 @@ Every other branch produces a preview URL.
 
 ---
 
-## Connect `prestige.aquabuilt.ca`
+## Connect `prestige.aquabuilt.ca` (Wix-managed domain)
 
-1. In the new project: **Settings → Domains → Add**.
-2. Enter `prestige.aquabuilt.ca` and confirm.
-3. Vercel shows the exact DNS record to create. For a subdomain it is a `CNAME`:
+`aquabuilt.ca` is registered at Wix, so DNS is edited in the Wix dashboard.
 
-   | Type | Name | Value |
-   |---|---|---|
-   | CNAME | `prestige` | `cname.vercel-dns.com` |
+**Wix name servers cannot be changed.** That is a hard product limitation, not a
+setting — the only way off Wix DNS is transferring the domain to another registrar.
+It does not block this deployment: Wix lets you add your own `CNAME` records while
+keeping its name servers, which is all a subdomain needs.
 
-4. Add that record at whatever DNS host holds `aquabuilt.ca` (registrar, Cloudflare,
-   Route 53 — wherever the nameservers point).
-5. Wait for propagation, then verify:
+### Step 1 — Add the domain in Vercel
 
-   ```bash
-   dig +short prestige.aquabuilt.ca CNAME
-   curl -sI https://prestige.aquabuilt.ca | head -n 1
-   ```
+In the new project: **Settings → Domains → Add** → `prestige.aquabuilt.ca`.
+Vercel then displays the exact `CNAME` target for *your* project. Leave this tab open.
+
+### Step 2 — Add the CNAME in Wix
+
+1. Wix dashboard → **Domains**.
+2. Click the **Domain Actions** icon next to `aquabuilt.ca` → **Manage DNS Records**.
+3. Find the **CNAME (Aliases)** section → **+ Add Record**. Wix shows a warning
+   pop-up about DNS changes; click **Got it**.
+4. Fill in the two fields:
+
+   | Field | Value |
+   |---|---|
+   | Host Name | `prestige` |
+   | Value | the target Vercel showed you in Step 1 |
+
+5. **Save**, then **Save Changes** in the confirmation pop-up.
+
+> **Use the value from the Vercel dashboard, not a value copied from a blog post.**
+> Vercel moved to per-project dynamic targets (`<something>.vercel-dns-0NN.com`).
+> The legacy `cname.vercel-dns.com` still resolves, but the dashboard value is the
+> authoritative one for your project. `vercel domains inspect aquabuilt.ca` prints
+> it from the CLI.
+
+Enter `prestige` alone in Host Name — not the full `prestige.aquabuilt.ca`. Wix
+appends the domain for you, and typing the full name yields
+`prestige.aquabuilt.ca.aquabuilt.ca`.
+
+### Step 3 — Verify
+
+Wix states DNS changes can take up to 48 hours, though a new subdomain record
+usually resolves within 10–30 minutes.
+
+```bash
+dig +short prestige.aquabuilt.ca CNAME
+curl -sI https://prestige.aquabuilt.ca | head -n 1
+```
 
 Vercel issues and renews the TLS certificate automatically once the record resolves.
+The domain card in Vercel flips to a green **Valid Configuration** when it is done.
 
-> **Copy the record values from the Vercel dashboard rather than from this file.**
-> Vercel has changed its published target values before, and the dashboard is
-> always authoritative for your project.
+### What this does and does not touch
 
-### If DNS sits behind Cloudflare
+Adding a `prestige` CNAME only creates a new subdomain. Your existing Wix site on
+`aquabuilt.ca` and `www.aquabuilt.ca` keeps serving from Wix, untouched, and email
+(`MX` records) is unaffected.
 
-Set the `prestige` record to **DNS only** (grey cloud), not proxied. An orange-cloud
-proxied record blocks Vercel's domain verification and its certificate issuance.
+### If you later want the apex `aquabuilt.ca` on Vercel
 
-### Serving the apex `aquabuilt.ca` instead
-
-Add `aquabuilt.ca` as the domain and use the `A` record Vercel displays (an apex
-domain cannot be a CNAME). Add `www.aquabuilt.ca` too and let Vercel redirect one
-to the other — it offers this when you add the second domain.
+This is the messy case, and worth avoiding unless you are retiring the Wix site.
+An apex domain needs an `A` record, and Wix's default `A` records are what point
+`aquabuilt.ca` at your Wix site — repointing them takes the Wix site offline at that
+address. If that is the goal, use the `A` record value Vercel displays for your
+project, add `www.aquabuilt.ca` as a second domain, and let Vercel redirect between
+them. Wix's *Resetting Your Default A and CNAME Records* article covers the way back.
 
 ---
 
 ## Alternative hosts
 
 The page is plain static HTML, so anything that serves a file works. Vercel is the
-recommendation only because you already run it for Manna and the billing, DNS, and
-dashboard stay in one place.
+recommendation only because you already run it for Manna and the billing and
+dashboards stay in one place.
 
-- **Cloudflare Pages** — free custom domains and unlimited bandwidth. Strongest option
-  if `aquabuilt.ca` DNS already lives at Cloudflare, since the domain attaches with
-  no manual record at all.
 - **Netlify** — equivalent to Vercel for this use case; set publish directory to
-  `sites/aquabuilt-prestige`.
+  `sites/aquabuilt-prestige`. Same Wix `CNAME` step, different target value.
+- **Cloudflare Pages** — free and fast, and the `CNAME` approach works the same way.
+  Note that full Cloudflare DNS (the orange-cloud proxy, page rules, analytics) is
+  *not* available here, because that requires pointing name servers at Cloudflare —
+  which a Wix-registered domain cannot do without a registrar transfer.
+- **GitHub Pages** — free, but this is a private repo, so Pages would require making
+  it public or upgrading the plan.
 - **GitHub Pages** — free, but this is a private repo, so Pages would require making
   it public or upgrading the plan.
 
