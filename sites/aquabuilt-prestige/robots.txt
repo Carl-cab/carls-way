@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://prestige.aquabuilt.ca/sitemap.xml
