@@ -77,6 +77,11 @@ export default function ProfilePage() {
         setKycError(data.error || 'Failed to start verification');
         return;
       }
+      // Sandbox mode auto-verifies instantly — refresh profile to reflect it.
+      if (data.sandbox) {
+        loadProfile();
+        return;
+      }
       // Redirect to Stripe hosted Identity flow
       window.location.href = data.url;
     } catch {
