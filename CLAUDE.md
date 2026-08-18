@@ -40,7 +40,7 @@ Client (React 19)
 | `lib/auth.ts` | JWT helpers, `getAuthUser()`, velocity limits, audit logging |
 | `lib/fx.ts` | Wise API integration, FX rate caching, `buildFxQuote()` |
 | `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
-| `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
+| `lib/stripe.ts` | Stripe client singleton (`getStripe()`) and `isStripeLive()` sandbox/live KYC gate |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
 | `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `backfillOpeningBalances()` |
 | `lib/provider-events.ts` | Webhook event deduplication: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()` |
@@ -48,8 +48,8 @@ Client (React 19)
 | `lib/providers/TransferProviderFactory.ts` | Central provider selection logic — no other code should select providers |
 | `lib/providers/SandboxUSProvider.ts` | US sandbox provider — simulates Plaid Transfer ACH, no real API calls |
 | `lib/providers/SandboxCAProvider.ts` | CA sandbox provider — simulates Canadian EFT, no real API calls |
-| `lib/providers/PlaidTransferProvider.ts` | Placeholder for US live ACH (throws "Not implemented") |
-| `lib/providers/CanadianEFTProvider.ts` | Placeholder for CA live EFT (throws "Not implemented") |
+| `lib/providers/PlaidTransferProvider.ts` | US live ACH via Plaid Transfer — IMPLEMENTED, gated behind `PLAID_TRANSFER_LIVE` (default off). Never mutates balances. |
+| `lib/providers/CanadianEFTProvider.ts` | CA live EFT via Stripe ACSS — IMPLEMENTED, gated behind `CA_EFT_LIVE` (default off). Never mutates balances. |
 | `lib/settlement/types.ts` | Settlement event types, outcome objects, transition rules |
 | `lib/settlement/settlement-rules.ts` | State transition validators and terminal/processing state checkers |
 | `lib/settlement/SettlementProcessor.ts` | Core settlement processor — validates transitions, prepares outcomes, no balance mutations |
@@ -114,7 +114,7 @@ npm run dev
 
 After deploying, call `GET /api/migrate` once (authenticated) to apply the migration to production.
 
-**No test suite exists.** Manual testing is currently the only verification method.
+**Tests:** `npm test` (vitest) runs unit tests in `lib/__tests__`. As of Release 0.95 Phase 1 these are 83 pass / 53 fail; every failure is in admin RBAC/audit/repository/correlation code and is a pre-existing defect inherited from the feature branch — no money-loop test fails. Also available: `npm run typecheck`, `npm run lint`.
 
 ---
 
