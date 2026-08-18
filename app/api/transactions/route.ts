@@ -113,39 +113,51 @@ export async function POST(req: NextRequest) {
         estimatedSettlement = quote.estimatedSettlement;
       }
 
-      // Deduct from sender
-      if (senderCurrency === 'USD') {
-        await sql`UPDATE users SET balance_usd = balance_usd - ${numAmount} WHERE id = ${user.userId}`;
-      } else {
-        await sql`UPDATE users SET balance_cad = balance_cad - ${numAmount} WHERE id = ${user.userId}`;
+      // Atomically: debit sender (with balance guard), credit receiver, record transaction.
+      // The conditional debit prevents overdraw races; the DB transaction prevents
+      // money being lost if any step fails partway through.
+      let txId: number;
+      try {
+        txId = await sql.begin(async (tx) => {
+          const debited = senderCurrency === 'USD'
+            ? await tx`UPDATE users SET balance_usd = balance_usd - ${numAmount}
+                       WHERE id = ${user.userId} AND balance_usd >= ${numAmount} RETURNING id`
+            : await tx`UPDATE users SET balance_cad = balance_cad - ${numAmount}
+                       WHERE id = ${user.userId} AND balance_cad >= ${numAmount} RETURNING id`;
+          if (debited.length === 0) {
+            throw new Error('INSUFFICIENT_BALANCE');
+          }
+
+          if (receiverCurrency === 'USD') {
+            await tx`UPDATE users SET balance_usd = balance_usd + ${receiverAmount} WHERE id = ${receiver.id}`;
+          } else {
+            await tx`UPDATE users SET balance_cad = balance_cad + ${receiverAmount} WHERE id = ${receiver.id}`;
+          }
+
+          const result = await tx`
+            INSERT INTO transactions (
+              sender_id, receiver_id, amount, currency, note, type, status, privacy,
+              sender_currency, receiver_currency, fx_rate, fx_fee,
+              sender_amount, receiver_amount, is_cross_border, payment_rail,
+              estimated_settlement
+            ) VALUES (
+              ${user.userId}, ${receiver.id}, ${numAmount}, ${senderCurrency}, ${cleanNote},
+              ${type}, 'completed', ${txPrivacy},
+              ${senderCurrency}, ${receiverCurrency}, ${fxRate}, ${fxFee},
+              ${numAmount}, ${receiverAmount}, ${isCrossBorder},
+              ${isCrossBorder ? 'wire' : 'internal'},
+              ${estimatedSettlement ? estimatedSettlement.toISOString() : null}
+            )
+            RETURNING id
+          `;
+          return result[0].id as number;
+        }) as unknown as number;
+      } catch (txErr) {
+        if (txErr instanceof Error && txErr.message === 'INSUFFICIENT_BALANCE') {
+          return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
+        }
+        throw txErr;
       }
-
-      // Credit receiver
-      if (receiverCurrency === 'USD') {
-        await sql`UPDATE users SET balance_usd = balance_usd + ${receiverAmount} WHERE id = ${receiver.id}`;
-      } else {
-        await sql`UPDATE users SET balance_cad = balance_cad + ${receiverAmount} WHERE id = ${receiver.id}`;
-      }
-
-      // Create transaction record
-      const result = await sql`
-        INSERT INTO transactions (
-          sender_id, receiver_id, amount, currency, note, type, status, privacy,
-          sender_currency, receiver_currency, fx_rate, fx_fee,
-          sender_amount, receiver_amount, is_cross_border, payment_rail,
-          estimated_settlement
-        ) VALUES (
-          ${user.userId}, ${receiver.id}, ${numAmount}, ${senderCurrency}, ${cleanNote},
-          ${type}, 'completed', ${txPrivacy},
-          ${senderCurrency}, ${receiverCurrency}, ${fxRate}, ${fxFee},
-          ${numAmount}, ${receiverAmount}, ${isCrossBorder},
-          ${isCrossBorder ? 'wire' : 'internal'},
-          ${estimatedSettlement ? estimatedSettlement.toISOString() : null}
-        )
-        RETURNING id
-      `;
-
-      const txId = result[0].id as number;
 
       // Create passive ledger entries for auditability
       try {

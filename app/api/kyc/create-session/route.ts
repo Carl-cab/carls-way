@@ -1,17 +1,12 @@
 import { NextResponse } from 'next/server';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { getSql } from '@/lib/db';
-import { getStripe } from '@/lib/stripe';
+import { getStripe, isStripeLive } from '@/lib/stripe';
 
 export async function POST() {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
-    if (!appUrl) {
-      return NextResponse.json({ error: 'NEXT_PUBLIC_APP_URL is not configured' }, { status: 500 });
-    }
 
     const sql = getSql();
 
@@ -19,6 +14,23 @@ export async function POST() {
     const rows = await sql`SELECT kyc_status FROM users WHERE id = ${user.userId}`;
     if (rows[0]?.kyc_status === 'verified') {
       return NextResponse.json({ error: 'Identity already verified' }, { status: 400 });
+    }
+
+    // Sandbox mode: no live Stripe key configured. Auto-verify so the platform
+    // is usable end-to-end. Real KYC engages automatically once a live key is set.
+    if (!isStripeLive()) {
+      await sql`
+        UPDATE users
+        SET kyc_status = 'verified', kyc_provider = 'sandbox', kyc_session_id = NULL
+        WHERE id = ${user.userId}
+      `;
+      await auditLog(user.userId, 'kyc_sandbox_verified', { mode: 'sandbox' });
+      return NextResponse.json({ sandbox: true, verified: true });
+    }
+
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+    if (!appUrl) {
+      return NextResponse.json({ error: 'NEXT_PUBLIC_APP_URL is not configured' }, { status: 500 });
     }
 
     const stripe = getStripe();

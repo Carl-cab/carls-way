@@ -18,6 +18,8 @@ export interface SettlementPlan {
   provider: string;
   provider_event_id: string;
   provider_reference_id: string;
+  // Milestone 2: Correlation ID for request tracing
+  correlationId: string;
   updateBalance: {
     shouldUpdate: boolean;
     currency?: string;
@@ -47,8 +49,9 @@ export class SettlementOrchestrator {
    * Orchestrate settlement for a provider event.
    * Query transfer_intents, validate transition, prepare side effects.
    * Phase B2: Plan only, do not execute.
+   * Milestone 2: Includes correlation ID for request tracing.
    */
-  async orchestrateSettlement(event: NormalizedEvent): Promise<SettlementPlan> {
+  async orchestrateSettlement(event: NormalizedEvent, correlationId: string = ''): Promise<SettlementPlan> {
     const sql = getSql();
 
     try {
@@ -71,6 +74,7 @@ export class SettlementOrchestrator {
           provider: event.provider,
           provider_event_id: event.provider_event_id,
           provider_reference_id: event.provider_reference_id,
+          correlationId,
           updateBalance: { shouldUpdate: false },
           createLedgerEntries: { shouldCreate: false },
           notifyUser: false,
@@ -107,7 +111,8 @@ export class SettlementOrchestrator {
         intent,
         outcome.nextStatus,
         event,
-        intent.provider_reference_id
+        intent.provider_reference_id,
+        correlationId
       );
 
       return plan;
@@ -121,6 +126,7 @@ export class SettlementOrchestrator {
         provider: event.provider,
         provider_event_id: event.provider_event_id,
         provider_reference_id: event.provider_reference_id,
+        correlationId,
         updateBalance: { shouldUpdate: false },
         createLedgerEntries: { shouldCreate: false },
         notifyUser: false,
@@ -137,6 +143,7 @@ export class SettlementOrchestrator {
    * Enrich settlement outcome with side effect instructions.
    * Determines what WOULD happen, but does not execute.
    * Phase B2: Planning only.
+   * Milestone 2: Includes correlation ID for request tracing.
    */
   private enrichOutcomeWithSideEffects(
     intent: {
@@ -149,7 +156,8 @@ export class SettlementOrchestrator {
     },
     nextStatus: SettlementStatus,
     event: NormalizedEvent,
-    providerReferenceId: string
+    providerReferenceId: string,
+    correlationId: string = ''
   ): SettlementPlan {
     // Determine balance update instructions based on transition
     const updateBalance = this.planBalanceUpdate(intent, nextStatus);
@@ -174,6 +182,7 @@ export class SettlementOrchestrator {
       provider: event.provider,
       provider_event_id: event.provider_event_id,
       provider_reference_id: providerReferenceId,
+      correlationId,
       updateBalance,
       createLedgerEntries,
       notifyUser,

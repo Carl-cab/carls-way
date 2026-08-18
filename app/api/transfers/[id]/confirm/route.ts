@@ -30,6 +30,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
+    if (err instanceof Error && err.message === 'INSUFFICIENT_BALANCE') {
+      return NextResponse.json({ error: 'Insufficient balance to cash out this amount.' }, { status: 400 });
+    }
     console.error('Transfer confirm error:', err);
     return NextResponse.json({ error: 'Failed to confirm transfer' }, { status: 500 });
   }
