@@ -24,7 +24,7 @@
     "react-plaid-link": "^4.1.1",
     "resend": "^6.12.4",
     "speakeasy": "^2.0.0",
-    "stripe": "^22.2.1"
+    "stripe": "~22.3.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
