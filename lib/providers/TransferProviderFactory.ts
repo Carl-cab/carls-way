@@ -48,6 +48,24 @@ export function regionFromCountry(country: string): UserRegion {
   return country === 'US' ? 'US' : 'CA';
 }
 
+/**
+ * Resolve the execution mode for a region from environment flags.
+ * Returns 'live' ONLY when that region's live flag is explicitly 'true'
+ * (US: PLAID_TRANSFER_LIVE, CA: CA_EFT_LIVE). Defaults to 'sandbox' otherwise,
+ * so nothing goes live until the flag is deliberately set alongside live
+ * credentials. This is the single source of truth for go-live gating.
+ */
+export function resolveExecutionMode(region: UserRegion): ExecutionMode {
+  if (region === 'US' && process.env.PLAID_TRANSFER_LIVE === 'true') return 'live';
+  if (region === 'CA' && process.env.CA_EFT_LIVE === 'true') return 'live';
+  return 'sandbox';
+}
+
+/** Narrow an untrusted string (e.g. a DB column) to a valid ExecutionMode. */
+export function toExecutionMode(value: string | null | undefined): ExecutionMode {
+  return value === 'live' ? 'live' : 'sandbox';
+}
+
 // Convenience method for routes that only need sandbox
 export function getSandboxProvider(region: UserRegion): TransferProvider {
   return getTransferProvider(region, 'sandbox');
