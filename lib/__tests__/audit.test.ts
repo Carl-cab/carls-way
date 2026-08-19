@@ -191,7 +191,10 @@ describe('Audit Logging System', () => {
       );
 
       expect(logs).toHaveLength(10);
-      expect(new Set(logs.map((l) => l.admin_user_id))).toHaveSize(10);
+      // `toHaveSize` is a Jasmine matcher and does not exist here; the assertion
+      // is unchanged in meaning — ten concurrent writes produced ten distinct
+      // admin_user_id values.
+      expect(new Set(logs.map((l) => l.admin_user_id)).size).toBe(10);
     });
   });
 
@@ -509,11 +512,16 @@ describe('Audit Logging System', () => {
 
       const log = await service.createAuditLog(event);
 
-      expect(log.session_id).toBeUndefined();
-      expect(log.resource_id).toBeUndefined();
-      expect(log.correlation_id).toBeUndefined();
-      expect(log.ip_address).toBeUndefined();
-      expect(log.user_agent).toBeUndefined();
+      // createAuditLog returns the persisted row. Optional fields that were not
+      // supplied are stored as SQL NULL and therefore come back as null, not
+      // undefined. The intent of the assertion — "no value was recorded for
+      // these fields" — is unchanged; only the encoding of absence is corrected
+      // to match what a database-backed record actually returns.
+      expect(log.session_id).toBeNull();
+      expect(log.resource_id).toBeNull();
+      expect(log.correlation_id).toBeNull();
+      expect(log.ip_address).toBeNull();
+      expect(log.user_agent).toBeNull();
     });
   });
 

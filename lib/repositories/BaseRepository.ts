@@ -12,8 +12,7 @@
  */
 
 import { getSql } from '@/lib/db';
-import type { RepositoryError } from './types';
-import { DuplicateKeyError, NotFoundError, TransactionError } from './types';
+import { RepositoryError, DuplicateKeyError, NotFoundError, TransactionError } from './types';
 
 /**
  * Base repository class.
@@ -38,6 +37,17 @@ export abstract class BaseRepository {
    * @returns Thrown RepositoryError with appropriate code
    */
   protected handleError(err: unknown, context: string): never {
+    // Repository errors are already classified — re-throw them unchanged so
+    // callers keep the specific type (NotFoundError, DuplicateKeyError, ...).
+    //
+    // This check must come first. RepositoryError carries its own `code` field
+    // ('NOT_FOUND', 'DUPLICATE_KEY', ...), so the generic `error.code` branch
+    // below would otherwise catch it and re-wrap it as a TransactionError,
+    // erasing the original error's identity.
+    if (err instanceof RepositoryError) {
+      throw err;
+    }
+
     const error = err as Record<string, unknown>;
 
     // UNIQUE constraint violation (duplicate key)
@@ -68,11 +78,6 @@ export abstract class BaseRepository {
         `Database error in ${context}: ${error.code}`,
         { code: error.code, detail: error.detail, message: error.message }
       );
-    }
-
-    // Re-throw repository errors as-is
-    if (error.name === 'RepositoryError' || error.name === 'DuplicateKeyError' || error.name === 'NotFoundError') {
-      throw err;
     }
 
     // Unknown error

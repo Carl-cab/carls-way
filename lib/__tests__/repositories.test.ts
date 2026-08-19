@@ -14,6 +14,10 @@
  */
 
 import { BaseRepository } from '../repositories/BaseRepository';
+import { UserRepository } from '../repositories/UserRepository';
+import { LedgerRepository } from '../repositories/LedgerRepository';
+import { TransferIntentRepository } from '../repositories/TransferIntentRepository';
+import { ProviderEventRepository } from '../repositories/ProviderEventRepository';
 import {
   RepositoryError,
   DuplicateKeyError,
@@ -24,10 +28,17 @@ import {
   TransferIntent,
 } from '../repositories/types';
 
+/**
+ * BaseRepository is abstract, so it cannot be instantiated directly. This
+ * minimal concrete subclass adds no behaviour and exists solely so the tests can
+ * exercise the base class's protected helpers, exactly as before.
+ */
+class TestRepository extends BaseRepository {}
+
 describe('Repository Layer', () => {
   describe('Error Handling', () => {
     it('should convert PostgreSQL UNIQUE violation to DuplicateKeyError', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const dbError = {
         code: '23505',
         constraint: 'users_email_key',
@@ -40,7 +51,7 @@ describe('Repository Layer', () => {
     });
 
     it('should convert PostgreSQL FK violation to TransactionError', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const dbError = {
         code: '23503',
         detail: 'Key (user_id)=(999) is not present in table "users"',
@@ -52,7 +63,7 @@ describe('Repository Layer', () => {
     });
 
     it('should convert PostgreSQL CHECK violation to TransactionError', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const dbError = {
         code: '23514',
         detail: 'new row for relation "transfer_intents" violates check constraint',
@@ -64,7 +75,7 @@ describe('Repository Layer', () => {
     });
 
     it('should re-throw RepositoryErrors as-is', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const error = new NotFoundError('User', 'id = 123');
 
       expect(() => {
@@ -73,7 +84,7 @@ describe('Repository Layer', () => {
     });
 
     it('should throw TransactionError for unknown database errors', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const dbError = { code: 'XX999', message: 'Unknown error' };
 
       expect(() => {
@@ -83,24 +94,37 @@ describe('Repository Layer', () => {
   });
 
   describe('Assertions', () => {
-    it('should throw NotFoundError when asserting on null value', () => {
-      const repo = new BaseRepository();
+    /**
+     * assertFound is declared with an `asserts` signature. TypeScript only
+     * permits calling such a function through an identifier that carries an
+     * explicit type annotation, so it is rebound here with a plain call
+     * signature. Runtime behaviour is identical.
+     */
+    const boundAssertFound = (
+      repo: TestRepository,
+    ): ((value: unknown, fieldName: string) => void) =>
+      repo['assertFound'].bind(repo);
 
+    it('should throw NotFoundError when asserting on null value', () => {
+      const repo = new TestRepository();
+
+      const assertFound = boundAssertFound(repo);
       expect(() => {
-        repo['assertFound'](null, 'user_123');
+        assertFound(null, 'user_123');
       }).toThrow(NotFoundError);
     });
 
     it('should throw NotFoundError when asserting on undefined value', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
 
+      const assertFound = boundAssertFound(repo);
       expect(() => {
-        repo['assertFound'](undefined, 'transfer_456');
+        assertFound(undefined, 'transfer_456');
       }).toThrow(NotFoundError);
     });
 
     it('should not throw when asserting on valid value', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const user: User = {
         id: 1,
         name: 'Test',
@@ -115,15 +139,16 @@ describe('Repository Layer', () => {
         created_at: new Date().toISOString(),
       };
 
+      const assertFound = boundAssertFound(repo);
       expect(() => {
-        repo['assertFound'](user, 'user_123');
+        assertFound(user, 'user_123');
       }).not.toThrow();
     });
   });
 
   describe('Pagination', () => {
     it('should validate and constrain page numbers', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
 
       const valid = repo['validatePagination'](0, 50);
       expect(valid.page).toBe(1); // Minimum page is 1
@@ -133,7 +158,7 @@ describe('Repository Layer', () => {
     });
 
     it('should validate and constrain limit', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
 
       const valid = repo['validatePagination'](1, 0);
       expect(valid.limit).toBe(1); // Minimum limit is 1
@@ -146,7 +171,7 @@ describe('Repository Layer', () => {
     });
 
     it('should calculate correct offset for pagination', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
 
       expect(repo['calculateOffset'](1, 50)).toBe(0);
       expect(repo['calculateOffset'](2, 50)).toBe(50);
@@ -155,7 +180,7 @@ describe('Repository Layer', () => {
     });
 
     it('should handle invalid page numbers in offset calculation', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
 
       expect(repo['calculateOffset'](0, 50)).toBe(0); // Page 0 treated as page 1
       expect(repo['calculateOffset'](-5, 50)).toBe(0); // Negative page treated as page 1
@@ -164,7 +189,7 @@ describe('Repository Layer', () => {
 
   describe('Timestamp Formatting', () => {
     it('should format Date objects to ISO string', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const date = new Date('2024-01-15T10:30:00Z');
 
       const formatted = repo['formatTimestamp'](date);
@@ -172,7 +197,7 @@ describe('Repository Layer', () => {
     });
 
     it('should return ISO strings unchanged', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const iso = '2024-01-15T10:30:00Z';
 
       const formatted = repo['formatTimestamp'](iso);
@@ -180,7 +205,7 @@ describe('Repository Layer', () => {
     });
 
     it('should use current time when no date provided', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const before = new Date();
 
       const formatted = repo['formatTimestamp']();
@@ -194,7 +219,7 @@ describe('Repository Layer', () => {
     });
 
     it('should parse ISO timestamps to Date objects', () => {
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
       const iso = '2024-01-15T10:30:00Z';
 
       const parsed = repo['parseTimestamp'](iso);
@@ -326,16 +351,20 @@ describe('Repository Layer', () => {
       // - No external provider calls
 
       // Example validation structure for BaseRepository
-      const repo = new BaseRepository();
+      const repo = new TestRepository();
 
       // Should have data access methods
       expect(typeof repo['executeQuery']).toBe('function');
       expect(typeof repo['handleError']).toBe('function');
 
       // Should NOT have business logic methods
-      expect(typeof (repo as any).calculateFee).toBeFalsy();
-      expect(typeof (repo as any).authorizeUser).toBeFalsy();
-      expect(typeof (repo as any).callExternalProvider).toBeFalsy();
+      // `typeof x` returns the STRING 'undefined' for a missing member, which is
+      // truthy — the original toBeFalsy() assertions could never fail. Assert on
+      // the member itself so the intended property ("no business-logic methods")
+      // is actually enforced.
+      expect((repo as TestRepository & Record<string, unknown>).calculateFee).toBeUndefined();
+      expect((repo as TestRepository & Record<string, unknown>).authorizeUser).toBeUndefined();
+      expect((repo as TestRepository & Record<string, unknown>).callExternalProvider).toBeUndefined();
     });
 
     it('should have clean separation of concerns', () => {
@@ -348,11 +377,8 @@ describe('Repository Layer', () => {
       // Each repository extends BaseRepository and implements specific queries
       expect(BaseRepository).toBeDefined();
 
-      const { UserRepository } = require('../repositories/UserRepository');
-      const { LedgerRepository } = require('../repositories/LedgerRepository');
-      const { TransferIntentRepository } = require('../repositories/TransferIntentRepository');
-      const { ProviderEventRepository } = require('../repositories/ProviderEventRepository');
-
+      // Imported statically at the top of this file: a CommonJS require() of a
+      // TypeScript module is not resolvable under the ESM test runner.
       expect(new UserRepository()).toBeInstanceOf(BaseRepository);
       expect(new LedgerRepository()).toBeInstanceOf(BaseRepository);
       expect(new TransferIntentRepository()).toBeInstanceOf(BaseRepository);

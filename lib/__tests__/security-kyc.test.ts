@@ -25,7 +25,7 @@ import {
 const REPO_ROOT = join(__dirname, '..', '..');
 
 /** Env keys these tests manipulate; restored after each case. */
-const MANAGED_KEYS = ['MANNA_ENV', 'VERCEL_ENV', 'STRIPE_SECRET_KEY', 'NODE_ENV'] as const;
+const MANAGED_KEYS = ['MANNA_ENV', 'VERCEL_ENV', 'STRIPE_SECRET_KEY'] as const;
 
 let saved: Record<string, string | undefined> = {};
 
@@ -38,6 +38,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // NODE_ENV is readonly in @types/node, so it is managed through vitest's env
+  // stubs rather than direct assignment.
+  vi.unstubAllEnvs();
   for (const key of MANAGED_KEYS) {
     if (saved[key] === undefined) {
       delete process.env[key];
@@ -92,7 +95,7 @@ describe('KYC fail-closed security', () => {
     });
 
     it('does not treat NODE_ENV as an environment signal', () => {
-      process.env.NODE_ENV = 'development';
+      vi.stubEnv('NODE_ENV', 'development');
       // NODE_ENV=development must NOT imply sandbox.
       expect(getDeploymentEnvironment()).toBe('production');
       expect(canAutoVerifyIdentity()).toBe(false);

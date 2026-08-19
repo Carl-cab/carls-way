@@ -19,9 +19,10 @@ import {
   isReadOnly,
   getFieldsToMask,
   ROLE_PERMISSIONS,
-  maskSensitiveFields,
-  maskArray,
 } from '../rbac/types';
+// maskSensitiveFields/maskArray are implemented in admin-middleware and
+// re-exported from the rbac barrel; they are not part of rbac/types.
+import { maskSensitiveFields, maskArray } from '../rbac';
 import type { AdminRole, Permission } from '../rbac/types';
 
 describe('RBAC Layer', () => {
@@ -315,9 +316,25 @@ describe('RBAC Layer', () => {
         .flat()
         .filter((p, i, arr) => arr.indexOf(p) === i);
 
-      // None of these should be customer-facing
+      // Every admin permission must be `resource:action` over a resource drawn
+      // from the admin vocabulary — none of it customer-facing.
+      //
+      // The allow-list below is the complete set of resources currently declared
+      // by the Permission union in rbac/types.ts. The previous list predated
+      // several admin-only resources that were added with the RBAC model
+      // (roles, permissions, audit_logs, data, provider_events) and so rejected
+      // legitimate permissions such as 'roles:manage'. Keeping the list explicit
+      // is deliberate: adding a resource must be a conscious edit here, which is
+      // what makes this an architecture check rather than a tautology.
+      const ADMIN_RESOURCES = [
+        'admins', 'audit_logs', 'compliance', 'data', 'events', 'exceptions',
+        'incidents', 'investigations', 'ledger', 'permissions', 'provider_events',
+        'roles', 'settlements', 'transfers', 'users', 'wallets',
+      ];
+      const shape = new RegExp(`^(${ADMIN_RESOURCES.join('|')}):[a-z_]+$`);
+
       for (const perm of adminPermissions) {
-        expect(perm).toMatch(/^(admins|transfers|events|settlements|audit|compliance|investigations|users|wallets|ledger|provider|incidents|exceptions):/);
+        expect(perm).toMatch(shape);
       }
     });
   });

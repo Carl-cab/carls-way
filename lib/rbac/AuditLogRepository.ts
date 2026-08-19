@@ -196,7 +196,8 @@ export class AuditLogRepository extends BaseRepository {
       }
 
       const rows = await query;
-      return rows[0]?.count || 0;
+      // COUNT(*) is bigint; postgres.js returns it as a string.
+      return Number(rows[0]?.count ?? 0);
     } catch (err) {
       throw new RepositoryError('AUDIT_COUNT_FAILED', `Failed to count audit logs: ${String(err)}`);
     }
@@ -298,7 +299,7 @@ export class AuditLogRepository extends BaseRepository {
       const actionRows = await actionQuery;
       const actions: Record<string, number> = {};
       actionRows.forEach((row: any) => {
-        actions[row.action] = row.count;
+        actions[row.action] = Number(row.count);
       });
 
       // Get admin users breakdown
@@ -315,13 +316,14 @@ export class AuditLogRepository extends BaseRepository {
       const adminRows = await adminQuery;
       const admin_users: Record<number, number> = {};
       adminRows.forEach((row: any) => {
-        admin_users[row.admin_user_id] = row.count;
+        admin_users[row.admin_user_id] = Number(row.count);
       });
 
       return {
-        total_count: countResult[0]?.count || 0,
-        success_count: successResult[0]?.count || 0,
-        failed_count: failedResult[0]?.count || 0,
+        // COUNT(*) is bigint; postgres.js returns it as a string.
+        total_count: Number(countResult[0]?.count ?? 0),
+        success_count: Number(successResult[0]?.count ?? 0),
+        failed_count: Number(failedResult[0]?.count ?? 0),
         actions,
         admin_users,
       };

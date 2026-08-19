@@ -56,17 +56,54 @@ export function extractOrGenerateCorrelationId(req: NextRequest): string {
 }
 
 /**
- * Sanitize correlation ID to prevent injection attacks.
+ * Sanitize a correlation ID into its canonical form.
  *
- * Allows: alphanumeric, hyphens, underscores
- * Rejects: quotes, semicolons, newlines, etc.
- * Max length: 255 characters
+ * Correlation IDs arrive from untrusted request headers and are then written to
+ * the database, emitted in structured logs, and echoed back in responses. SQL
+ * parameterisation already prevents injection at the database boundary, but the
+ * identifier still needs a well-defined contract of its own so that the same
+ * logical request cannot be represented in several different ways, and so no
+ * downstream consumer has to defend against surprising content.
  *
- * @param id - Raw correlation ID from header
- * @returns Sanitized correlation ID or empty string if invalid
+ * CONTRACT
+ *
+ *   Legal characters   ASCII letters, digits, hyphen, underscore: [A-Za-z0-9-_]
+ *                      Everything else — quotes, semicolons, whitespace,
+ *                      control characters, Unicode — is removed.
+ *   Separators         Hyphen and underscore. A run of two or more separator
+ *                      characters collapses to a single hyphen. This is what
+ *                      prevents an output containing "--", the SQL comment
+ *                      introducer, and it also stops "a--b" and "a-b" being two
+ *                      spellings of the same id.
+ *   Leading / trailing Separators are trimmed from both ends.
+ *   Maximum length     255 characters, applied after cleaning; if truncation
+ *                      leaves a trailing separator it is trimmed too.
+ *   Empty result       Never returned. Input that sanitizes to nothing (empty,
+ *                      whitespace-only, entirely illegal characters, null or
+ *                      undefined) yields a freshly generated id, because tracing
+ *                      requires every request to carry one.
+ *   Idempotent         sanitize(sanitize(x)) === sanitize(x) for any x.
+ *
+ * @param id - Raw correlation ID from a request header
+ * @returns Canonical correlation ID, always non-empty
  */
 export function sanitizeCorrelationId(id: string): string {
-  const sanitized = id.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 255);
+  if (typeof id !== 'string') {
+    return generateCorrelationId();
+  }
+
+  const sanitized = id
+    // 1. Legal character set.
+    .replace(/[^a-zA-Z0-9\-_]/g, '')
+    // 2. Collapse runs of separators; a single separator is left as written.
+    .replace(/[-_]{2,}/g, '-')
+    // 3. Trim separators from both ends.
+    .replace(/^[-_]+|[-_]+$/g, '')
+    // 4. Bound the length.
+    .slice(0, 255)
+    // 5. Truncation may have exposed a new trailing separator.
+    .replace(/[-_]+$/g, '');
+
   return sanitized || generateCorrelationId();
 }
 
@@ -112,7 +149,7 @@ export function createRequestContext(
  * Ensures correlation ID meets expected format for logging and storage.
  * Used to catch invalid correlation IDs early (e.g., from malicious headers).
  */
-export function isValidCorrelationId(id: string): boolean {
+export function isValidCorrelationId(id: string | null | undefined): boolean {
   if (!id || typeof id !== 'string') return false;
   if (id.length > 255) return false;
   return /^[a-zA-Z0-9\-_]+$/.test(id);
