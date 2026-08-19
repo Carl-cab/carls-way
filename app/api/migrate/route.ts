@@ -118,6 +118,23 @@ export async function GET() {
     await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS consent_confirmed_at TIMESTAMPTZ`;
     await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS idempotency_key TEXT`;
 
+    // Phase 3: transfer execution safety.
+    // provider_authorization_id is persisted before the provider call and is the
+    // Plaid idempotency identifier for transferCreate, so a transfer that the
+    // provider accepted can always be recovered even if the follow-up write fails.
+    await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS provider_authorization_id TEXT`;
+    // One logical transfer must map to at most one provider operation. Partial
+    // indexes so the many rows with NULLs are unaffected.
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_idempotency_key
+              ON transfer_intents(idempotency_key) WHERE idempotency_key IS NOT NULL`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_provider_reference
+              ON transfer_intents(provider_reference_id) WHERE provider_reference_id IS NOT NULL`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_provider_authorization
+              ON transfer_intents(provider_authorization_id) WHERE provider_authorization_id IS NOT NULL`;
+    // Reconciliation scans intents whose provider outcome is unknown.
+    await sql`CREATE INDEX IF NOT EXISTS idx_transfer_intents_submitting
+              ON transfer_intents(status) WHERE status = 'submitting'`;
+
     // Add missing columns to transactions table if they don't exist
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS sender_currency TEXT NOT NULL DEFAULT 'CAD'`;
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS receiver_currency TEXT NOT NULL DEFAULT 'CAD'`;

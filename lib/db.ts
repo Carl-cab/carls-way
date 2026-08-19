@@ -149,6 +149,12 @@ export async function initializeSchema() {
       provider_name TEXT NOT NULL DEFAULT 'sandbox_ca',
       execution_mode TEXT NOT NULL DEFAULT 'sandbox',
       provider_reference_id TEXT,
+      -- Plaid returns an authorization before the transfer is created, and that
+      -- authorization id doubles as the provider's idempotency identifier
+      -- (plaid SDK 42.x: TransferCreateRequest.idempotency_key is deprecated in
+      -- its favour). Persisting it BEFORE calling transferCreate is what makes a
+      -- provider-success / database-failure window recoverable.
+      provider_authorization_id TEXT,
       failure_reason TEXT,
       consent_confirmed_at TIMESTAMPTZ,
       idempotency_key TEXT,

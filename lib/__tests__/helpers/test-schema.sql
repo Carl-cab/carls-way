@@ -17,14 +17,16 @@ CREATE TABLE IF NOT EXISTS admin_users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Mirrors the production DDL exactly: token_hash is NOT NULL there, and there
+-- are no ip_address/user_agent columns. Keeping these aligned means session code
+-- cannot pass here and fail in production.
 CREATE TABLE IF NOT EXISTS admin_sessions (
   id TEXT PRIMARY KEY,
   admin_user_id INTEGER NOT NULL REFERENCES admin_users(id),
+  token_hash TEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,
-  last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  ip_address TEXT,
-  user_agent TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS admin_audit_logs (
@@ -66,13 +68,90 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- admin_audit_logs.session_id is a real foreign key to admin_sessions.
-INSERT INTO admin_sessions (id, admin_user_id, expires_at)
+INSERT INTO admin_sessions (id, admin_user_id, token_hash, expires_at)
 VALUES
-  ('sess_123', 1, NOW() + INTERVAL '1 day'),
-  ('sess_xyz', 42, NOW() + INTERVAL '1 day')
+  ('sess_123', 1, 'not-a-real-hash', NOW() + INTERVAL '1 day'),
+  ('sess_xyz', 42, 'not-a-real-hash', NOW() + INTERVAL '1 day')
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(
   pg_get_serial_sequence('admin_users', 'id'),
   GREATEST((SELECT MAX(id) FROM admin_users), 1)
 );
+
+
+-- ── Phase 3: transfer execution safety ──────────────────────────────────────
+-- Mirrors lib/db.ts / app/api/migrate/route.ts for the columns these tests use.
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  username TEXT UNIQUE NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  balance_cad REAL NOT NULL DEFAULT 0,
+  balance_usd REAL NOT NULL DEFAULT 0,
+  country TEXT NOT NULL DEFAULT 'CA',
+  kyc_status TEXT NOT NULL DEFAULT 'pending',
+  failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS bank_accounts (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  plaid_item_id TEXT,
+  plaid_access_token_enc TEXT,
+  plaid_account_id TEXT,
+  institution_name TEXT NOT NULL,
+  account_name TEXT NOT NULL,
+  account_type TEXT NOT NULL DEFAULT 'depository',
+  account_mask TEXT,
+  currency TEXT NOT NULL DEFAULT 'CAD',
+  country TEXT NOT NULL DEFAULT 'CA',
+  is_primary BOOLEAN NOT NULL DEFAULT false,
+  is_verified BOOLEAN NOT NULL DEFAULT false,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  is_token_encrypted BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS transfer_intents (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  bank_account_id INTEGER REFERENCES bank_accounts(id),
+  type TEXT NOT NULL,
+  amount REAL NOT NULL,
+  currency TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  provider_region TEXT NOT NULL DEFAULT 'CA',
+  provider_name TEXT NOT NULL DEFAULT 'sandbox_ca',
+  execution_mode TEXT NOT NULL DEFAULT 'sandbox',
+  provider_reference_id TEXT,
+  provider_authorization_id TEXT,
+  failure_reason TEXT,
+  consent_confirmed_at TIMESTAMPTZ,
+  idempotency_key TEXT,
+  correlation_id VARCHAR(255),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_idempotency_key
+  ON transfer_intents(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_provider_reference
+  ON transfer_intents(provider_reference_id) WHERE provider_reference_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_provider_authorization
+  ON transfer_intents(provider_authorization_id) WHERE provider_authorization_id IS NOT NULL;
+
+INSERT INTO users (id, name, username, email, password_hash, country, kyc_status)
+VALUES (9001, 'Transfer Test User', 'transfertest9001', 'transfer9001@example.test',
+        'not-a-real-hash', 'US', 'verified')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO bank_accounts (id, user_id, institution_name, account_name,
+                           plaid_account_id, is_token_encrypted, is_verified)
+VALUES (9001, 9001, 'Test Bank', 'Checking', 'plaid_acct_9001', true, true)
+ON CONFLICT (id) DO NOTHING;
+
+SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
+SELECT setval(pg_get_serial_sequence('bank_accounts','id'), GREATEST((SELECT MAX(id) FROM bank_accounts), 1));
