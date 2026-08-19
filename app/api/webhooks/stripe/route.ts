@@ -89,9 +89,25 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ received: true });
   } catch (err) {
+    // Acknowledging a failure with 200 tells Stripe the event was handled, so it
+    // is never redelivered and the event is lost permanently — for a financial
+    // or identity event that is a silent-data-loss failure mode. Return 500 so
+    // Stripe retries.
+    //
+    // Safe to retry:
+    //   - the signature was already verified above, so only authentic Stripe
+    //     events can reach this path;
+    //   - recordProviderEvent is idempotent via
+    //     UNIQUE(provider, provider_event_id) and reports duplicates rather
+    //     than double-inserting;
+    //   - the KYC updates are idempotent, scoped by kyc_session_id.
+    //
+    // This also matches the Plaid webhook, which already returns 500 here.
     console.error('Stripe webhook handler error:', err);
-    // Return 200 so Stripe does not retry — log the error for investigation
-    return NextResponse.json({ received: true, warning: 'Handler error' });
+    return NextResponse.json(
+      { error: 'Webhook handler failed; event will be retried' },
+      { status: 500 },
+    );
   }
 }
 

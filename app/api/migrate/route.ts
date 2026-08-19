@@ -1,8 +1,31 @@
 import { NextResponse } from 'next/server';
 import { getSql, initializeSchema } from '@/lib/db';
+import { getAuthUser, auditLog } from '@/lib/auth';
 
+/**
+ * Apply pending schema changes.
+ *
+ * This endpoint executes DDL, so it requires an authenticated caller. It was
+ * previously reachable anonymously, which contradicted its own documented
+ * contract ("call GET /api/migrate once with a valid auth cookie") and left an
+ * unauthenticated schema-mutation endpoint exposed on the public internet.
+ *
+ * Every statement it runs is idempotent (CREATE TABLE / ADD COLUMN
+ * IF NOT EXISTS) and none are destructive, so the change here is to close
+ * anonymous access rather than to alter what the migration does.
+ *
+ * Follow-up recorded for a later phase: hold this to an admin permission rather
+ * than to any authenticated customer. That depends on the admin login and
+ * bootstrap lifecycle, which is deliberately out of scope for Phase 2.
+ */
 export async function GET() {
   try {
+    const user = await getAuthUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    await auditLog(user.userId, 'schema_migration_run', {});
+
     // Run full schema initialization (creates missing tables)
     await initializeSchema();
 
