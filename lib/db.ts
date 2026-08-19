@@ -2,6 +2,27 @@ import postgres from 'postgres';
 
 let _sql: ReturnType<typeof postgres> | null = null;
 
+/**
+ * Resolve the TLS mode for a connection string.
+ *
+ * TLS is required by default. It is relaxed only when the connection string
+ * explicitly asks with the standard libpq parameter `?sslmode=disable`, which is
+ * how a local or CI PostgreSQL instance without certificates is addressed.
+ * Absent, empty, malformed, or unrecognised values all resolve to 'require', so
+ * a typo cannot silently drop encryption.
+ *
+ * Exported for testing: this is a security-relevant default and is asserted in
+ * lib/__tests__/security-database.test.ts.
+ */
+export function resolveSslMode(connectionString: string): 'require' | false {
+  try {
+    const sslMode = new URL(connectionString).searchParams.get('sslmode');
+    return sslMode === 'disable' ? false : 'require';
+  } catch {
+    return 'require';
+  }
+}
+
 export function getSql() {
   if (!_sql) {
     const dbUrl = process.env.DATABASE_URL;
@@ -10,13 +31,16 @@ export function getSql() {
     }
     // Parse URL manually so special characters in the password don't break URL parsing
     const url = new URL(dbUrl);
+
+    const ssl = resolveSslMode(dbUrl);
+
     _sql = postgres({
       host: url.hostname,
       port: parseInt(url.port) || 5432,
       database: url.pathname.replace(/^\//, ''),
       username: decodeURIComponent(url.username),
       password: decodeURIComponent(url.password),
-      ssl: 'require',
+      ssl,
       max: 5,
       idle_timeout: 30,
       connect_timeout: 10,

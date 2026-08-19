@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master, 'integration/**']
+  push:
+    branches: [master, 'integration/**']
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: install · typecheck · lint · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # The audit suite exercises real repository SQL. Running it against a real
+      # PostgreSQL server is deliberate: a hand-written fake would test the fake.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: manna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Test database only. No production credential is ever present in CI, and
+      # MANNA_ENV is deliberately left unset so the KYC tests exercise the
+      # fail-closed production default.
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/manna_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Uses the lockfile exactly. This step would have failed before Phase 1,
+      # when package.json and package-lock.json were out of sync.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare test schema
+        run: psql "postgres://postgres:postgres@127.0.0.1:5432/manna_test" -f lib/__tests__/helpers/test-schema.sql
+        env:
+          PGPASSWORD: postgres
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Assert no live provider flag is enabled
+        run: |
+          if grep -rEn "(PLAID_TRANSFER_LIVE|CA_EFT_LIVE)\s*[:=]\s*['\"]?true" \
+               --include='*.ts' --include='*.tsx' --include='*.json' \
+               --include='*.yml' --include='*.yaml' . \
+               | grep -v node_modules; then
+            echo "::error::A live provider flag appears to be enabled in committed code."
+            exit 1
+          fi
+          echo "No live provider flags enabled."
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Advisory for now: fails the job only on high/critical advisories so a
+      # newly published low-severity advisory cannot block an unrelated fix.
+      - name: npm audit (high and above)
+        run: npm audit --audit-level=high
