@@ -2,12 +2,60 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { verifyToken } from '@/lib/auth';
 
+/**
+ * Edge auth gate.
+ *
+ * SECURITY BOUNDARY MAP — which mechanism authorizes what, and why.
+ *
+ *   Customer pages (AUTH_PATHS)
+ *     Authorized here, by the `manna-token` JWT. These are the only routes this
+ *     middleware authorizes outright.
+ *
+ *   Admin console (/admin/**)
+ *     Two independent layers. This middleware performs a cheap presence check on
+ *     the `admin_session` cookie so anonymous traffic is turned away at the edge
+ *     without touching the database. The authoritative check is server-side in
+ *     app/admin/layout.tsx, which resolves the session against the database and
+ *     404s if it is missing, inactive, locked, or unresolvable.
+ *     A customer `manna-token` deliberately grants no admin access: admin
+ *     identity is a separate credential with a separate cookie.
+ *
+ *   Admin APIs (/api/admin/**)
+ *     NOT authorized here — API routes are excluded from the matcher below.
+ *     They are authorized in-route by withAdminAuth (session) plus
+ *     requirePermission (role/permission). That is deliberate: permission checks
+ *     need per-route granularity and database access that edge middleware
+ *     cannot provide. Enforcement lives with the handler, not the router.
+ *
+ *   Provider webhooks (/api/webhooks/**)
+ *     Deliberately NOT subject to user authentication. Their authorization
+ *     mechanism is cryptographic signature verification against the provider's
+ *     shared secret / JWKS — Stripe via constructEvent, Plaid via JWT
+ *     verification. Applying ordinary user auth here would break delivery while
+ *     adding no security, since the caller is a provider, not a user.
+ *
+ *   Auth endpoints (/api/auth/**)
+ *     Necessarily unauthenticated; they are how a caller obtains credentials.
+ */
+
 const PUBLIC_PATHS = ['/login', '/register'];
-const AUTH_PATHS = ['/feed', '/send', '/request', '/history', '/profile', '/friends'];
+const AUTH_PATHS = ['/feed', '/send', '/request', '/history', '/profile', '/friends', '/transfers'];
+const ADMIN_PATH = '/admin';
 
 export function proxy(request: NextRequest) {
   const token = request.cookies.get('manna-token')?.value;
   const { pathname } = request.nextUrl;
+
+  // Admin console: gate on the admin credential, never the customer one.
+  // Authoritative verification happens server-side in the admin layout.
+  if (pathname === ADMIN_PATH || pathname.startsWith(`${ADMIN_PATH}/`)) {
+    const adminSession = request.cookies.get('admin_session')?.value;
+    if (!adminSession) {
+      // Match the layout's response: do not disclose that the console exists.
+      return NextResponse.rewrite(new URL('/404', request.url), { status: 404 });
+    }
+    return NextResponse.next();
+  }
 
   const isPublicPath = PUBLIC_PATHS.some(p => pathname.startsWith(p));
   const isAuthPath = AUTH_PATHS.some(p => pathname.startsWith(p));
@@ -27,5 +75,7 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
+  // API routes are intentionally excluded: each API family authorizes itself
+  // (admin session + permission, or provider signature). See the boundary map.
   matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
 };

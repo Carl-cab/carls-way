@@ -1,28 +1,35 @@
 import { NextResponse } from 'next/server';
-import { getAuthUser } from '@/lib/auth';
+import type { NextRequest } from 'next/server';
+import { withAdminAuth, withAuditLog, requirePermission } from '@/lib/rbac';
 import { getSql } from '@/lib/db';
 
 // POST /api/admin/ledger/backfill-opening-balances
 // Creates opening_balance ledger entries for users with seed balances but no ledger entries.
-// Protection: Requires auth + BACKFILL_SECRET env var (temporary, for setup only)
+//
+// Authorization (defence in depth, all required):
+//   1. A valid admin session      (withAdminAuth)
+//   2. The 'exceptions:manage' permission — SuperAdmin / OperationsAdmin only.
+//      This is a privileged ledger mutation, so it is deliberately held to the
+//      same bar as other operational remediation actions.
+//   3. A matching x-backfill-secret header, retained as a second factor.
+// Every invocation is recorded by withAuditLog.
+//
 // Idempotent: Safe to call multiple times (skips users who already have opening_balance entries)
 // Does NOT modify user balances.
 // Supports ?dryRun=true for preview without writing.
-export async function POST(req: Request) {
+async function backfillHandler(req: NextRequest): Promise<NextResponse> {
   try {
-    // Require authentication
-    const user = await getAuthUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    // Authorization beyond authentication: this endpoint writes to the ledger.
+    requirePermission('exceptions:manage');
 
-    // Require BACKFILL_SECRET (temporary protection until admin roles exist)
+    // Retained as an additional factor on top of admin authorization.
     const secret = req.headers.get('x-backfill-secret');
     const expectedSecret = process.env.BACKFILL_SECRET;
 
     if (!expectedSecret) {
       return NextResponse.json({
         error: 'Backfill not enabled (BACKFILL_SECRET env var not set)',
-        info: 'Set BACKFILL_SECRET env var in Vercel to enable this endpoint',
-      }, { status: 500 });
+      }, { status: 503 });
     }
 
     if (!secret || secret !== expectedSecret) {
@@ -139,23 +146,45 @@ export async function POST(req: Request) {
       },
     });
   } catch (err) {
+    if (err instanceof Error && err.message.includes('Permission denied')) {
+      return NextResponse.json({ error: err.message }, { status: 403 });
+    }
     console.error('Backfill error:', err);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
-// GET — returns status and instructions
-export async function GET() {
-  const secretIsSet = !!process.env.BACKFILL_SECRET;
+// GET — reports whether the endpoint is enabled.
+// Previously unauthenticated, which disclosed deployment configuration state to
+// anonymous callers. Now held to the same admin authorization bar as POST.
+async function statusHandler(): Promise<NextResponse> {
+  try {
+    requirePermission('exceptions:manage');
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Permission denied')) {
+      return NextResponse.json({ error: err.message }, { status: 403 });
+    }
+    throw err;
+  }
 
   return NextResponse.json({
-    status: secretIsSet ? 'enabled' : 'disabled',
-    message: secretIsSet
-      ? 'POST to this endpoint with x-backfill-secret header to backfill opening balances'
-      : 'Set BACKFILL_SECRET env var in Vercel to enable',
-    usage: {
-      dry_run: 'curl -X POST "https://carloscab74.vercel.app/api/admin/ledger/backfill-opening-balances?dryRun=true" -H "x-backfill-secret: YOUR_SECRET"',
-      execute: 'curl -X POST https://carloscab74.vercel.app/api/admin/ledger/backfill-opening-balances -H "x-backfill-secret: YOUR_SECRET"',
-    },
+    status: process.env.BACKFILL_SECRET ? 'enabled' : 'disabled',
+    message: 'POST with the x-backfill-secret header to backfill opening balances.',
   });
 }
+
+export const POST = (req: NextRequest) =>
+  withAdminAuth(req, (r) =>
+    withAuditLog(r, backfillHandler, {
+      action: 'backfill_opening_balances',
+      resourceType: 'ledger_entry',
+    }),
+  );
+
+export const GET = (req: NextRequest) =>
+  withAdminAuth(req, (r) =>
+    withAuditLog(r, statusHandler, {
+      action: 'read_backfill_status',
+      resourceType: 'ledger_entry',
+    }),
+  );

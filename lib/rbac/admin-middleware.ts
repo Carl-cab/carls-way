@@ -55,12 +55,19 @@ export function getCurrentPermissions(): Permission[] {
  * @param req NextRequest
  * @returns Admin context or null if invalid
  */
-async function verifyAdminSession(req: NextRequest): Promise<AdminContext | null> {
-  // Look for admin session in cookie or Authorization header
-  const sessionId =
-    req.cookies.get('admin_session')?.value ||
-    req.headers.get('authorization')?.replace('Bearer ', '');
-
+/**
+ * Resolve an admin user from a session id.
+ *
+ * This is the single source of truth for "is this session currently entitled to
+ * act as an admin". Both the API middleware and the server-side page guard call
+ * it, so the two enforcement points cannot drift apart.
+ *
+ * Fails closed: any missing session, inactive account, active lock, or
+ * infrastructure error yields null.
+ */
+export async function resolveAdminBySessionId(
+  sessionId: string | undefined | null,
+): Promise<AdminUser | null> {
   if (!sessionId) {
     return null;
   }
@@ -84,6 +91,31 @@ async function verifyAdminSession(req: NextRequest): Promise<AdminContext | null
     if (adminUser.locked_until && new Date(adminUser.locked_until) > new Date()) {
       return null;
     }
+
+    return adminUser;
+  } catch (err) {
+    console.error('Error resolving admin session:', err);
+    return null;
+  }
+}
+
+async function verifyAdminSession(req: NextRequest): Promise<AdminContext | null> {
+  // Look for admin session in cookie or Authorization header
+  const sessionId =
+    req.cookies.get('admin_session')?.value ||
+    req.headers.get('authorization')?.replace('Bearer ', '');
+
+  if (!sessionId) {
+    return null;
+  }
+
+  try {
+    const adminUser = await resolveAdminBySessionId(sessionId);
+    if (!adminUser) {
+      return null;
+    }
+
+    const adminRepo = getAdminRepository();
 
     // Get permissions for this role
     const permissions = ROLE_PERMISSIONS[adminUser.role] || [];
