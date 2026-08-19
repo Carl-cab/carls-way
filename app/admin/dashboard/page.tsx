@@ -10,10 +10,35 @@ interface Stats {
   totalTransfers: number;
   totalWebhooks: number;
   totalAuditLogs: number;
-  recentTransfers: any[];
-  recentActivity: any[];
-  auditStats: any;
-  webhookStats: any;
+  recentTransfers: RecentTransfer[];
+  recentActivity: RecentActivity[];
+  auditStats: AuditStats | null;
+  webhookStats: unknown;
+}
+
+/** Fields of a transfer rendered by the "Recent Transfers" card. */
+interface RecentTransfer {
+  id: number;
+  status: string;
+  amount: string | number;
+  currency: string;
+  correlation_id?: string;
+  created_at: string;
+}
+
+/** Fields of an audit entry rendered by the "Your Activity" card. */
+interface RecentActivity {
+  action?: string;
+  resource_type?: string;
+  status?: string;
+  created_at: string;
+}
+
+/** Summary shape returned by /api/admin/audit-logs/stats?type=summary. */
+interface AuditStats {
+  total_events?: number;
+  success_rate?: number;
+  by_status?: { success?: number; failed?: number };
 }
 
 export default function Dashboard() {

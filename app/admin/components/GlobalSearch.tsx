@@ -5,10 +5,19 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { adminApi } from '@/lib/admin-client';
 
+/** The subset of fields the result card renders, common to every resource type. */
+interface SearchResultData {
+  status?: string;
+  amount?: string | number;
+  currency?: string;
+  sender_currency?: string;
+  created_at?: string;
+}
+
 interface SearchResult {
   type: string;
   id: string | number;
-  data: any;
+  data: SearchResultData;
   href: string;
 }
 
@@ -22,9 +31,13 @@ export function GlobalSearch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Results for an empty query are derived rather than stored. Calling setState
+  // synchronously in the effect body triggers a cascading render, and clearing
+  // state that is never displayed is unnecessary — see `visibleResults` below.
+  const visibleResults = query.trim() ? results : [];
+
   useEffect(() => {
     if (!query.trim()) {
-      setResults([]);
       return;
     }
 
@@ -61,7 +74,7 @@ export function GlobalSearch() {
           ]);
 
           if (transfers.data?.transfers && transfers.data.transfers.length > 0) {
-            transfers.data.transfers.forEach((t: any) => {
+            transfers.data.transfers.forEach((t) => {
               searchResults.push({
                 type: 'Transfer (by correlation)',
                 id: t.id,
@@ -72,7 +85,7 @@ export function GlobalSearch() {
           }
 
           if (events.data?.events && Array.isArray(events.data.events) && events.data.events.length > 0) {
-            events.data.events.forEach((e: any) => {
+            events.data.events.forEach((e) => {
               searchResults.push({
                 type: 'Provider Event',
                 id: e.id,
@@ -83,7 +96,7 @@ export function GlobalSearch() {
           }
 
           if (webhooks.data?.webhooks && Array.isArray(webhooks.data.webhooks) && webhooks.data.webhooks.length > 0) {
-            webhooks.data.webhooks.forEach((w: any) => {
+            webhooks.data.webhooks.forEach((w) => {
               searchResults.push({
                 type: 'Webhook',
                 id: w.id,
@@ -94,7 +107,7 @@ export function GlobalSearch() {
           }
 
           if (audit.data?.audit_logs && Array.isArray(audit.data.audit_logs) && audit.data.audit_logs.length > 0) {
-            audit.data.audit_logs.forEach((a: any, idx: number) => {
+            audit.data.audit_logs.forEach((a, idx: number) => {
               searchResults.push({
                 type: 'Audit Log',
                 id: `${a.id}-${idx}`,
@@ -159,13 +172,13 @@ export function GlobalSearch() {
         </div>
       )}
 
-      {results.length > 0 && (
+      {visibleResults.length > 0 && (
         <div className="space-y-4">
           <p className="text-sm text-gray-600">
-            Found {results.length} result{results.length !== 1 ? 's' : ''}
+            Found {visibleResults.length} result{visibleResults.length !== 1 ? 's' : ''}
           </p>
 
-          {results.map((result, idx) => (
+          {visibleResults.map((result, idx) => (
             <Link
               key={idx}
               href={result.href}

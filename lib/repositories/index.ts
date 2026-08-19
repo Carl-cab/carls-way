@@ -12,6 +12,11 @@
  *   const balance = await getLedgerRepository().getBalance(123, 'CAD');
  */
 
+import { getUserRepository } from './UserRepository';
+import { getLedgerRepository } from './LedgerRepository';
+import { getTransferIntentRepository } from './TransferIntentRepository';
+import { getProviderEventRepository } from './ProviderEventRepository';
+
 export * from './types';
 export * from './BaseRepository';
 export * from './UserRepository';
@@ -32,20 +37,8 @@ export { getProviderEventRepository } from './ProviderEventRepository';
  * a centralized way to manage all repository instances.
  */
 export const RepositoryRegistry = {
-  user: () => {
-    const { getUserRepository } = require('./UserRepository');
-    return getUserRepository();
-  },
-  ledger: () => {
-    const { getLedgerRepository } = require('./LedgerRepository');
-    return getLedgerRepository();
-  },
-  transferIntent: () => {
-    const { getTransferIntentRepository } = require('./TransferIntentRepository');
-    return getTransferIntentRepository();
-  },
-  providerEvent: () => {
-    const { getProviderEventRepository } = require('./ProviderEventRepository');
-    return getProviderEventRepository();
-  },
+  user: () => getUserRepository(),
+  ledger: () => getLedgerRepository(),
+  transferIntent: () => getTransferIntentRepository(),
+  providerEvent: () => getProviderEventRepository(),
 };

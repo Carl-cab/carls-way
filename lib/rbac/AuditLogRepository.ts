@@ -30,6 +30,21 @@ export interface AuditLogStats {
   admin_users: Record<number, number>;
 }
 
+/**
+ * Raw row shape returned by the admin_audit_logs queries. The SELECTs project
+ * the audit-log columns, so the row mirrors AdminAuditLog; `changes` is stored
+ * as JSONB and comes back already parsed.
+ */
+type AuditLogRow = Omit<AdminAuditLog, 'changes'> & {
+  /** JSONB column; arrives from the driver as JSON text and is parsed on map. */
+  changes: string | null;
+};
+
+/** Narrow postgres.js rows to the audit-log row shape at the query boundary. */
+function toAuditLogRows(rows: readonly unknown[]): AuditLogRow[] {
+  return rows as unknown as AuditLogRow[];
+}
+
 export class AuditLogRepository extends BaseRepository {
   protected tableName = 'admin_audit_logs';
 
@@ -80,7 +95,7 @@ export class AuditLogRepository extends BaseRepository {
         throw new RepositoryError('AUDIT_CREATE_FAILED', 'Failed to create audit log');
       }
 
-      return this.mapToAuditLog(rows[0]);
+      return this.mapToAuditLog(toAuditLogRows(rows)[0]);
     } catch (err) {
       if (err instanceof RepositoryError) throw err;
       throw new RepositoryError('AUDIT_CREATE_FAILED', `Failed to create audit log: ${String(err)}`);
@@ -98,7 +113,7 @@ export class AuditLogRepository extends BaseRepository {
 
     try {
       const rows = await sql`SELECT * FROM admin_audit_logs WHERE id = ${id}`;
-      return rows.length ? this.mapToAuditLog(rows[0]) : null;
+      return rows.length ? this.mapToAuditLog(toAuditLogRows(rows)[0]) : null;
     } catch (err) {
       throw new RepositoryError('AUDIT_FIND_FAILED', `Failed to find audit log: ${String(err)}`);
     }
@@ -149,7 +164,7 @@ export class AuditLogRepository extends BaseRepository {
       query = sql`${query} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 
       const rows = await query;
-      return rows.map((row: any) => this.mapToAuditLog(row));
+      return toAuditLogRows(rows).map((row) => this.mapToAuditLog(row));
     } catch (err) {
       throw new RepositoryError('AUDIT_QUERY_FAILED', `Failed to query audit logs: ${String(err)}`);
     }
@@ -219,7 +234,7 @@ export class AuditLogRepository extends BaseRepository {
         ORDER BY created_at ASC
       `;
 
-      return rows.map((row: any) => this.mapToAuditLog(row));
+      return toAuditLogRows(rows).map((row) => this.mapToAuditLog(row));
     } catch (err) {
       throw new RepositoryError('AUDIT_CORRELATION_FAILED', `Failed to find logs by correlation ID: ${String(err)}`);
     }
@@ -246,7 +261,7 @@ export class AuditLogRepository extends BaseRepository {
         LIMIT ${limit}
       `;
 
-      return rows.map((row: any) => this.mapToAuditLog(row));
+      return toAuditLogRows(rows).map((row) => this.mapToAuditLog(row));
     } catch (err) {
       throw new RepositoryError('AUDIT_ADMIN_FAILED', `Failed to find logs by admin user ID: ${String(err)}`);
     }
@@ -298,7 +313,8 @@ export class AuditLogRepository extends BaseRepository {
 
       const actionRows = await actionQuery;
       const actions: Record<string, number> = {};
-      actionRows.forEach((row: any) => {
+      // COUNT(*) is bigint; postgres.js returns it as a string.
+      (actionRows as unknown as { action: string; count: string }[]).forEach((row) => {
         actions[row.action] = Number(row.count);
       });
 
@@ -315,7 +331,7 @@ export class AuditLogRepository extends BaseRepository {
 
       const adminRows = await adminQuery;
       const admin_users: Record<number, number> = {};
-      adminRows.forEach((row: any) => {
+      (adminRows as unknown as { admin_user_id: number; count: string }[]).forEach((row) => {
         admin_users[row.admin_user_id] = Number(row.count);
       });
 
@@ -403,7 +419,7 @@ export class AuditLogRepository extends BaseRepository {
       query = sql`${query} ORDER BY created_at ASC`;
 
       const rows = await query;
-      return rows.map((row: any) => this.mapToAuditLog(row));
+      return toAuditLogRows(rows).map((row) => this.mapToAuditLog(row));
     } catch (err) {
       throw new RepositoryError('AUDIT_EXPORT_FAILED', `Failed to get audit logs for export: ${String(err)}`);
     }
@@ -412,7 +428,7 @@ export class AuditLogRepository extends BaseRepository {
   /**
    * Helper: map database row to AdminAuditLog.
    */
-  private mapToAuditLog(row: any): AdminAuditLog {
+  private mapToAuditLog(row: AuditLogRow): AdminAuditLog {
     return {
       id: row.id,
       admin_user_id: row.admin_user_id,

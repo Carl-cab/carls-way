@@ -14,7 +14,7 @@ export interface AdminProviderEventDTO {
   provider_event_id: string;
   event_type: string;
   related_provider_reference?: string;
-  raw_payload?: Record<string, any>;
+  raw_payload?: Record<string, unknown>;
   processing_status: string;
   processing_error?: string;
   processed_at?: string;
@@ -39,6 +39,15 @@ export interface ProviderEventSearchFilters {
   endDate?: Date;
   correlationId?: string;
 }
+
+/**
+ * Raw row shape returned by this service's queries. The SELECTs project
+ * exactly the AdminProviderEventDTO columns, so the row and the DTO share a shape.
+ */
+type AdminProviderEventRow = Omit<AdminProviderEventDTO, 'raw_payload'> & {
+  /** Stored as JSON text in provider_webhook_events; parsed when mapping. */
+  raw_payload: string | null;
+};
 
 export class AdminProviderEventService {
   /**
@@ -100,7 +109,7 @@ export class AdminProviderEventService {
     const [rows, countResult] = await Promise.all([query, countQ]);
 
     return {
-      events: rows.slice(0, limit).map((e: any) => this.toDTO(e)),
+      events: (rows as unknown as AdminProviderEventRow[]).slice(0, limit).map((e) => this.toDTO(e)),
       total_count: countResult[0]?.count || 0,
       page,
       page_size: limit,
@@ -119,7 +128,7 @@ export class AdminProviderEventService {
     const sql = getSql();
     const rows = await sql`SELECT * FROM provider_webhook_events WHERE id = ${id}`;
 
-    return rows.length ? this.toDTO(rows[0]) : null;
+    return rows.length ? this.toDTO(rows[0] as unknown as AdminProviderEventRow) : null;
   }
 
   /**
@@ -138,7 +147,7 @@ export class AdminProviderEventService {
       ORDER BY created_at ASC
     `;
 
-    return rows.map((e: any) => this.toDTO(e));
+    return (rows as unknown as AdminProviderEventRow[]).map((e) => this.toDTO(e));
   }
 
   /**
@@ -161,7 +170,7 @@ export class AdminProviderEventService {
       LIMIT ${limit}
     `;
 
-    return rows.map((e: any) => this.toDTO(e));
+    return (rows as unknown as AdminProviderEventRow[]).map((e) => this.toDTO(e));
   }
 
   /**
@@ -197,8 +206,16 @@ export class AdminProviderEventService {
     const byEventType: Record<string, number> = {};
     let total = 0;
 
-    rows.forEach((row: any) => {
-      const count = row.count;
+    // COUNT(*) is bigint; postgres.js returns it as a string.
+    type StatsRow = {
+      provider: string;
+      processing_status: string;
+      event_type: string;
+      count: string;
+    };
+
+    (rows as unknown as StatsRow[]).forEach((row) => {
+      const count = Number(row.count);
       byProvider[row.provider] = (byProvider[row.provider] || 0) + count;
       byStatus[row.processing_status] = (byStatus[row.processing_status] || 0) + count;
       byEventType[row.event_type] = (byEventType[row.event_type] || 0) + count;
@@ -216,7 +233,7 @@ export class AdminProviderEventService {
   /**
    * Convert provider event to DTO.
    */
-  private toDTO(event: any): AdminProviderEventDTO {
+  private toDTO(event: AdminProviderEventRow): AdminProviderEventDTO {
     return {
       id: event.id,
       provider: event.provider,

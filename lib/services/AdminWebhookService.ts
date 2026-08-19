@@ -42,6 +42,12 @@ export interface WebhookSearchFilters {
   correlationId?: string;
 }
 
+/**
+ * Raw row shape returned by this service's queries. The SELECTs project
+ * exactly the AdminWebhookDTO columns, so the row and the DTO share a shape.
+ */
+type AdminWebhookRow = AdminWebhookDTO;
+
 export class AdminWebhookService {
   /**
    * Search webhooks (paginated).
@@ -107,7 +113,7 @@ export class AdminWebhookService {
     const [rows, countResult] = await Promise.all([query, countQ]);
 
     return {
-      webhooks: rows.slice(0, limit).map((w: any) => this.toDTO(w)),
+      webhooks: (rows as unknown as AdminWebhookRow[]).slice(0, limit).map((w) => this.toDTO(w)),
       total_count: countResult[0]?.count || 0,
       page,
       page_size: limit,
@@ -126,7 +132,7 @@ export class AdminWebhookService {
     const sql = getSql();
     const rows = await sql`SELECT * FROM webhooks WHERE id = ${id}`;
 
-    return rows.length ? this.toDTO(rows[0]) : null;
+    return rows.length ? this.toDTO(rows[0] as unknown as AdminWebhookRow) : null;
   }
 
   /**
@@ -145,7 +151,7 @@ export class AdminWebhookService {
       ORDER BY created_at ASC
     `;
 
-    return rows.map((w: any) => this.toDTO(w));
+    return (rows as unknown as AdminWebhookRow[]).map((w) => this.toDTO(w));
   }
 
   /**
@@ -168,7 +174,7 @@ export class AdminWebhookService {
       LIMIT ${limit}
     `;
 
-    return rows.map((w: any) => this.toDTO(w));
+    return (rows as unknown as AdminWebhookRow[]).map((w) => this.toDTO(w));
   }
 
   /**
@@ -210,8 +216,16 @@ export class AdminWebhookService {
     let failed = 0;
     let retries = 0;
 
-    rows.forEach((row: any) => {
-      const count = row.count;
+    // COUNT(*) is bigint; postgres.js returns it as a string.
+    type StatsRow = {
+      provider: string;
+      status: string;
+      event_type: string;
+      count: string;
+    };
+
+    (rows as unknown as StatsRow[]).forEach((row) => {
+      const count = Number(row.count);
       byProvider[row.provider] = (byProvider[row.provider] || 0) + count;
       byStatus[row.status] = (byStatus[row.status] || 0) + count;
       byEventType[row.event_type] = (byEventType[row.event_type] || 0) + count;
@@ -245,7 +259,7 @@ export class AdminWebhookService {
   /**
    * Convert webhook to DTO.
    */
-  private toDTO(webhook: any): AdminWebhookDTO {
+  private toDTO(webhook: AdminWebhookRow): AdminWebhookDTO {
     return {
       id: webhook.id,
       provider: webhook.provider,

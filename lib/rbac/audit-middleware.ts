@@ -19,8 +19,8 @@ export interface AuditLogOptions {
   action: string; // e.g., 'transfer_retry', 'admin_created'
   resourceType: string; // e.g., 'transfer_intent', 'admin_user'
   resourceId?: string | number | (() => Promise<string>);
-  changes?: Record<string, any> | (() => Promise<Record<string, any>>);
-  extractResourceId?: (body: any) => string | undefined;
+  changes?: Record<string, unknown> | (() => Promise<Record<string, unknown>>);
+  extractResourceId?: (body: unknown) => string | undefined;
 }
 
 /**
@@ -55,7 +55,7 @@ export async function withAuditLog(
   try {
     // Extract resource ID from request body if needed
     let resourceId = options.resourceId;
-    let changes = options.changes;
+    const changes = options.changes;
 
     if (options.extractResourceId && req.method !== 'GET') {
       try {
@@ -157,13 +157,13 @@ export async function withAuditLog(
  */
 export function AuditableAction(action: string, resourceType: string) {
   return function (
-    target: any,
+    target: object,
     propertyKey: string,
     descriptor: PropertyDescriptor
   ) {
     const originalMethod = descriptor.value;
 
-    descriptor.value = async function (...args: any[]) {
+    descriptor.value = async function (...args: unknown[]) {
       const context = getAdminContext();
       if (!context) {
         return originalMethod.apply(this, args);
@@ -253,7 +253,7 @@ export async function logAuditEvent(
   action: string,
   resourceType: string,
   resourceId?: string | number,
-  changes?: Record<string, any>,
+  changes?: Record<string, unknown>,
   status: 'success' | 'failed' = 'success',
   errorMessage?: string
 ): Promise<void> {

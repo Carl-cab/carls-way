@@ -8,7 +8,7 @@
 interface FetchOptions {
   method?: 'GET' | 'POST';
   headers?: Record<string, string>;
-  body?: any;
+  body?: unknown;
   cache?: RequestCache;
 }
 
@@ -103,7 +103,7 @@ interface AuditStatsResponse {
   };
 }
 
-const cache = new Map<string, { data: any; timestamp: number }>();
+const cache = new Map<string, { data: unknown; timestamp: number }>();
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
 async function fetchFromApi<T>(
@@ -116,7 +116,7 @@ async function fetchFromApi<T>(
   if (options.method !== 'POST' && cache.has(endpoint)) {
     const cached = cache.get(endpoint);
     if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
-      return { data: cached.data, error: null, status: 200 };
+      return { data: cached.data as T, error: null, status: 200 };
     }
   }
 
@@ -169,7 +169,7 @@ export const adminApi = {
 
   // Transfers
   async searchTransfers(
-    filters: Record<string, any> = {},
+    filters: Record<string, unknown> = {},
     page: number = 1,
     pageSize: number = 50
   ) {
@@ -195,7 +195,7 @@ export const adminApi = {
 
   // Ledger
   async searchLedger(
-    filters: Record<string, any> = {},
+    filters: Record<string, unknown> = {},
     page: number = 1,
     pageSize: number = 50
   ) {
@@ -221,7 +221,7 @@ export const adminApi = {
 
   // Provider Events
   async searchProviderEvents(
-    filters: Record<string, any> = {},
+    filters: Record<string, unknown> = {},
     page: number = 1,
     pageSize: number = 50
   ) {
@@ -247,7 +247,7 @@ export const adminApi = {
 
   // Webhooks
   async searchWebhooks(
-    filters: Record<string, any> = {},
+    filters: Record<string, unknown> = {},
     page: number = 1,
     pageSize: number = 50
   ) {
@@ -273,7 +273,7 @@ export const adminApi = {
 
   // Audit Logs
   async searchAuditLogs(
-    filters: Record<string, any> = {},
+    filters: Record<string, unknown> = {},
     page: number = 1,
     pageSize: number = 50
   ) {
@@ -310,7 +310,7 @@ export const adminApi = {
 
   // Settlements
   async searchSettlements(
-    filters: Record<string, any> = {},
+    filters: Record<string, unknown> = {},
     page: number = 1,
     pageSize: number = 50
   ) {

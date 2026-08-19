@@ -7,7 +7,7 @@
 
 import { getCurrentAdmin, checkPermission } from '@/lib/rbac';
 import { getAdminRepository } from '@/lib/rbac';
-import type { AdminUser } from '@/lib/rbac/types';
+import type { AdminUser, AdminRole } from '@/lib/rbac/types';
 
 export interface AdminUserDTO {
   id: number;
@@ -82,7 +82,7 @@ export class AdminUserService {
       throw new Error('Permission denied: admins:read');
     }
 
-    const admins = await this.repo.findAdminsByRole(role as any);
+    const admins = await this.repo.findAdminsByRole(role as AdminRole);
     return admins.map((a) => this.toDTO(a));
   }
 

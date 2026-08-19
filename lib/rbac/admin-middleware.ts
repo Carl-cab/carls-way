@@ -245,10 +245,10 @@ export function forbidReadOnly(): void {
  * @returns Masked object
  */
 export function maskSensitiveFields(
-  data: Record<string, any>,
+  data: Record<string, unknown>,
   entityType: string,
   role?: AdminRole
-): Record<string, any> {
+): Record<string, unknown> {
   const adminRole = role || getCurrentAdmin()?.role;
   if (!adminRole) {
     return {}; // Not authenticated
@@ -299,10 +299,10 @@ export function maskSensitiveFields(
  * @returns Masked array
  */
 export function maskArray(
-  data: Record<string, any>[],
+  data: Record<string, unknown>[],
   entityType: string,
   role?: AdminRole
-): Record<string, any>[] {
+): Record<string, unknown>[] {
   return data.map((item) => maskSensitiveFields(item, entityType, role));
 }
 
@@ -316,7 +316,7 @@ export interface AuditLogData {
   action: string;
   resource_type: string;
   resource_id?: string;
-  changes?: Record<string, any>;
+  changes?: Record<string, unknown>;
 }
 
 /**
@@ -362,7 +362,7 @@ export class UnauthorizedError extends Error {
 export class ForbiddenError extends Error {
   constructor(
     message: string = 'Forbidden',
-    public details?: Record<string, any>
+    public details?: Record<string, unknown>
   ) {
     super(message);
     this.name = 'ForbiddenError';

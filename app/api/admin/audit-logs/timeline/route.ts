@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { withAdminAuth, withAuditLog } from '@/lib/rbac';
 import { getAdminAuditService } from '@/lib/services';
+import { isPermissionDenied } from '@/lib/errors';
 
 async function handler(request: NextRequest): Promise<NextResponse> {
   if (request.method !== 'GET') {
@@ -35,8 +36,8 @@ async function handler(request: NextRequest): Promise<NextResponse> {
     const timeline = await service.getTimeline(resourceType, parsedResourceId);
 
     return NextResponse.json(timeline);
-  } catch (error: any) {
-    if (error.message?.includes('Permission denied')) {
+  } catch (error: unknown) {
+    if (isPermissionDenied(error)) {
       return NextResponse.json(
         { error: error.message },
         { status: 403 }

@@ -168,7 +168,7 @@ export class AuditExportService {
   /**
    * Sanitize audit log for export (remove sensitive data if needed).
    */
-  private sanitizeForExport(log: AdminAuditLog): Record<string, any> {
+  private sanitizeForExport(log: AdminAuditLog): Record<string, unknown> {
     return {
       id: log.id,
       timestamp: log.created_at.toISOString(),

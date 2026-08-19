@@ -46,6 +46,12 @@ export interface SettlementSearchFilters {
   correlationId?: string;
 }
 
+/**
+ * Raw row shape returned by this service's queries. The SELECTs project
+ * exactly the AdminTransactionDTO columns, so the row and the DTO share a shape.
+ */
+type AdminTransactionRow = AdminTransactionDTO;
+
 export class AdminSettlementService {
   /**
    * Search transactions (paginated).
@@ -118,7 +124,7 @@ export class AdminSettlementService {
     const [rows, countResult] = await Promise.all([query, countQ]);
 
     return {
-      transactions: rows.slice(0, limit).map((t: any) => this.toDTO(t)),
+      transactions: (rows as unknown as AdminTransactionRow[]).slice(0, limit).map((t) => this.toDTO(t)),
       total_count: countResult[0]?.count || 0,
       page,
       page_size: limit,
@@ -137,7 +143,7 @@ export class AdminSettlementService {
     const sql = getSql();
     const rows = await sql`SELECT * FROM transactions WHERE id = ${id}`;
 
-    return rows.length ? this.toDTO(rows[0]) : null;
+    return rows.length ? this.toDTO(rows[0] as unknown as AdminTransactionRow) : null;
   }
 
   /**
@@ -156,7 +162,7 @@ export class AdminSettlementService {
       ORDER BY created_at ASC
     `;
 
-    return rows.map((t: any) => this.toDTO(t));
+    return (rows as unknown as AdminTransactionRow[]).map((t) => this.toDTO(t));
   }
 
   /**
@@ -176,7 +182,7 @@ export class AdminSettlementService {
       LIMIT ${limit}
     `;
 
-    return rows.map((t: any) => this.toDTO(t));
+    return (rows as unknown as AdminTransactionRow[]).map((t) => this.toDTO(t));
   }
 
   /**
@@ -223,8 +229,18 @@ export class AdminSettlementService {
     let total = 0;
     let crossBorderCount = 0;
 
-    rows.forEach((row: any) => {
-      const count = row.count;
+    // COUNT(*) is bigint; postgres.js returns it as a string.
+    type StatsRow = {
+      status: string;
+      payment_rail: string;
+      sender_currency: string;
+      count: string;
+      total_amount: string | null;
+      is_cross_border: boolean | null;
+    };
+
+    (rows as unknown as StatsRow[]).forEach((row) => {
+      const count = Number(row.count);
       const amount = parseFloat(row.total_amount || '0');
 
       byStatus[row.status] = (byStatus[row.status] || 0) + count;
@@ -258,7 +274,7 @@ export class AdminSettlementService {
   /**
    * Convert transaction to DTO.
    */
-  private toDTO(transaction: any): AdminTransactionDTO {
+  private toDTO(transaction: AdminTransactionRow): AdminTransactionDTO {
     return {
       id: transaction.id,
       sender_id: transaction.sender_id,

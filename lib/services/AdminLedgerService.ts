@@ -43,6 +43,12 @@ export interface LedgerSearchFilters {
   correlationId?: string;
 }
 
+/**
+ * Raw row shape returned by this service's queries. The SELECTs project
+ * exactly the AdminLedgerEntryDTO columns, so the row and the DTO share a shape.
+ */
+type AdminLedgerEntryRow = AdminLedgerEntryDTO;
+
 export class AdminLedgerService {
   /**
    * Search ledger entries (paginated).
@@ -108,7 +114,7 @@ export class AdminLedgerService {
     const [rows, countResult] = await Promise.all([query, countQ]);
 
     return {
-      entries: rows.slice(0, limit).map((e: any) => this.toDTO(e)),
+      entries: (rows as unknown as AdminLedgerEntryRow[]).slice(0, limit).map((e) => this.toDTO(e)),
       total_count: countResult[0]?.count || 0,
       page,
       page_size: limit,
@@ -132,7 +138,7 @@ export class AdminLedgerService {
       LIMIT ${limit}
     `;
 
-    return rows.map((e: any) => this.toDTO(e));
+    return (rows as unknown as AdminLedgerEntryRow[]).map((e) => this.toDTO(e));
   }
 
   /**
@@ -151,7 +157,7 @@ export class AdminLedgerService {
       ORDER BY created_at ASC
     `;
 
-    return rows.map((e: any) => this.toDTO(e));
+    return (rows as unknown as AdminLedgerEntryRow[]).map((e) => this.toDTO(e));
   }
 
   /**
@@ -222,11 +228,17 @@ export class AdminLedgerService {
 
     const rows = await query;
 
-    const byCurrency: Record<string, any> = {};
+    const byCurrency: Record<string, { debit: string; credit: string; balance: string }> = {};
     let totalDebit = 0;
     let totalCredit = 0;
 
-    rows.forEach((row: any) => {
+    type BalanceRow = {
+      currency: string;
+      total_debit: string | null;
+      total_credit: string | null;
+    };
+
+    (rows as unknown as BalanceRow[]).forEach((row) => {
       const debit = parseFloat(row.total_debit || '0');
       const credit = parseFloat(row.total_credit || '0');
 
@@ -251,7 +263,7 @@ export class AdminLedgerService {
   /**
    * Convert ledger entry to DTO.
    */
-  private toDTO(entry: any): AdminLedgerEntryDTO {
+  private toDTO(entry: AdminLedgerEntryRow): AdminLedgerEntryDTO {
     return {
       id: entry.id,
       user_id: entry.user_id,

@@ -15,13 +15,20 @@ interface AuditLog {
   request_duration_ms?: number;
 }
 
+/** Summary shape returned by /api/admin/audit-logs/stats?type=summary. */
+interface AuditSummaryStats {
+  total_events?: number;
+  success_rate?: number;
+  by_status?: { success?: number; failed?: number };
+}
+
 export default function AuditPage() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<AuditSummaryStats | null>(null);
 
   const [filters, setFilters] = useState({
     action: '',

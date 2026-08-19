@@ -46,6 +46,12 @@ export interface TransferSearchFilters {
   correlationId?: string;
 }
 
+/**
+ * Raw row shape returned by this service's queries. The SELECTs project
+ * exactly the AdminTransferDTO columns, so the row and the DTO share a shape.
+ */
+type AdminTransferRow = AdminTransferDTO;
+
 export class AdminTransferService {
   /**
    * Search transfers with filters (paginated).
@@ -109,12 +115,12 @@ export class AdminTransferService {
     if (filters.correlationId) countQ = sql`${countQ} AND correlation_id = ${filters.correlationId}`;
 
     const [rows, countResult] = await Promise.all([
-      query.then((r: any) => r.slice(0, limit + 1)),
+      query.then((r: unknown[]) => r.slice(0, limit + 1)),
       countQ,
     ]);
 
     return {
-      transfers: rows.slice(0, limit).map((t: any) => this.toDTO(t)),
+      transfers: (rows as unknown as AdminTransferRow[]).slice(0, limit).map((t) => this.toDTO(t)),
       total_count: countResult[0]?.count || 0,
       page,
       page_size: limit,
@@ -133,7 +139,7 @@ export class AdminTransferService {
     const sql = getSql();
     const rows = await sql`SELECT * FROM transfer_intents WHERE id = ${id}`;
 
-    return rows.length ? this.toDTO(rows[0]) : null;
+    return rows.length ? this.toDTO(rows[0] as unknown as AdminTransferRow) : null;
   }
 
   /**
@@ -152,7 +158,7 @@ export class AdminTransferService {
       ORDER BY created_at ASC
     `;
 
-    return rows.map((t: any) => this.toDTO(t));
+    return (rows as unknown as AdminTransferRow[]).map((t) => this.toDTO(t));
   }
 
   /**
@@ -172,7 +178,7 @@ export class AdminTransferService {
       LIMIT ${limit}
     `;
 
-    return rows.map((t: any) => this.toDTO(t));
+    return (rows as unknown as AdminTransferRow[]).map((t) => this.toDTO(t));
   }
 
   /**
@@ -209,9 +215,13 @@ export class AdminTransferService {
     const byStatus: Record<string, number> = {};
     const byProvider: Record<string, number> = {};
 
-    rows.forEach((row: any) => {
-      byStatus[row.status] = (byStatus[row.status] || 0) + row.count;
-      byProvider[row.provider_name] = (byProvider[row.provider_name] || 0) + row.count;
+    // COUNT(*) is bigint; postgres.js returns it as a string.
+    type StatsRow = { status: string; provider_name: string; count: string };
+
+    (rows as unknown as StatsRow[]).forEach((row) => {
+      const count = Number(row.count);
+      byStatus[row.status] = (byStatus[row.status] || 0) + count;
+      byProvider[row.provider_name] = (byProvider[row.provider_name] || 0) + count;
     });
 
     const totalCount = Object.values(byStatus).reduce((a, b) => a + b, 0);
@@ -226,7 +236,7 @@ export class AdminTransferService {
   /**
    * Convert transfer to DTO (no bank account details).
    */
-  private toDTO(transfer: any): AdminTransferDTO {
+  private toDTO(transfer: AdminTransferRow): AdminTransferDTO {
     return {
       id: transfer.id,
       user_id: transfer.user_id,

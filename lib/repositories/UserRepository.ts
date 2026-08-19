@@ -219,7 +219,7 @@ export class UserRepository extends BaseRepository {
     return this.executeQuery(async () => {
       const allowedFields = ['name', 'phone', 'avatar_color', 'province'];
       const fields: string[] = [];
-      const values: any[] = [];
+      const values: unknown[] = [];
 
       for (const key of allowedFields) {
         if (key in updates && updates[key as keyof User] !== undefined) {
@@ -239,7 +239,7 @@ export class UserRepository extends BaseRepository {
       const placeholders = fields.map((_, i) => `${fields[i]} = $${i + 1}`).join(', ');
       const query = `UPDATE users SET ${placeholders} WHERE id = $${fields.length + 1} RETURNING *`;
 
-      const result = await this.sql.unsafe<User[]>(query, values as any);
+      const result = await this.sql.unsafe<User[]>(query, values as never[]);
       this.assertFound(result[0], `user ${id}`);
       return result[0];
     }, 'UserRepository.updateProfile');
@@ -296,7 +296,7 @@ export class UserRepository extends BaseRepository {
   ): Promise<User> {
     return this.executeQuery(async () => {
       let query = 'UPDATE users SET ';
-      const updates: any[] = [];
+      const updates: unknown[] = [];
 
       if (failedAttempts !== undefined) {
         query += `failed_login_attempts = $${updates.length + 1}, `;
@@ -319,7 +319,7 @@ export class UserRepository extends BaseRepository {
       query += ` WHERE id = $${updates.length + 1} RETURNING *`;
       updates.push(id);
 
-      const result = await this.sql.unsafe<User[]>(query, updates as any);
+      const result = await this.sql.unsafe<User[]>(query, updates as never[]);
       this.assertFound(result[0], `user ${id}`);
       return result[0];
     }, 'UserRepository.updateAuthState');
@@ -360,7 +360,7 @@ export class UserRepository extends BaseRepository {
   ): Promise<User> {
     return this.executeQuery(async () => {
       let query = 'UPDATE users SET ';
-      const updates: any[] = [];
+      const updates: unknown[] = [];
 
       if (balanceCad !== undefined) {
         query += `balance_cad = $${updates.length + 1}, `;
@@ -382,7 +382,7 @@ export class UserRepository extends BaseRepository {
       query += ` WHERE id = $${updates.length + 1} RETURNING *`;
       updates.push(id);
 
-      const result = await this.sql.unsafe<User[]>(query, updates as any);
+      const result = await this.sql.unsafe<User[]>(query, updates as never[]);
       this.assertFound(result[0], `user ${id}`);
       return result[0];
     }, 'UserRepository.updateBalances');

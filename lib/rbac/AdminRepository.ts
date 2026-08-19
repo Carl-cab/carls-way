@@ -134,7 +134,7 @@ export class AdminRepository extends BaseRepository {
   async updateAdmin(id: number, updates: UpdateAdminUserInput): Promise<AdminUser> {
     return this.executeQuery(async () => {
       const fields: string[] = [];
-      const values: any[] = [];
+      const values: unknown[] = [];
 
       if (updates.name !== undefined) {
         fields.push('name');
@@ -165,7 +165,7 @@ export class AdminRepository extends BaseRepository {
       const placeholders = fields.map((_, i) => `${fields[i]} = $${i + 1}`).join(', ');
       const query = `UPDATE admin_users SET ${placeholders} WHERE id = $${fields.length + 1} RETURNING *`;
 
-      const result = await this.sql.unsafe<AdminUser[]>(query, values as any);
+      const result = await this.sql.unsafe<AdminUser[]>(query, values as never[]);
       this.assertFound(result[0], `admin user ${id}`);
       return result[0];
     }, 'AdminRepository.updateAdmin');
@@ -186,7 +186,7 @@ export class AdminRepository extends BaseRepository {
   ): Promise<AdminUser> {
     return this.executeQuery(async () => {
       let query = 'UPDATE admin_users SET ';
-      const updates: any[] = [];
+      const updates: unknown[] = [];
 
       if (failedAttempts !== undefined) {
         query += `failed_login_attempts = $${updates.length + 1}, `;
@@ -208,7 +208,7 @@ export class AdminRepository extends BaseRepository {
       query += ` WHERE id = $${updates.length + 1} RETURNING *`;
       updates.push(id);
 
-      const result = await this.sql.unsafe<AdminUser[]>(query, updates as any);
+      const result = await this.sql.unsafe<AdminUser[]>(query, updates as never[]);
       this.assertFound(result[0], `admin user ${id}`);
       return result[0];
     }, 'AdminRepository.updateAuthState');
