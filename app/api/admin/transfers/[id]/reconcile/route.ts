@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { withAdminAuth, withAuditLog, requirePermission } from '@/lib/rbac';
 import { getSql } from '@/lib/db';
 import { PlaidTransferProvider } from '@/lib/providers/PlaidTransferProvider';
+import { CanadianEFTProvider } from '@/lib/providers/CanadianEFTProvider';
 import { errorMessage } from '@/lib/errors';
 
 /**
@@ -20,7 +21,10 @@ import { errorMessage } from '@/lib/errors';
  * deliberately no unauthenticated path to this operation.
  *
  * Only live-mode intents are reconcilable: sandbox transfers settle
- * synchronously at confirm and never enter `submitting`.
+ * synchronously at confirm and never enter `submitting`. Both live providers are
+ * supported; each reconciles using its own provider's semantics (Plaid replays
+ * against the persisted authorization, Stripe searches by metadata for
+ * add_money and replays with the idempotency key for cash_out).
  */
 async function handler(req: NextRequest): Promise<NextResponse> {
   try {
@@ -41,14 +45,31 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: 'Transfer intent not found' }, { status: 404 });
     }
 
-    if (rows[0].execution_mode !== 'live' || rows[0].provider_name !== 'plaid_transfer') {
+    const providerName = rows[0].provider_name as string;
+
+    if (rows[0].execution_mode !== 'live') {
       return NextResponse.json(
-        { error: 'Only live Plaid transfers require reconciliation' },
+        { error: 'Only live transfers require reconciliation' },
         { status: 400 },
       );
     }
 
-    const provider = new PlaidTransferProvider();
+    // Provider selection is server-side and driven by the persisted row, never
+    // by anything the caller supplies.
+    const provider =
+      providerName === 'plaid_transfer'
+        ? new PlaidTransferProvider()
+        : providerName === 'canadian_eft'
+          ? new CanadianEFTProvider()
+          : null;
+
+    if (!provider) {
+      return NextResponse.json(
+        { error: `Provider ${providerName} does not support reconciliation` },
+        { status: 400 },
+      );
+    }
+
     const result = await provider.reconcileTransfer(intentId, rows[0].user_id as number);
 
     return NextResponse.json({ success: true, ...result });

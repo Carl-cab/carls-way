@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS users (
   balance_usd REAL NOT NULL DEFAULT 0,
   country TEXT NOT NULL DEFAULT 'CA',
   kyc_status TEXT NOT NULL DEFAULT 'pending',
+  stripe_customer_id TEXT,
   failed_login_attempts INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS bank_accounts (
   plaid_item_id TEXT,
   plaid_access_token_enc TEXT,
   plaid_account_id TEXT,
+  stripe_payment_method_id TEXT,
   institution_name TEXT NOT NULL,
   account_name TEXT NOT NULL,
   account_type TEXT NOT NULL DEFAULT 'depository',

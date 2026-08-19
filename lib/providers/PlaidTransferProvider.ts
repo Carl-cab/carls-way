@@ -210,7 +210,11 @@ export class PlaidTransferProvider implements TransferProvider {
    * execution time.
    */
   private stableIdempotencyKey(intentId: number, persisted: string | null): string {
-    return persisted ?? `manna_intent_${intentId}`;
+    const key = persisted ?? `manna_intent_${intentId}`;
+    // Plaid caps the authorization idempotency key at 50 characters. Truncating
+    // deterministically keeps the value stable across retries; the intent id is
+    // at the end of the derived form, so keep the tail rather than the head.
+    return key.length <= 50 ? key : key.slice(key.length - 50);
   }
 
   /**
@@ -318,6 +322,12 @@ export class PlaidTransferProvider implements TransferProvider {
 
     if (!authorizationId) {
       const plaidType = toPlaidTransferType(claim.type);
+      // idempotency_key IS supported on this call (and is not deprecated, unlike
+      // the one on transferCreate). Retrying with the same key returns the
+      // authorization Plaid already created rather than creating a second one,
+      // which is what makes a crash between "Plaid approved" and "we persisted
+      // the id" recoverable — there is no transferAuthorizationGet to look one
+      // up with, so the idempotent retry IS the recovery mechanism.
       const authResp = await plaidClient.transferAuthorizationCreate({
         access_token: accessToken,
         account_id: plaidAccountId,
@@ -326,6 +336,7 @@ export class PlaidTransferProvider implements TransferProvider {
         amount: amountStr,
         ach_class: ACHClass.Ppd,
         user: { legal_name: 'Manna User' },
+        idempotency_key: claim.idempotencyKey,
       });
 
       const authorization = authResp.data.authorization;
