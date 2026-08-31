@@ -157,3 +157,77 @@ ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
 SELECT setval(pg_get_serial_sequence('bank_accounts','id'), GREATEST((SELECT MAX(id) FROM bank_accounts), 1));
+
+
+-- ── Phase 4: splits, contacts, Interac fields ───────────────────────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '#CC0000';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS interac_email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_deposit_enabled BOOLEAN NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS friends (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  friend_id INTEGER NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(user_id, friend_id)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id SERIAL PRIMARY KEY,
+  sender_id INTEGER NOT NULL REFERENCES users(id),
+  receiver_id INTEGER NOT NULL REFERENCES users(id),
+  amount REAL NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'CAD',
+  note TEXT,
+  type TEXT NOT NULL DEFAULT 'payment',
+  status TEXT NOT NULL DEFAULT 'completed',
+  privacy TEXT NOT NULL DEFAULT 'public',
+  sender_currency TEXT,
+  receiver_currency TEXT,
+  sender_amount REAL,
+  receiver_amount REAL,
+  is_cross_border BOOLEAN DEFAULT false,
+  payment_rail TEXT,
+  external_ref TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS splits (
+  id SERIAL PRIMARY KEY,
+  creator_id INTEGER NOT NULL REFERENCES users(id),
+  total_amount NUMERIC(12,2) NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'CAD',
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS split_participants (
+  id SERIAL PRIMARY KEY,
+  split_id INTEGER NOT NULL REFERENCES splits(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  amount_owed NUMERIC(12,2) NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  transaction_id INTEGER REFERENCES transactions(id),
+  paid_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(split_id, user_id)
+);
+
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS split_id INTEGER REFERENCES splits(id);
+
+-- Split test actors: one creator, three participants.
+INSERT INTO users (id, name, username, email, password_hash, country, kyc_status, balance_cad)
+VALUES
+  (9101, 'Split Creator', 'splitcreator', 'creator@example.test', 'x', 'CA', 'verified', 0),
+  (9102, 'Split Payer A', 'splitpayera', 'payera@example.test', 'x', 'CA', 'verified', 500),
+  (9103, 'Split Payer B', 'splitpayerb', 'payerb@example.test', 'x', 'CA', 'verified', 500),
+  (9104, 'Broke Payer',  'brokepayer',  'broke@example.test',  'x', 'CA', 'verified', 0)
+ON CONFLICT (id) DO NOTHING;
+
+SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));

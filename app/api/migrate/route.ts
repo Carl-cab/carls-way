@@ -118,6 +118,50 @@ export async function GET() {
     await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS consent_confirmed_at TIMESTAMPTZ`;
     await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS idempotency_key TEXT`;
 
+    // ── Phase 4: bill splitting ─────────────────────────────────────────────
+    // A split is a request fanned out to several people. It records who owes
+    // what and tracks each portion independently, so a partially-paid split is
+    // a first-class state rather than something inferred.
+    await sql`
+      CREATE TABLE IF NOT EXISTS splits (
+        id SERIAL PRIMARY KEY,
+        creator_id INTEGER NOT NULL REFERENCES users(id),
+        total_amount NUMERIC(12,2) NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'CAD',
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS split_participants (
+        id SERIAL PRIMARY KEY,
+        split_id INTEGER NOT NULL REFERENCES splits(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        amount_owed NUMERIC(12,2) NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        transaction_id INTEGER REFERENCES transactions(id),
+        paid_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        -- One row per person per split: makes double-paying structurally impossible.
+        UNIQUE(split_id, user_id)
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS idx_split_participants_user ON split_participants(user_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_splits_creator ON splits(creator_id)`;
+
+    // ── Phase 4: Interac e-Transfer fields ──────────────────────────────────
+    // Registration/auto-deposit settings. The Interac provider itself is
+    // flag-gated and inert; these columns only carry user preferences.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS interac_email TEXT`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_deposit_enabled BOOLEAN NOT NULL DEFAULT false`;
+    // External provider reference for a P2P transaction (e.g. an Interac ref).
+    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS external_ref TEXT`;
+    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS split_id INTEGER REFERENCES splits(id)`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_external_ref
+              ON transactions(external_ref) WHERE external_ref IS NOT NULL`;
+
     // Phase 3: transfer execution safety.
     // provider_authorization_id is persisted before the provider call and is the
     // Plaid idempotency identifier for transferCreate, so a transfer that the

@@ -5,6 +5,7 @@ import {
   signToken, COOKIE_NAME, validateEmail, sanitizeString,
   checkAccountLocked, recordFailedLogin, resetFailedLogins, auditLog
 } from '@/lib/auth';
+import { checkRateLimit, rateLimitHeaders, clientIdentifier } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,6 +18,16 @@ export async function POST(req: NextRequest) {
     }
     if (!validateEmail(email)) {
       return NextResponse.json({ error: 'Invalid email format' }, { status: 400 });
+    }
+
+    // Brute-force protection. Keyed on client IP plus the submitted email, so one abusive client
+    // cannot lock out everybody else.
+    const rate = await checkRateLimit('auth:login', `${clientIdentifier(req)}:${email}`);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Too many attempts. Please try again later.' },
+        { status: 429, headers: rateLimitHeaders(rate) },
+      );
     }
 
     const sql = getSql();

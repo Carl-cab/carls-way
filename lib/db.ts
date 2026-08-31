@@ -198,6 +198,31 @@ export async function initializeSchema() {
       UNIQUE(provider, provider_event_id)
     )
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS splits (
+      id SERIAL PRIMARY KEY,
+      creator_id INTEGER NOT NULL REFERENCES users(id),
+      total_amount NUMERIC(12,2) NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'CAD',
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS split_participants (
+      id SERIAL PRIMARY KEY,
+      split_id INTEGER NOT NULL REFERENCES splits(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount_owed NUMERIC(12,2) NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      transaction_id INTEGER REFERENCES transactions(id),
+      paid_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(split_id, user_id)
+    )
+  `;
 }
 
 export default getSql;
