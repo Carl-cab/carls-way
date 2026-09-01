@@ -63,11 +63,13 @@ export function proxy(request: NextRequest) {
 
   const user = token ? verifyToken(token) : null;
 
-  if (user && isPublicPath) {
+  // The root path is the public welcome screen: signed-in visitors go straight
+  // to the feed, signed-out visitors are allowed through to see it.
+  if (user && (isPublicPath || isRootPath)) {
     return NextResponse.redirect(new URL('/feed', request.url));
   }
 
-  if (!user && (isAuthPath || isRootPath)) {
+  if (!user && isAuthPath) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
