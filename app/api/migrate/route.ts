@@ -1,30 +1,62 @@
-import { NextResponse } from 'next/server';
-import { getSql, initializeSchema } from '@/lib/db';
+import { NextRequest, NextResponse } from 'next/server';
+import { getSql, initializeSchema, isUninitializedDatabase } from '@/lib/db';
 import { getAuthUser, auditLog } from '@/lib/auth';
+import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 
 /**
  * Apply pending schema changes.
  *
- * This endpoint executes DDL, so it requires an authenticated caller. It was
- * previously reachable anonymously, which contradicted its own documented
- * contract ("call GET /api/migrate once with a valid auth cookie") and left an
- * unauthenticated schema-mutation endpoint exposed on the public internet.
+ * This endpoint executes DDL, so it normally requires an authenticated caller.
+ * It was once reachable anonymously, which left an unauthenticated
+ * schema-mutation endpoint exposed on the public internet; that is closed.
  *
- * Every statement it runs is idempotent (CREATE TABLE / ADD COLUMN
- * IF NOT EXISTS) and none are destructive, so the change here is to close
- * anonymous access rather than to alter what the migration does.
+ * The one exception is first-run bootstrap. A brand-new deployment cannot
+ * authenticate anyone, because registration needs the `users` table that only
+ * this migration creates — schema, account, and cookie form a cycle with no
+ * entry point. So when the database holds no account at all, this runs
+ * unauthenticated, and it stops doing so permanently once the first account
+ * exists.
  *
- * Follow-up recorded for a later phase: hold this to an admin permission rather
- * than to any authenticated customer. That depends on the admin login and
- * bootstrap lifecycle, which is deliberately out of scope for Phase 2.
+ * What that window can be used for is bounded: every statement here is
+ * idempotent (CREATE TABLE / ADD COLUMN / CREATE INDEX ... IF NOT EXISTS) and
+ * none are destructive, so the most an anonymous caller can do on a database
+ * with no accounts on it is create the empty schema that deployment was about
+ * to create anyway. No data is read back to the caller and no privilege is
+ * granted. The path is rate limited and audited separately from the
+ * authenticated one.
+ *
+ * Follow-up recorded for a later phase: hold the authenticated path to an admin
+ * permission rather than to any authenticated customer. That depends on the
+ * admin login lifecycle, which remains out of scope here.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     const user = await getAuthUser();
+    let bootstrap = false;
+
     if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      bootstrap = await isUninitializedDatabase();
+      if (!bootstrap) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+
+      // Throttle the anonymous path so the bootstrap window cannot be used to
+      // hammer DDL at the database.
+      const limit = await checkRateLimit('schema:bootstrap', clientIdentifier(req), {
+        limit: 3,
+        windowSeconds: 3600,
+      });
+      if (!limit.allowed) {
+        return NextResponse.json(
+          { error: 'Too many attempts. Please try again later.' },
+          { status: 429, headers: rateLimitHeaders(limit) },
+        );
+      }
     }
-    await auditLog(user.userId, 'schema_migration_run', {});
+
+    // On the bootstrap path audit_logs does not exist yet, so the bootstrap
+    // run is recorded after the schema has been created instead.
+    if (user) await auditLog(user.userId, 'schema_migration_run', {});
 
     // Run full schema initialization (creates missing tables)
     await initializeSchema();
@@ -197,6 +229,49 @@ export async function GET() {
         'rows for at least one (user_id, window_type, window_start, currency). Dedupe ' +
         'them and re-run this migration; recordVelocity() will fail until it exists.';
       console.error('velocity_checks unique index creation failed:', indexErr);
+    }
+
+    // ── audit_logs and fx_rates ─────────────────────────────────────────────
+    // Both were read and written by application code but created by neither
+    // initializeSchema() nor this route. auditLog() swallows its own errors,
+    // so the customer audit trail silently recorded nothing; getFxRate() does
+    // not guard its cache read, so every cross-border quote failed outright.
+    await sql`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        action TEXT NOT NULL,
+        metadata JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action_time ON audit_logs(action, created_at)`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS fx_rates (
+        id SERIAL PRIMARY KEY,
+        from_currency TEXT NOT NULL,
+        to_currency TEXT NOT NULL,
+        rate NUMERIC(18,8) NOT NULL,
+        provider TEXT NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    // getFxRate() upserts with ON CONFLICT (from_currency, to_currency), so the
+    // pair must be unique. Reported rather than fatal if existing rows already
+    // duplicate a pair, since that needs a human to pick the surviving row.
+    let fxIndexNote: string | undefined;
+    try {
+      await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS fx_rates_pair_key
+          ON fx_rates (from_currency, to_currency)
+      `;
+    } catch (indexErr) {
+      fxIndexNote =
+        'fx_rates_pair_key could not be created — the table holds duplicate rows for ' +
+        'at least one (from_currency, to_currency). Dedupe them and re-run this ' +
+        'migration; FX rate caching will fail until it exists.';
+      console.error('fx_rates unique index creation failed:', indexErr);
     }
 
     // ── Phase 4: Interac e-Transfer fields ──────────────────────────────────
@@ -388,10 +463,19 @@ export async function GET() {
     await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON admin_audit_logs(action)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON admin_audit_logs(resource_type)`;
 
+    if (bootstrap) {
+      await auditLog(null, 'schema_migration_bootstrap', { client: clientIdentifier(req) });
+    }
+
+    const warnings = [velocityIndexNote, fxIndexNote].filter(
+      (w): w is string => typeof w === 'string',
+    );
+
     return NextResponse.json({
       success: true,
       message: 'Schema migration completed successfully',
-      ...(velocityIndexNote ? { warnings: [velocityIndexNote] } : {}),
+      ...(bootstrap ? { bootstrap: true } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     });
   } catch (err) {
     console.error('Migration error:', err);

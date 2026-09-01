@@ -41,6 +41,7 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await sql`DELETE FROM velocity_checks WHERE user_id = ${USER_ID}`;
+  await sql`DELETE FROM audit_logs WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM users WHERE id = ${USER_ID}`;
 });
 

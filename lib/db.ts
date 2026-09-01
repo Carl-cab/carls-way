@@ -250,6 +250,60 @@ export async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
       ON velocity_checks (user_id, window_type, currency, window_start)
   `;
+  // Customer-facing audit trail written by auditLog() in lib/auth.ts. That
+  // helper swallows its own errors, so while this table was missing every
+  // audit write across the app silently did nothing.
+  await sql`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id),
+      action TEXT NOT NULL,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action_time ON audit_logs(action, created_at)`;
+  // FX rate cache read and written by getFxRate() in lib/fx.ts. That read is
+  // not guarded, so a missing table failed every cross-border quote outright.
+  await sql`
+    CREATE TABLE IF NOT EXISTS fx_rates (
+      id SERIAL PRIMARY KEY,
+      from_currency TEXT NOT NULL,
+      to_currency TEXT NOT NULL,
+      rate NUMERIC(18,8) NOT NULL,
+      provider TEXT NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (from_currency, to_currency)
+    )
+  `;
+}
+
+/**
+ * True when this database has no account on it yet.
+ *
+ * This is the bootstrap condition for /api/migrate. A brand-new deployment
+ * cannot authenticate anyone — registration needs the `users` table, which
+ * only the migration creates — so the migration has to be reachable exactly
+ * once, before the first account exists, and never again.
+ *
+ * Deliberately conservative: anything unexpected (an unreadable table, a
+ * failed query) reports false, which keeps the endpoint closed. The window
+ * shuts permanently the moment one account is registered.
+ */
+export async function isUninitializedDatabase(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<boolean> {
+  try {
+    const present = await sql`SELECT to_regclass('public.users') IS NOT NULL AS exists`;
+    if (!present[0]?.exists) return true;
+
+    const rows = await sql`SELECT EXISTS (SELECT 1 FROM users) AS any_user`;
+    return rows[0]?.any_user === false;
+  } catch (err) {
+    console.error('Bootstrap check failed; treating database as initialized.', err);
+    return false;
+  }
 }
 
 export default getSql;
