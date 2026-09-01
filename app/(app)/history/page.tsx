@@ -96,8 +96,8 @@ export default function HistoryPage() {
             onClick={() => setFilter(f)}
             className={`px-4 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition ${
               filter === f
-                ? 'bg-red-700 text-white'
-                : 'bg-white text-gray-600 border border-gray-300 hover:border-red-400'
+                ? 'bg-blue-700 text-white'
+                : 'bg-white text-gray-600 border border-gray-300 hover:border-blue-400'
             }`}
           >
             {f.charAt(0).toUpperCase() + f.slice(1)}
@@ -130,7 +130,7 @@ export default function HistoryPage() {
           } else if (tx.type === 'payment' && tx.status === 'completed') {
             if (isSender) {
               label = `You paid ${tx.receiver_name}`;
-              amountColor = 'text-red-600';
+              amountColor = 'text-blue-600';
               amountPrefix = '-';
             } else {
               label = `${tx.sender_name} paid you`;

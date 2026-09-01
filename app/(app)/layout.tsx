@@ -76,7 +76,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Top Header */}
-      <header className="bg-red-700 text-white sticky top-0 z-40 shadow-lg">
+      <header className="bg-blue-700 text-white sticky top-0 z-40 shadow-lg">
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between">
           <Link href="/feed" className="flex items-center gap-2">
             <span className="text-2xl">🍁</span>
@@ -101,7 +101,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
       {/* Balance bar (mobile) */}
       {user && (
-        <div className="bg-red-800 text-white text-center py-2 text-sm sm:hidden">
+        <div className="bg-blue-800 text-white text-center py-2 text-sm sm:hidden">
           {countryFlag} Balance: <strong>{formatBalance(getDisplayBalance(user), user.country || 'CA')}</strong>
         </div>
       )}
@@ -120,7 +120,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </Link>
         <Link
           href="/send"
-          className="bg-red-700 text-white font-bold text-sm px-4 py-2.5 rounded-full shadow-lg hover:bg-red-800 transition text-center"
+          className="bg-blue-700 text-white font-bold text-sm px-4 py-2.5 rounded-full shadow-lg hover:bg-blue-800 transition text-center"
         >
           Pay {countryFlag}
         </Link>
@@ -134,13 +134,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               key={item.href}
               href={item.href}
               className={`flex-1 flex flex-col items-center py-2 text-xs transition ${
-                pathname === item.href ? 'text-red-700 font-semibold' : 'text-gray-500 hover:text-red-700'
+                pathname === item.href ? 'text-blue-700 font-semibold' : 'text-gray-500 hover:text-blue-700'
               }`}
             >
               <span className="relative inline-block text-xl">
                 {item.icon}
                 {item.badge > 0 && (
-                  <span className="absolute -top-1 -right-1.5 bg-red-600 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5 leading-none">
+                  <span className="absolute -top-1 -right-1.5 bg-blue-600 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5 leading-none">
                     {item.badge > 99 ? '99+' : item.badge}
                   </span>
                 )}

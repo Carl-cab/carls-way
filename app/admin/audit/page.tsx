@@ -145,7 +145,7 @@ export default function AuditPage() {
             </div>
             <div>
               <p className="text-sm text-gray-600">Failed</p>
-              <p className="text-2xl font-bold text-red-600">
+              <p className="text-2xl font-bold text-blue-600">
                 {stats.by_status?.failed || 0}
               </p>
             </div>

@@ -58,11 +58,11 @@ export default function RegisterPage() {
   const emailPlaceholder = form.country === 'US' ? 'you@example.com' : 'you@example.ca';
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-red-700 to-red-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-blue-700 to-blue-900 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
         <div className="text-center mb-6">
           <div className="text-5xl mb-3">🍁</div>
-          <h1 className="text-3xl font-bold text-red-700">manna</h1>
+          <h1 className="text-3xl font-bold text-blue-700">manna</h1>
           <p className="text-gray-500 mt-1 text-sm">Pay across North America.</p>
         </div>
 
@@ -78,8 +78,8 @@ export default function RegisterPage() {
                   onClick={() => update('country', c.code)}
                   className={`flex-1 py-2.5 rounded-lg text-sm font-medium border transition ${
                     form.country === c.code
-                      ? 'bg-red-700 text-white border-red-700'
-                      : 'border-gray-300 text-gray-600 hover:border-red-400'
+                      ? 'bg-blue-700 text-white border-blue-700'
+                      : 'border-gray-300 text-gray-600 hover:border-blue-400'
                   }`}
                 >
                   {c.label}
@@ -95,7 +95,7 @@ export default function RegisterPage() {
               value={form.name}
               onChange={e => update('name', e.target.value)}
               required
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="Jane Smith"
             />
           </div>
@@ -106,7 +106,7 @@ export default function RegisterPage() {
               value={form.email}
               onChange={e => update('email', e.target.value)}
               required
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder={emailPlaceholder}
             />
           </div>
@@ -117,7 +117,7 @@ export default function RegisterPage() {
                 type="tel"
                 value={form.phone}
                 onChange={e => update('phone', e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder={phonePlaceholder}
               />
             </div>
@@ -126,7 +126,7 @@ export default function RegisterPage() {
               <select
                 value={form.province}
                 onChange={e => update('province', e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+                className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               >
                 <option value="">Select…</option>
                 {regions.map(r => <option key={r} value={r}>{r}</option>)}
@@ -141,7 +141,7 @@ export default function RegisterPage() {
               onChange={e => update('password', e.target.value)}
               required
               minLength={8}
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="Min. 8 characters, 1 uppercase letter, 1 number"
             />
           </div>
@@ -153,7 +153,7 @@ export default function RegisterPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-red-700 hover:bg-red-800 text-white font-semibold py-2.5 rounded-lg transition disabled:opacity-60"
+            className="w-full bg-blue-700 hover:bg-blue-800 text-white font-semibold py-2.5 rounded-lg transition disabled:opacity-60"
           >
             {loading ? 'Creating account…' : 'Create Account'}
           </button>
@@ -161,7 +161,7 @@ export default function RegisterPage() {
 
         <p className="text-center text-sm text-gray-500 mt-6">
           Already have an account?{' '}
-          <Link href="/login" className="text-red-700 font-semibold hover:underline">
+          <Link href="/login" className="text-blue-700 font-semibold hover:underline">
             Sign in
           </Link>
         </p>

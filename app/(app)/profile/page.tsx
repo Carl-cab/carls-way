@@ -137,7 +137,7 @@ export default function ProfilePage() {
       {/* Avatar & Name */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 flex items-center gap-4">
         <div className="w-16 h-16 rounded-full flex items-center justify-center text-white text-xl font-bold flex-shrink-0"
-          style={{ backgroundColor: user.avatar_color || '#dc2626' }}>
+          style={{ backgroundColor: user.avatar_color || '#1d4ed8' }}>
           {initials}
         </div>
         <div className="flex-1 min-w-0">
@@ -177,7 +177,7 @@ export default function ProfilePage() {
             {canTransfer ? (
               <Link
                 href="/transfers?type=add_money"
-                className="flex-1 py-2 bg-red-700 text-white text-sm font-semibold rounded-lg hover:bg-red-800 transition text-center"
+                className="flex-1 py-2 bg-blue-700 text-white text-sm font-semibold rounded-lg hover:bg-blue-800 transition text-center"
               >
                 + Add Money
               </Link>
@@ -249,7 +249,7 @@ export default function ProfilePage() {
           <button
             onClick={handleStartKyc}
             disabled={kycLoading}
-            className="mt-3 w-full py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-60 text-white text-sm font-semibold rounded-lg transition"
+            className="mt-3 w-full py-2.5 bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-sm font-semibold rounded-lg transition"
           >
             {kycLoading ? 'Starting…' : user.kyc_status === 'requires_input' ? 'Retry Verification →' : 'Verify Identity →'}
           </button>

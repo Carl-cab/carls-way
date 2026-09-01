@@ -92,7 +92,7 @@ export default function NotificationsPage() {
           <button
             onClick={markAllRead}
             disabled={markingAll}
-            className="text-sm text-red-700 font-medium hover:underline disabled:opacity-50"
+            className="text-sm text-blue-700 font-medium hover:underline disabled:opacity-50"
           >
             Mark all read
           </button>
@@ -118,7 +118,7 @@ export default function NotificationsPage() {
               onClick={() => handleClick(notif)}
               className={`flex items-start gap-3 p-4 rounded-xl border transition ${
                 isUnread
-                  ? 'bg-white border-red-100 shadow-sm cursor-pointer hover:border-red-300'
+                  ? 'bg-white border-blue-100 shadow-sm cursor-pointer hover:border-blue-300'
                   : 'bg-gray-50 border-gray-100 cursor-pointer hover:border-gray-200'
               } ${dest ? 'cursor-pointer' : 'cursor-default'}`}
             >
@@ -129,7 +129,7 @@ export default function NotificationsPage() {
                     {notif.title}
                   </p>
                   {isUnread && (
-                    <span className="flex-shrink-0 w-2 h-2 rounded-full bg-red-600 mt-1.5" />
+                    <span className="flex-shrink-0 w-2 h-2 rounded-full bg-blue-600 mt-1.5" />
                   )}
                 </div>
                 <p className="text-sm text-gray-500 mt-0.5">{notif.message}</p>

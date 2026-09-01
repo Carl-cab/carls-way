@@ -186,7 +186,7 @@ export function GlobalSearch() {
             >
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="text-xs font-medium text-red-700">{result.type}</p>
+                  <p className="text-xs font-medium text-blue-700">{result.type}</p>
                   <p className="mt-1 font-medium text-gray-900">
                     ID: {result.id}
                   </p>
@@ -208,7 +208,7 @@ export function GlobalSearch() {
                   )}
                 </div>
                 <div className="text-right">
-                  <p className="text-sm font-medium text-red-700">View →</p>
+                  <p className="text-sm font-medium text-blue-700">View →</p>
                 </div>
               </div>
             </Link>

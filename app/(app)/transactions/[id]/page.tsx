@@ -116,7 +116,7 @@ export default function TransactionReceiptPage() {
         <div className="text-5xl mb-4">🔒</div>
         <p className="font-medium text-gray-600 mb-1">Transaction not found</p>
         <p className="text-sm mb-6">You may not have permission to view this receipt.</p>
-        <button onClick={() => router.back()} className="text-red-700 text-sm font-medium hover:underline">
+        <button onClick={() => router.back()} className="text-blue-700 text-sm font-medium hover:underline">
           ← Go back
         </button>
       </div>
@@ -223,7 +223,7 @@ export default function TransactionReceiptPage() {
           <span className="font-mono text-sm text-gray-700 break-all">#{tx.id}</span>
           <button
             onClick={copyId}
-            className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-full border border-gray-300 hover:border-red-400 hover:text-red-700 transition"
+            className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-full border border-gray-300 hover:border-blue-400 hover:text-blue-700 transition"
           >
             {copied ? 'Copied ✓' : 'Copy'}
           </button>

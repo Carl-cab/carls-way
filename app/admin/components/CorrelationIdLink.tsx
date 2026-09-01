@@ -20,7 +20,7 @@ export function CorrelationIdLink({
   return (
     <Link
       href={`/admin/search?q=${encodeURIComponent(correlationId)}`}
-      className={`text-red-700 hover:underline ${className}`}
+      className={`text-blue-700 hover:underline ${className}`}
       title="Click to trace this correlation ID"
     >
       {showIcon && <span className="mr-1">🔗</span>}

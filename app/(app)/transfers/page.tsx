@@ -157,7 +157,7 @@ function TransfersPageInner() {
   return (
     <div className="space-y-4">
       <div>
-        <Link href="/profile" className="text-sm text-red-700 hover:underline inline-block">
+        <Link href="/profile" className="text-sm text-blue-700 hover:underline inline-block">
           ← Back to Profile
         </Link>
       </div>
@@ -179,7 +179,7 @@ function TransfersPageInner() {
               <select
                 value={transferType}
                 onChange={e => setTransferType(e.target.value as 'add_money' | 'cash_out')}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="add_money">Add Money (from bank)</option>
                 <option value="cash_out">Cash Out (to bank)</option>
@@ -195,7 +195,7 @@ function TransfersPageInner() {
                 onChange={e => setAmount(e.target.value)}
                 placeholder="Enter amount"
                 required
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
             <div>
@@ -203,7 +203,7 @@ function TransfersPageInner() {
               <select
                 value={currency}
                 onChange={e => setCurrency(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="CAD">CAD</option>
                 <option value="USD">USD</option>
@@ -213,7 +213,7 @@ function TransfersPageInner() {
             <button
               type="submit"
               disabled={loading || !amount}
-              className="w-full bg-red-700 text-white font-semibold py-2.5 rounded-lg hover:bg-red-800 disabled:opacity-50 transition"
+              className="w-full bg-blue-700 text-white font-semibold py-2.5 rounded-lg hover:bg-blue-800 disabled:opacity-50 transition"
             >
               {loading ? 'Loading…' : 'Continue to Review →'}
             </button>
@@ -269,7 +269,7 @@ function TransfersPageInner() {
             <button
               onClick={handleConfirm}
               disabled={loading}
-              className="flex-1 py-2.5 bg-red-700 text-white font-semibold rounded-lg hover:bg-red-800 disabled:opacity-50 transition"
+              className="flex-1 py-2.5 bg-blue-700 text-white font-semibold rounded-lg hover:bg-blue-800 disabled:opacity-50 transition"
             >
               {loading ? 'Confirming…' : 'Confirm Transfer'}
             </button>

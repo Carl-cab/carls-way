@@ -122,7 +122,7 @@ export default function Dashboard() {
         <div className="rounded border border-gray-200 p-6">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Recent Transfers</h2>
-            <Link href="/admin/transfers" className="text-sm text-red-700 hover:underline">
+            <Link href="/admin/transfers" className="text-sm text-blue-700 hover:underline">
               View all →
             </Link>
           </div>
@@ -163,7 +163,7 @@ export default function Dashboard() {
         <div className="rounded border border-gray-200 p-6">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Your Activity</h2>
-            <Link href="/admin/audit" className="text-sm text-red-700 hover:underline">
+            <Link href="/admin/audit" className="text-sm text-blue-700 hover:underline">
               View all →
             </Link>
           </div>

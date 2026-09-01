@@ -123,7 +123,7 @@ export function DataTable<T extends { id?: number | string }>({
                     onClick={() => onPageChange(pageNum)}
                     className={`rounded px-3 py-1 text-sm font-medium ${
                       pageNum === page
-                        ? 'bg-red-700 text-white'
+                        ? 'bg-blue-700 text-white'
                         : 'border border-gray-300 hover:bg-gray-50'
                     }`}
                   >
