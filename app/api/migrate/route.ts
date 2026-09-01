@@ -151,6 +151,54 @@ export async function GET() {
     await sql`CREATE INDEX IF NOT EXISTS idx_split_participants_user ON split_participants(user_id)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_splits_creator ON splits(creator_id)`;
 
+    // ── velocity_checks ─────────────────────────────────────────────────────
+    // This table was read and written by lib/auth.ts but was never created by
+    // initializeSchema() or by this route, so every send failed with a 500 on
+    // any environment that had not had it created by hand. Every statement is
+    // additive, so an environment that already carries the table keeps its
+    // data and simply gains any column or index it was missing.
+    await sql`
+      CREATE TABLE IF NOT EXISTS velocity_checks (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        window_type TEXT NOT NULL,
+        window_start TIMESTAMPTZ NOT NULL,
+        transaction_count INTEGER NOT NULL DEFAULT 0,
+        total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'CAD',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`ALTER TABLE velocity_checks ADD COLUMN IF NOT EXISTS window_type TEXT`;
+    await sql`ALTER TABLE velocity_checks ADD COLUMN IF NOT EXISTS window_start TIMESTAMPTZ`;
+    await sql`ALTER TABLE velocity_checks ADD COLUMN IF NOT EXISTS transaction_count INTEGER NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE velocity_checks ADD COLUMN IF NOT EXISTS total_amount NUMERIC(14,2) NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE velocity_checks ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'CAD'`;
+    await sql`ALTER TABLE velocity_checks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
+        ON velocity_checks (user_id, window_type, currency, window_start)
+    `;
+    // recordVelocity()'s upsert names this index as its conflict target, so it
+    // must exist before that path can run. It can only fail on an environment
+    // that already holds duplicate rows for a window — report that rather than
+    // aborting the rest of the migration, since it needs a human to dedupe.
+    let velocityIndexNote: string | undefined;
+    try {
+      await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
+          ON velocity_checks (user_id, window_type, window_start, currency)
+          WHERE transaction_count >= 0
+      `;
+    } catch (indexErr) {
+      velocityIndexNote =
+        'velocity_checks_window_key could not be created — the table holds duplicate ' +
+        'rows for at least one (user_id, window_type, window_start, currency). Dedupe ' +
+        'them and re-run this migration; recordVelocity() will fail until it exists.';
+      console.error('velocity_checks unique index creation failed:', indexErr);
+    }
+
     // ── Phase 4: Interac e-Transfer fields ──────────────────────────────────
     // Registration/auto-deposit settings. The Interac provider itself is
     // flag-gated and inert; these columns only carry user preferences.
@@ -340,7 +388,11 @@ export async function GET() {
     await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON admin_audit_logs(action)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON admin_audit_logs(resource_type)`;
 
-    return NextResponse.json({ success: true, message: 'Schema migration completed successfully' });
+    return NextResponse.json({
+      success: true,
+      message: 'Schema migration completed successfully',
+      ...(velocityIndexNote ? { warnings: [velocityIndexNote] } : {}),
+    });
   } catch (err) {
     console.error('Migration error:', err);
     return NextResponse.json({ error: String(err) }, { status: 500 });

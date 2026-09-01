@@ -223,6 +223,33 @@ export async function initializeSchema() {
       UNIQUE(split_id, user_id)
     )
   `;
+  // Rolling per-user transaction volume, read by checkVelocityLimit() and
+  // written by recordVelocity() / reverseVelocity() in lib/auth.ts.
+  await sql`
+    CREATE TABLE IF NOT EXISTS velocity_checks (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      window_type TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      transaction_count INTEGER NOT NULL DEFAULT 0,
+      total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'CAD',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  // Partial uniqueness: exactly one accumulating row per window, while the
+  // compensating rows reverseVelocity() appends (transaction_count < 0) stay
+  // append-only. recordVelocity()'s upsert targets this index explicitly.
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
+      ON velocity_checks (user_id, window_type, window_start, currency)
+      WHERE transaction_count >= 0
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
+      ON velocity_checks (user_id, window_type, currency, window_start)
+  `;
 }
 
 export default getSql;
