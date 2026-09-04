@@ -92,13 +92,26 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+
+      # The rest of this workflow installs with pnpm, which is what Vercel
+      # runs. The audit is the one exception, because `pnpm audit` queries
+      # registry.npmjs.org/-/npm/v1/security/audits/quick, which returned
+      # socket timeouts and a 500 on two consecutive runs here and hung until
+      # the job timed out. `npm audit` queries the bulk advisories endpoint
+      # instead, which answered in about twenty seconds on these same runners.
+      #
+      # No lockfile is committed for npm any more, so one is generated in the
+      # runner's workspace. It is never committed. Resolution is from the
+      # ranges in package.json, so it can differ slightly from what pnpm-lock
+      # pins; for an advisory gate that is an acceptable approximation, and a
+      # gate that reports is worth more than one that cannot run.
+      - name: Generate an npm lockfile for auditing only
+        run: npm install --package-lock-only --no-audit
       # Advisory for now: fails the job only on high/critical advisories so a
       # newly published low-severity advisory cannot block an unrelated fix.
-      - name: pnpm audit (high and above)
-        run: pnpm audit --audit-level=high
+      - name: npm audit (high and above)
+        timeout-minutes: 5
+        run: npm audit --audit-level=high

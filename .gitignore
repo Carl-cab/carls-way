@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Only pnpm-lock.yaml is authoritative. A committed npm or yarn lockfile
+# would recreate the split that broke deploys for weeks: CI validating one
+# lockfile while Vercel builds from another. The CI audit job generates a
+# throwaway package-lock.json in the runner and never commits it.
+package-lock.json
+yarn.lock
