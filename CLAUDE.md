@@ -101,10 +101,18 @@ const currency = user.country === 'US' ? 'USD' : 'CAD';
 ```bash
 git clone https://github.com/Carl-cab/carls-way.git
 cd carls-way
-npm install
+pnpm install
 # Create .env.local with all required variables (see Deployment Notes)
-npm run dev
+pnpm dev
 ```
+
+**Package manager: pnpm, and only pnpm.** `pnpm-lock.yaml` is the single
+lockfile; `package-lock.json` was removed because carrying both meant CI
+validated one while Vercel built from the other, and deploys broke silently
+for weeks when they drifted apart. Vercel and CI both run
+`pnpm install --frozen-lockfile`, so a `package.json` change that forgets to
+update the lockfile fails in CI instead of at deploy time. Never add an npm or
+yarn lockfile back.
 
 **Branching:** Feature branches off `master`. The `documentation/handoff-package` branch contains all handoff docs. Vercel auto-deploys on every push to `master`.
 

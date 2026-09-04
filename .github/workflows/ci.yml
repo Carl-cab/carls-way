@@ -43,15 +43,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          cache: pnpm
 
-      # Uses the lockfile exactly. This step would have failed before Phase 1,
-      # when package.json and package-lock.json were out of sync.
+      # The same command Vercel runs, so CI and deploys resolve an identical
+      # dependency graph. A package.json change that forgets the lockfile fails
+      # here rather than silently breaking the next deploy — which is exactly
+      # what happened while this repo carried two lockfiles and CI checked only
+      # the one Vercel ignores.
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Prepare test schema
         run: psql "postgres://postgres:postgres@127.0.0.1:5432/manna_test" -f lib/__tests__/helpers/test-schema.sql
@@ -59,16 +64,16 @@ jobs:
           PGPASSWORD: postgres
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm run typecheck
 
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Test
-        run: npm test
+        run: pnpm test
 
       - name: Build
-        run: npm run build
+        run: pnpm run build
 
       - name: Assert no live provider flag is enabled
         run: |
@@ -87,12 +92,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       # Advisory for now: fails the job only on high/critical advisories so a
       # newly published low-severity advisory cannot block an unrelated fix.
-      - name: npm audit (high and above)
-        run: npm audit --audit-level=high
+      - name: pnpm audit (high and above)
+        run: pnpm audit --audit-level=high
