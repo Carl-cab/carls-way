@@ -25,7 +25,7 @@ export async function sendPasswordResetEmail(email: string, token: string): Prom
       <p>Hi,</p>
       <p>We received a request to reset your Manna password. Click the link below to set a new password:</p>
       <p>
-        <a href="${resetUrl}" style="display: inline-block; background-color: #b91c1c; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+        <a href="${resetUrl}" style="display: inline-block; background-color: #1d4ed8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">
           Reset Password
         </a>
       </p>

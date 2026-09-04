@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
 import { signToken, COOKIE_NAME, validateEmail, validatePassword, sanitizeString, auditLog } from '@/lib/auth';
+import { checkRateLimit, rateLimitHeaders, clientIdentifier } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,6 +24,16 @@ export async function POST(req: NextRequest) {
     const pwCheck = validatePassword(password);
     if (!pwCheck.valid) {
       return NextResponse.json({ error: pwCheck.reason }, { status: 400 });
+    }
+
+    // Brute-force protection. Keyed on client IP, so one abusive client
+    // cannot lock out everybody else.
+    const rate = await checkRateLimit('auth:register', clientIdentifier(req));
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Too many attempts. Please try again later.' },
+        { status: 429, headers: rateLimitHeaders(rate) },
+      );
     }
 
     const sql = getSql();

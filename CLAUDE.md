@@ -40,7 +40,7 @@ Client (React 19)
 | `lib/auth.ts` | JWT helpers, `getAuthUser()`, velocity limits, audit logging |
 | `lib/fx.ts` | Wise API integration, FX rate caching, `buildFxQuote()` |
 | `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
-| `lib/stripe.ts` | Stripe client singleton (`getStripe()`) |
+| `lib/stripe.ts` | Stripe client singleton (`getStripe()`) and `isStripeLive()` sandbox/live KYC gate |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
 | `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `backfillOpeningBalances()` |
 | `lib/provider-events.ts` | Webhook event deduplication: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()` |
@@ -48,8 +48,8 @@ Client (React 19)
 | `lib/providers/TransferProviderFactory.ts` | Central provider selection logic — no other code should select providers |
 | `lib/providers/SandboxUSProvider.ts` | US sandbox provider — simulates Plaid Transfer ACH, no real API calls |
 | `lib/providers/SandboxCAProvider.ts` | CA sandbox provider — simulates Canadian EFT, no real API calls |
-| `lib/providers/PlaidTransferProvider.ts` | Placeholder for US live ACH (throws "Not implemented") |
-| `lib/providers/CanadianEFTProvider.ts` | Placeholder for CA live EFT (throws "Not implemented") |
+| `lib/providers/PlaidTransferProvider.ts` | US live ACH via Plaid Transfer — IMPLEMENTED, gated behind `PLAID_TRANSFER_LIVE` (default off). Never mutates balances. |
+| `lib/providers/CanadianEFTProvider.ts` | CA live EFT via Stripe ACSS — IMPLEMENTED, gated behind `CA_EFT_LIVE` (default off). Never mutates balances. |
 | `lib/settlement/types.ts` | Settlement event types, outcome objects, transition rules |
 | `lib/settlement/settlement-rules.ts` | State transition validators and terminal/processing state checkers |
 | `lib/settlement/SettlementProcessor.ts` | Core settlement processor — validates transitions, prepares outcomes, no balance mutations |
@@ -101,10 +101,18 @@ const currency = user.country === 'US' ? 'USD' : 'CAD';
 ```bash
 git clone https://github.com/Carl-cab/carls-way.git
 cd carls-way
-npm install
+pnpm install
 # Create .env.local with all required variables (see Deployment Notes)
-npm run dev
+pnpm dev
 ```
+
+**Package manager: pnpm, and only pnpm.** `pnpm-lock.yaml` is the single
+lockfile; `package-lock.json` was removed because carrying both meant CI
+validated one while Vercel built from the other, and deploys broke silently
+for weeks when they drifted apart. Vercel and CI both run
+`pnpm install --frozen-lockfile`, so a `package.json` change that forgets to
+update the lockfile fails in CI instead of at deploy time. Never add an npm or
+yarn lockfile back.
 
 **Branching:** Feature branches off `master`. The `documentation/handoff-package` branch contains all handoff docs. Vercel auto-deploys on every push to `master`.
 
@@ -114,7 +122,7 @@ npm run dev
 
 After deploying, call `GET /api/migrate` once (authenticated) to apply the migration to production.
 
-**No test suite exists.** Manual testing is currently the only verification method.
+**Tests:** `npm test` (vitest) runs unit tests in `lib/__tests__`. As of Release 0.95 Phase 1 these are 83 pass / 53 fail; every failure is in admin RBAC/audit/repository/correlation code and is a pre-existing defect inherited from the feature branch — no money-loop test fails. Also available: `npm run typecheck`, `npm run lint`.
 
 ---
 
@@ -134,13 +142,13 @@ Transfers use a provider abstraction in `lib/transfers/`. All providers implemen
 **Transfer flow (3 steps):**
 1. `POST /api/transfers/intent` — creates `status='draft'`, routes to correct provider
 2. `GET /api/transfers/[id]/review` — returns review details + region-appropriate consent language
-3. `POST /api/transfers/[id]/confirm` — records `consent_confirmed_at`, sets `status='ready'`
+3. `POST /api/transfers/[id]/confirm` — records `consent_confirmed_at`, then settles: the sandbox provider credits (add_money) / debits (cash_out) the platform balance and writes a ledger entry, setting `status='settled'`
 
 **Rules:**
-- Both sandbox providers are execution_mode='sandbox' — no money moves, no external API calls
+- Both sandbox providers are execution_mode='sandbox' — no real bank/external API calls
 - `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
 - Velocity is checked at intent creation but only recorded at confirm (future: at execute)
-- Balance is never mutated by any current transfer route
+- Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
 

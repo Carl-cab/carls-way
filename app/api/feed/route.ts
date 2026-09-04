@@ -7,7 +7,7 @@ export async function GET() {
     const transactions = await sql`
       SELECT t.id, t.type, t.status,
              t.sender_currency, t.receiver_currency,
-             t.sender_amount, t.receiver_amount,
+             t.sender_amount, t.receiver_amount, t.note,
              t.is_cross_border, t.payment_rail, t.estimated_settlement,
              t.created_at,
              s.username AS sender_username, s.name AS sender_name, s.avatar_color AS sender_avatar_color,

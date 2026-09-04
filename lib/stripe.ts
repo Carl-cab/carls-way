@@ -2,6 +2,16 @@ import Stripe from 'stripe';
 
 let _stripe: Stripe | null = null;
 
+/*
+ * NOTE: there is deliberately no `isStripeLive()` helper here.
+ *
+ * Inferring "sandbox" from the absence (or test-mode prefix) of a credential is
+ * a fail-open pattern: a production deployment with a missing or test key would
+ * silently take the permissive branch. Environment is resolved explicitly in
+ * lib/environment.ts instead, and credential problems surface there as
+ * ConfigurationError. Do not reintroduce credential-sniffing here.
+ */
+
 /**
  * Returns a singleton Stripe client.
  * Throws at call-time (not module load) so missing env vars surface

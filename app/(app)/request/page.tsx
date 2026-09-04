@@ -71,7 +71,7 @@ export default function RequestPage() {
               value={form.receiverUsername}
               onChange={e => update('receiverUsername', e.target.value)}
               required
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="@username"
             />
           </div>
@@ -90,7 +90,7 @@ export default function RequestPage() {
                 value={form.amount}
                 onChange={e => update('amount', e.target.value)}
                 required
-                className="w-full border border-gray-300 rounded-lg pl-8 pr-16 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full border border-gray-300 rounded-lg pl-8 pr-16 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="0.00"
               />
               <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">{currency}</span>
@@ -105,7 +105,7 @@ export default function RequestPage() {
               type="text"
               value={form.note}
               onChange={e => update('note', e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="🏠 Rent, 🍺 Drinks, 🚗 Gas…"
             />
           </div>
@@ -120,8 +120,8 @@ export default function RequestPage() {
                   onClick={() => update('privacy', p)}
                   className={`flex-1 py-2 rounded-lg text-sm font-medium border transition ${
                     form.privacy === p
-                      ? 'bg-red-700 text-white border-red-700'
-                      : 'border-gray-300 text-gray-600 hover:border-red-400'
+                      ? 'bg-blue-700 text-white border-blue-700'
+                      : 'border-gray-300 text-gray-600 hover:border-blue-400'
                   }`}
                 >
                   {p === 'public' ? '🌍 Public' : p === 'friends' ? '👥 Friends' : '🔒 Private'}
@@ -136,7 +136,7 @@ export default function RequestPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-red-700 hover:bg-red-800 text-white font-semibold py-3 rounded-lg transition disabled:opacity-60 text-lg"
+            className="w-full bg-blue-700 hover:bg-blue-800 text-white font-semibold py-3 rounded-lg transition disabled:opacity-60 text-lg"
           >
             {loading ? 'Sending request…' : 'Request Money 💸'}
           </button>

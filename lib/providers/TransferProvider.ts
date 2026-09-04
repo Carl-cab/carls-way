@@ -4,7 +4,30 @@
 // No provider may update balances directly — all balance changes happen via settlement webhooks.
 
 export type TransferType = 'add_money' | 'cash_out';
-export type TransferStatus = 'draft' | 'reviewed' | 'ready' | 'processing' | 'settled' | 'failed' | 'returned' | 'cancelled' | 'blocked';
+/**
+ * Transfer lifecycle states.
+ *
+ * `submitting` is the one state that distinguishes "the provider may have
+ * accepted this transfer, but we do not yet know" from `failed`, which means the
+ * provider definitely rejected it. Confusing those two is how money gets sent
+ * twice or written off incorrectly, so the distinction is encoded in the type.
+ *
+ * A row is left in `submitting` when the provider authorization has been
+ * persisted but the outcome of transferCreate is unknown — a timeout, a crash,
+ * or a failure to persist the provider reference. Rows in this state are the
+ * reconciliation set; see PlaidTransferProvider.reconcileTransfer.
+ */
+export type TransferStatus =
+  | 'draft'
+  | 'reviewed'
+  | 'ready'
+  | 'submitting'
+  | 'processing'
+  | 'settled'
+  | 'failed'
+  | 'returned'
+  | 'cancelled'
+  | 'blocked';
 export type ExecutionMode = 'sandbox' | 'live';
 export type ProviderRegion = 'US' | 'CA';
 export type ProviderName = 'sandbox_us' | 'sandbox_ca' | 'plaid_transfer' | 'canadian_eft';
@@ -66,6 +89,9 @@ export interface ConfirmResult {
   intent_id: number;
   status: TransferStatus;
   message: string;
+  // Present when confirmation also settles (sandbox mode): the user's updated
+  // platform balance in the transfer currency after settlement.
+  new_balance?: number;
 }
 
 export interface CancelResult {

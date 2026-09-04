@@ -116,7 +116,7 @@ export default function FriendsPage() {
           type="text"
           value={searchQuery}
           onChange={e => search(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500"
+          className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
           placeholder="Search by name, username, or email…"
         />
         {searching && <p className="text-sm text-gray-400 mt-2">Searching…</p>}
@@ -139,7 +139,7 @@ export default function FriendsPage() {
                     <button
                       onClick={() => sendRequest(u.id)}
                       disabled={pendingActions.has(u.id)}
-                      className="bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
+                      className="bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
                     >
                       + Add
                     </button>
@@ -160,7 +160,7 @@ export default function FriendsPage() {
           <h3 className="font-semibold text-gray-700 mb-3">
             Friend Requests{' '}
             {incomingRequests.length > 0 && (
-              <span className="ml-1 bg-red-600 text-white text-xs rounded-full px-1.5 py-0.5">
+              <span className="ml-1 bg-blue-600 text-white text-xs rounded-full px-1.5 py-0.5">
                 {incomingRequests.length}
               </span>
             )}
@@ -178,14 +178,14 @@ export default function FriendsPage() {
                   <button
                     onClick={() => acceptRequest(f.friendship_id)}
                     disabled={pendingActions.has(f.friendship_id)}
-                    className="bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
+                    className="bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
                   >
                     Accept
                   </button>
                   <button
                     onClick={() => declineRequest(f.friendship_id)}
                     disabled={pendingActions.has(f.friendship_id)}
-                    className="border border-gray-300 text-gray-600 hover:text-red-600 hover:border-red-300 disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-full transition"
+                    className="border border-gray-300 text-gray-600 hover:text-blue-600 hover:border-blue-300 disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-full transition"
                   >
                     Decline
                   </button>
@@ -237,13 +237,13 @@ export default function FriendsPage() {
               </div>
               <button
                 onClick={() => router.push(`/send?to=${encodeURIComponent(f.username)}`)}
-                className="bg-red-700 hover:bg-red-800 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
+                className="bg-blue-700 hover:bg-blue-800 text-white text-xs font-medium px-3 py-1.5 rounded-full transition"
               >
                 Send
               </button>
               <button
                 onClick={() => removeFriend(f.id)}
-                className="text-xs text-gray-400 hover:text-red-600 transition"
+                className="text-xs text-gray-400 hover:text-blue-600 transition"
               >
                 Remove
               </button>

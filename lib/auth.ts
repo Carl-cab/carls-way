@@ -31,6 +31,13 @@ export const VELOCITY_LIMITS = {
   },
 } as const;
 
+/**
+ * Ceiling applied to a single velocity reversal. Preserves the cap the
+ * previous implementation carried inline, so one malformed return cannot
+ * release unbounded headroom.
+ */
+export const MAX_SINGLE_TRANSFER_AMOUNT = 100000;
+
 export interface JWTPayload {
   userId: number;
   email: string;
@@ -159,16 +166,18 @@ export async function recordVelocity(userId: number, amount: number, currency: s
     ['daily', dayStart] as const,
     ['weekly', weekStart] as const,
   ]) {
+    // Single atomic upsert. This was previously an INSERT ... ON CONFLICT DO
+    // NOTHING followed by an unconditional UPDATE, which counted the first
+    // transaction of every window twice: the INSERT seeded the row with
+    // (1, amount) and the UPDATE then added (1, amount) to that same row.
     await sql`
       INSERT INTO velocity_checks (user_id, window_start, window_type, transaction_count, total_amount, currency)
       VALUES (${userId}, ${windowStart.toISOString()}, ${windowType}, 1, ${amount}, ${currency})
-      ON CONFLICT DO NOTHING
-    `;
-    await sql`
-      UPDATE velocity_checks
-      SET transaction_count = transaction_count + 1, total_amount = total_amount + ${amount}, updated_at = NOW()
-      WHERE user_id = ${userId} AND window_type = ${windowType}
-        AND window_start = ${windowStart.toISOString()} AND currency = ${currency}
+      ON CONFLICT (user_id, window_type, window_start, currency) WHERE transaction_count >= 0
+      DO UPDATE SET
+        transaction_count = velocity_checks.transaction_count + 1,
+        total_amount = velocity_checks.total_amount + EXCLUDED.total_amount,
+        updated_at = NOW()
     `;
   }
 }
@@ -206,22 +215,56 @@ export async function reverseVelocity(
 
   const sql = getSql();
 
-  // Create a compensating negative velocity record (not deleting historical records)
-  // This allows auditing: original record + reversal = net zero impact
+  // Create compensating negative velocity records (historical rows are never
+  // deleted, so original + reversal nets to zero and both remain auditable).
+  //
+  // These are written with the same window_type / window_start / currency that
+  // checkVelocityLimit() sums over, so the reversal actually releases the
+  // user's headroom. The previous implementation inserted a single row with
+  // columns that do not exist on this table (period_type, period_start,
+  // hourly_amount, ...) under window_type 'reversal', which no query reads —
+  // so every reversal threw, was swallowed by the catch below, and freed
+  // nothing.
+  //
+  // Known limitation: the reversal is applied to the windows current at the
+  // time of reversal, not the windows the original transaction fell into. A
+  // return that arrives after the original window has rolled over therefore
+  // credits a window that never carried the charge. Correcting that needs the
+  // original transaction timestamp, which this signature does not carry; the
+  // clamp below keeps the effect conservative in the meantime.
+  const reversalAmount = Math.min(amount, MAX_SINGLE_TRANSFER_AMOUNT);
+  const now = new Date();
+  const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
+  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
+
   try {
-    await sql`
-      INSERT INTO velocity_checks (
-        user_id, period_type, period_start, hourly_amount, daily_amount, weekly_amount
-      )
-      VALUES (
-        ${userId},
-        'reversal',
-        NOW(),
-        -${Math.min(amount, 100000)},  -- Cap at max single transfer amount
-        -${Math.min(amount, 100000)},
-        -${Math.min(amount, 100000)}
-      )
-    `;
+    for (const [windowType, windowStart] of [
+      ['hourly', hourStart] as const,
+      ['daily', dayStart] as const,
+      ['weekly', weekStart] as const,
+    ]) {
+      // A window's recorded volume can never be driven below zero: a reversal
+      // releases at most what that window currently holds.
+      const recorded = await sql`
+        SELECT COALESCE(SUM(total_amount), 0) AS total
+        FROM velocity_checks
+        WHERE user_id = ${userId} AND window_type = ${windowType}
+          AND window_start >= ${windowStart.toISOString()} AND currency = ${currency}
+      `;
+      const releasable = Math.min(reversalAmount, parseFloat(recorded[0]?.total ?? '0'));
+      if (releasable <= 0) continue;
+
+      await sql`
+        INSERT INTO velocity_checks (
+          user_id, window_start, window_type, transaction_count, total_amount, currency
+        )
+        VALUES (
+          ${userId}, ${windowStart.toISOString()}, ${windowType}, -1, ${-releasable}, ${currency}
+        )
+      `;
+    }
 
     // Audit the reversal for compliance
     await auditLog(userId, 'velocity_reversed', {

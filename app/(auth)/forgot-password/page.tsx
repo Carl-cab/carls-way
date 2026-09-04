@@ -52,7 +52,7 @@ export default function ForgotPasswordPage() {
           <div className="space-y-4">
             <Link
               href="/login"
-              className="block w-full bg-red-700 text-white font-bold py-3 rounded-lg hover:bg-red-800 transition text-center"
+              className="block w-full bg-blue-700 text-white font-bold py-3 rounded-lg hover:bg-blue-800 transition text-center"
             >
               Back to login
             </Link>
@@ -91,7 +91,7 @@ export default function ForgotPasswordPage() {
               onChange={e => setEmail(e.target.value)}
               placeholder="you@example.com"
               required
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-700"
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-700"
             />
           </div>
 
@@ -104,7 +104,7 @@ export default function ForgotPasswordPage() {
           <button
             type="submit"
             disabled={loading || !email}
-            className="w-full bg-red-700 text-white font-bold py-3 rounded-lg hover:bg-red-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full bg-blue-700 text-white font-bold py-3 rounded-lg hover:bg-blue-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Sending...' : 'Send reset link'}
           </button>
@@ -113,7 +113,7 @@ export default function ForgotPasswordPage() {
         <div className="mt-6 text-center text-sm">
           <p className="text-gray-600">
             Remember your password?{' '}
-            <Link href="/login" className="text-red-700 font-semibold hover:underline">
+            <Link href="/login" className="text-blue-700 font-semibold hover:underline">
               Back to login
             </Link>
           </p>

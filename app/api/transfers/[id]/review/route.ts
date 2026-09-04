@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
-import { getTransferProvider } from '@/lib/transfers/router';
+import { getTransferProvider, toExecutionMode } from '@/lib/transfers/router';
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -14,9 +14,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
     const sql = getSql();
 
-    // Verify intent belongs to user and fetch provider_region
+    // Verify intent belongs to user and fetch the mode it was created under
     const intentRows = await sql`
-      SELECT provider_region, status FROM transfer_intents
+      SELECT provider_region, execution_mode, status FROM transfer_intents
       WHERE id = ${intentId} AND user_id = ${user.userId}
     `;
     if (!intentRows[0]) return NextResponse.json({ error: 'Transfer intent not found' }, { status: 404 });
@@ -25,7 +25,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     }
 
     const region = intentRows[0].provider_region as 'US' | 'CA';
-    const provider = getTransferProvider(region);
+    const provider = getTransferProvider(region, toExecutionMode(intentRows[0].execution_mode as string));
     const review = await provider.reviewTransfer(intentId, user.userId);
 
     return NextResponse.json(review);

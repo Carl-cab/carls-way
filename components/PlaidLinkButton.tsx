@@ -166,10 +166,10 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
   if (step === 'error') {
     return (
       <div className="flex items-center gap-2">
-        <span className="text-xs text-red-600">{error}</span>
+        <span className="text-xs text-blue-600">{error}</span>
         <button
           onClick={() => { setStep('idle'); setError(null); setLinkToken(null); }}
-          className="text-xs text-red-700 font-semibold hover:text-red-800 underline"
+          className="text-xs text-blue-700 font-semibold hover:text-blue-800 underline"
         >
           Retry
         </button>
@@ -181,7 +181,7 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
     <button
       onClick={fetchLinkToken}
       disabled={loading || step === 'plaid'}
-      className="text-xs text-red-700 font-semibold hover:text-red-800 disabled:opacity-50"
+      className="text-xs text-blue-700 font-semibold hover:text-blue-800 disabled:opacity-50"
     >
       {loading ? 'Loading…' : '+ Link Account'}
     </button>

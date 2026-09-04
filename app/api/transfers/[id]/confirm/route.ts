@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
-import { getTransferProvider } from '@/lib/transfers/router';
+import { getTransferProvider, toExecutionMode } from '@/lib/transfers/router';
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -16,7 +16,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     // Verify intent ownership and current status
     const intentRows = await sql`
-      SELECT provider_region, status FROM transfer_intents
+      SELECT provider_region, execution_mode, status FROM transfer_intents
       WHERE id = ${intentId} AND user_id = ${user.userId}
     `;
     if (!intentRows[0]) return NextResponse.json({ error: 'Transfer intent not found' }, { status: 404 });
@@ -25,11 +25,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
 
     const region = intentRows[0].provider_region as 'US' | 'CA';
-    const provider = getTransferProvider(region);
+    const provider = getTransferProvider(region, toExecutionMode(intentRows[0].execution_mode as string));
     const result = await provider.confirmTransfer(intentId, user.userId);
 
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
+    if (err instanceof Error && err.message === 'INSUFFICIENT_BALANCE') {
+      return NextResponse.json({ error: 'Insufficient balance to cash out this amount.' }, { status: 400 });
+    }
     console.error('Transfer confirm error:', err);
     return NextResponse.json({ error: 'Failed to confirm transfer' }, { status: 500 });
   }

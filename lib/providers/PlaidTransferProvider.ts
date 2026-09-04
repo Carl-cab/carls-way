@@ -29,6 +29,7 @@ import type {
   ReviewResult,
   ConfirmResult,
   CancelResult,
+  TransferStatus,
   TransferStatusResult,
   WebhookResult,
 } from './TransferProvider';
@@ -195,60 +196,192 @@ export class PlaidTransferProvider implements TransferProvider {
     };
   }
 
+  /**
+   * Stable provider idempotency key for one logical transfer.
+   *
+   * The canonical identity of a transfer is its transfer_intents.id, which is a
+   * durable primary key. Deriving the key from it means the value is identical
+   * across HTTP retries, browser retries, server retries, process restarts and
+   * reconciliation, without depending on any value generated during execution.
+   *
+   * The persisted idempotency_key column is preferred when present (it is
+   * written at intent creation); the derived form is the fallback for rows
+   * created before that column existed. Neither depends on Date.now() at
+   * execution time.
+   */
+  private stableIdempotencyKey(intentId: number, persisted: string | null): string {
+    const key = persisted ?? `manna_intent_${intentId}`;
+    // Plaid caps the authorization idempotency key at 50 characters. Truncating
+    // deterministically keeps the value stable across retries; the intent id is
+    // at the end of the derived form, so keep the tail rather than the head.
+    return key.length <= 50 ? key : key.slice(key.length - 50);
+  }
+
+  /**
+   * Execute a live ACH transfer.
+   *
+   * Ordering is deliberate and is the whole point of this method:
+   *
+   *   1. Claim the intent inside a transaction (SELECT ... FOR UPDATE) and move
+   *      it to `submitting`. Concurrent executions serialise here; the loser
+   *      sees a non-`ready` status and does not call the provider.
+   *   2. Obtain an authorization and COMMIT it before creating the transfer.
+   *      Plaid treats authorization_id as the idempotency identifier for
+   *      transferCreate, so this persisted value is what makes a retry return
+   *      the same transfer instead of creating a second one.
+   *   3. Create the transfer, then persist the provider reference.
+   *
+   * If step 3 fails in any way — provider timeout, crash, failed write — the row
+   * stays in `submitting` with a durable authorization id, which is recoverable
+   * by reconcileTransfer(). It is never marked `failed`, because a failure to
+   * learn the outcome is not the same as the provider rejecting the transfer.
+   */
   async executeTransfer(intentId: number, userId: number): Promise<never> {
     const sql = getSql();
 
-    // Lock row to prevent concurrent execution
-    const rows = await sql`
-      SELECT ti.id, ti.type, ti.amount, ti.currency, ti.status, ti.bank_account_id
-      FROM transfer_intents ti
-      WHERE ti.id = ${intentId} AND ti.user_id = ${userId}
-      FOR UPDATE
-    `;
-    if (!rows[0]) throw new Error('Transfer intent not found');
-    const intent = rows[0];
+    // ── Step 1: claim the intent ────────────────────────────────────────────
+    // FOR UPDATE only holds a lock for the duration of a transaction, so the
+    // claim and the state change must happen inside sql.begin(). Doing the
+    // SELECT ... FOR UPDATE as a standalone statement (as this method did
+    // previously) releases the lock immediately and provides no protection
+    // against concurrent execution.
+    const claim = await sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT id, type, amount, currency, status, bank_account_id,
+               idempotency_key, provider_authorization_id, provider_reference_id
+        FROM transfer_intents
+        WHERE id = ${intentId} AND user_id = ${userId}
+        FOR UPDATE
+      `;
+      if (!rows[0]) throw new Error('Transfer intent not found');
+      const intent = rows[0];
 
-    if (intent.status !== 'ready') {
-      throw new Error(`Cannot execute intent in status: ${intent.status}. Must be 'ready'.`);
+      // Resuming an interrupted execution is legitimate, and re-executing a
+      // transfer already submitted to the provider is an idempotent no-op that
+      // returns the known reference. Starting a fresh execution from any other
+      // state is not allowed.
+      const alreadySubmitted =
+        intent.status === 'processing' && intent.provider_reference_id !== null;
+      if (intent.status !== 'ready' && intent.status !== 'submitting' && !alreadySubmitted) {
+        throw new Error(
+          `Cannot execute intent in status: ${intent.status}. Must be 'ready' (or 'submitting' to resume).`,
+        );
+      }
+
+      const idempotencyKey = this.stableIdempotencyKey(
+        intentId,
+        (intent.idempotency_key as string | null) ?? null,
+      );
+
+      if (!alreadySubmitted) {
+        await tx`
+          UPDATE transfer_intents
+          SET status = 'submitting',
+              idempotency_key = ${idempotencyKey},
+              updated_at = NOW()
+          WHERE id = ${intentId}
+        `;
+      }
+
+      return {
+        type: intent.type as TransferType,
+        amount: Number(intent.amount),
+        bankAccountId: intent.bank_account_id as number,
+        idempotencyKey,
+        existingAuthorizationId: (intent.provider_authorization_id as string | null) ?? null,
+        existingReferenceId: (intent.provider_reference_id as string | null) ?? null,
+      };
+    }) as unknown as {
+      type: TransferType;
+      amount: number;
+      bankAccountId: number;
+      idempotencyKey: string;
+      existingAuthorizationId: string | null;
+      existingReferenceId: string | null;
+    };
+
+    // Already submitted and recorded — nothing further to do. Returning the
+    // known reference keeps a duplicate execute request harmless.
+    if (claim.existingReferenceId) {
+      throw Object.assign(new Error('__TRANSFER_SUBMITTED__'), {
+        __submitted: true,
+        plaid_transfer_id: claim.existingReferenceId,
+        intent_id: intentId,
+        idempotency_key: claim.idempotencyKey,
+        status: 'processing' as const,
+      });
     }
 
-    const accessToken = await requireEncryptedBankToken(userId, intent.bank_account_id as number);
-    const plaidAccountId = await getPlaidAccountId(intent.bank_account_id as number, accessToken);
-    const plaidType = toPlaidTransferType(intent.type as TransferType);
-    const amountStr = Number(intent.amount).toFixed(2);
-    const description = intent.type === 'add_money' ? 'Manna Add' : 'Manna Pay';
+    const accessToken = await requireEncryptedBankToken(userId, claim.bankAccountId);
+    const plaidAccountId = await getPlaidAccountId(claim.bankAccountId, accessToken);
+    const amountStr = claim.amount.toFixed(2);
+    const description = claim.type === 'add_money' ? 'Manna Add' : 'Manna Pay';
 
-    // Step 1: Create authorization
-    const authResp = await plaidClient.transferAuthorizationCreate({
-      access_token: accessToken,
-      account_id: plaidAccountId,
-      type: plaidType,
-      network: TransferNetwork.Ach,
-      amount: amountStr,
-      ach_class: ACHClass.Ppd,
-      user: { legal_name: 'Manna User' },
-    });
+    // ── Step 2: authorization, persisted before the transfer is created ─────
+    let authorizationId = claim.existingAuthorizationId;
 
-    const authorization = authResp.data.authorization;
-    if (authorization.decision !== 'approved') {
-      const reason =
-        authorization.decision_rationale?.description ?? authorization.decision;
+    if (!authorizationId) {
+      const plaidType = toPlaidTransferType(claim.type);
+      // idempotency_key IS supported on this call (and is not deprecated, unlike
+      // the one on transferCreate). Retrying with the same key returns the
+      // authorization Plaid already created rather than creating a second one,
+      // which is what makes a crash between "Plaid approved" and "we persisted
+      // the id" recoverable — there is no transferAuthorizationGet to look one
+      // up with, so the idempotent retry IS the recovery mechanism.
+      const authResp = await plaidClient.transferAuthorizationCreate({
+        access_token: accessToken,
+        account_id: plaidAccountId,
+        type: plaidType,
+        network: TransferNetwork.Ach,
+        amount: amountStr,
+        ach_class: ACHClass.Ppd,
+        user: { legal_name: 'Manna User' },
+        idempotency_key: claim.idempotencyKey,
+      });
+
+      const authorization = authResp.data.authorization;
+      if (authorization.decision !== 'approved') {
+        const reason =
+          authorization.decision_rationale?.description ?? authorization.decision;
+        // A declined authorization is a DEFINITE provider rejection: no transfer
+        // exists and none can be created from it, so `failed` is correct here.
+        await sql`
+          UPDATE transfer_intents
+          SET status = 'failed', failure_reason = ${reason}, updated_at = NOW()
+          WHERE id = ${intentId}
+        `;
+        await auditLog(userId, 'transfer_authorization_declined', {
+          intent_id: intentId, reason, decision: authorization.decision,
+        });
+        throw new Error(`Plaid transfer authorization declined: ${reason}`);
+      }
+
+      authorizationId = authorization.id;
+
+      // Committed BEFORE transferCreate. This is the durable handle that makes
+      // the provider-success / local-failure window recoverable.
       await sql`
         UPDATE transfer_intents
-        SET status = 'failed', failure_reason = ${reason}, updated_at = NOW()
+        SET provider_authorization_id = ${authorizationId}, updated_at = NOW()
         WHERE id = ${intentId}
       `;
-      await auditLog(userId, 'transfer_authorization_declined', {
-        intent_id: intentId, reason, decision: authorization.decision,
+
+      await auditLog(userId, 'transfer_authorization_persisted', {
+        intent_id: intentId,
+        authorization_id: authorizationId,
+        idempotency_key: claim.idempotencyKey,
       });
-      throw new Error(`Plaid transfer authorization declined: ${reason}`);
     }
 
-    // Step 2: Create the transfer
+    // ── Step 3: create the transfer ─────────────────────────────────────────
+    // authorization_id is the idempotency identifier for this call in the
+    // installed Plaid SDK (TransferCreateRequest.idempotency_key is deprecated
+    // in its favour), so replaying this request with the same persisted
+    // authorization returns the same transfer rather than creating another.
     const transferResp = await plaidClient.transferCreate({
       access_token: accessToken,
       account_id: plaidAccountId,
-      authorization_id: authorization.id,
+      authorization_id: authorizationId,
       description,
     });
 
@@ -266,8 +399,10 @@ export class PlaidTransferProvider implements TransferProvider {
       intent_id: intentId,
       provider: 'plaid_transfer',
       plaid_transfer_id: plaidTransferId,
+      authorization_id: authorizationId,
+      idempotency_key: claim.idempotencyKey,
       amount: amountStr,
-      type: intent.type,
+      type: claim.type,
     });
 
     // Return never — transfer is now async; status updates arrive via TRANSFER.STATUS_UPDATE webhook
@@ -275,8 +410,112 @@ export class PlaidTransferProvider implements TransferProvider {
       __submitted: true,
       plaid_transfer_id: plaidTransferId,
       intent_id: intentId,
+      idempotency_key: claim.idempotencyKey,
       status: 'processing' as const,
     });
+  }
+
+  /**
+   * Reconcile an intent whose provider outcome is unknown.
+   *
+   * Targets rows left in `submitting`: the authorization was persisted but the
+   * provider reference never was. Replaying transferCreate with the persisted
+   * authorization_id is safe precisely because that value is the provider's
+   * idempotency identifier — Plaid returns the transfer it already created
+   * rather than creating a second one.
+   *
+   * An intent with no persisted authorization never reached the provider, so it
+   * is returned to `ready` and can be executed normally.
+   */
+  async reconcileTransfer(
+    intentId: number,
+    userId: number,
+  ): Promise<{ intent_id: number; status: TransferStatus; provider_reference_id: string | null; outcome: string }> {
+    const sql = getSql();
+
+    const rows = await sql`
+      SELECT id, type, status, bank_account_id,
+             provider_authorization_id, provider_reference_id
+      FROM transfer_intents
+      WHERE id = ${intentId} AND user_id = ${userId}
+    `;
+    if (!rows[0]) throw new Error('Transfer intent not found');
+    const intent = rows[0];
+
+    if (intent.provider_reference_id) {
+      return {
+        intent_id: intentId,
+        status: intent.status as TransferStatus,
+        provider_reference_id: intent.provider_reference_id as string,
+        outcome: 'already_recorded',
+      };
+    }
+
+    if (intent.status !== 'submitting') {
+      return {
+        intent_id: intentId,
+        status: intent.status as TransferStatus,
+        provider_reference_id: null,
+        outcome: 'not_reconcilable',
+      };
+    }
+
+    const authorizationId = intent.provider_authorization_id as string | null;
+
+    if (!authorizationId) {
+      // No authorization was ever persisted, so the provider was never asked to
+      // move money. Safe to return the intent to `ready`.
+      await sql`
+        UPDATE transfer_intents
+        SET status = 'ready', updated_at = NOW()
+        WHERE id = ${intentId} AND status = 'submitting'
+      `;
+      await auditLog(userId, 'transfer_reconciled', {
+        intent_id: intentId, outcome: 'never_submitted',
+      });
+      return {
+        intent_id: intentId,
+        status: 'ready',
+        provider_reference_id: null,
+        outcome: 'never_submitted',
+      };
+    }
+
+    const accessToken = await requireEncryptedBankToken(userId, intent.bank_account_id as number);
+    const plaidAccountId = await getPlaidAccountId(intent.bank_account_id as number, accessToken);
+    const description = intent.type === 'add_money' ? 'Manna Add' : 'Manna Pay';
+
+    // Idempotent replay against the persisted authorization.
+    const transferResp = await plaidClient.transferCreate({
+      access_token: accessToken,
+      account_id: plaidAccountId,
+      authorization_id: authorizationId,
+      description,
+    });
+
+    const plaidTransferId = transferResp.data.transfer.id;
+
+    await sql`
+      UPDATE transfer_intents
+      SET status = 'processing',
+          provider_reference_id = ${plaidTransferId},
+          updated_at = NOW()
+      WHERE id = ${intentId}
+    `;
+
+    await auditLog(userId, 'transfer_reconciled', {
+      intent_id: intentId,
+      outcome: 'recovered',
+      authorization_id: authorizationId,
+      plaid_transfer_id: plaidTransferId,
+    });
+
+    return {
+      intent_id: intentId,
+      status: 'processing',
+      provider_reference_id: plaidTransferId,
+      outcome: 'recovered',
+    };
   }
 
   async cancelTransfer(intentId: number, userId: number): Promise<CancelResult> {

@@ -30,6 +30,7 @@ import type {
   ReviewResult,
   ConfirmResult,
   CancelResult,
+  TransferStatus,
   TransferStatusResult,
   WebhookResult,
 } from './TransferProvider';
@@ -196,31 +197,124 @@ export class CanadianEFTProvider implements TransferProvider {
     };
   }
 
+  /**
+   * Stable provider idempotency key for one logical transfer.
+   *
+   * Identity is transfer_intents.id, a durable primary key, so the value is the
+   * same across HTTP retries, process restarts and reconciliation. Nothing
+   * generated during execution (Date.now(), a request id, a fresh random value)
+   * participates.
+   *
+   * Stripe idempotency keys are scoped per account, not per endpoint, so the
+   * operation is included in the suffix. An intent is either add_money or
+   * cash_out and never both, but the suffix keeps the two request shapes from
+   * ever colliding on one key — Stripe rejects a reused key whose parameters
+   * differ.
+   */
+  private stableIdempotencyKey(
+    intentId: number,
+    persisted: string | null,
+    operation: 'pi' | 'po',
+  ): string {
+    const base = persisted ?? `manna_intent_${intentId}`;
+    return `${base}:${operation}`;
+  }
+
+  /**
+   * Execute a live Canadian EFT transfer via Stripe ACSS.
+   *
+   * Differs from the Plaid path in one important way: ACSS has no separate
+   * authorization step. paymentIntents.create({confirm:true}) and payouts.create
+   * are each a single money-moving call, so there is no authorization that can
+   * be orphaned — but equally there is no pre-call provider handle to persist.
+   * The protection is therefore Stripe's request-level idempotency key, derived
+   * from the durable intent id and persisted before the call.
+   *
+   * Ordering:
+   *   1. Claim the intent inside a transaction and move it to `submitting`,
+   *      persisting the idempotency key. Concurrent executions serialise here.
+   *   2. Call Stripe with that key.
+   *   3. Persist the provider reference and move to `processing`.
+   *
+   * A failure after step 2 leaves the row in `submitting` with the key intact.
+   * Replaying the call with the same key returns Stripe's original object rather
+   * than creating a second one, so the operation is recoverable and is never
+   * marked `failed` on an unknown outcome.
+   */
   async executeTransfer(intentId: number, userId: number): Promise<never> {
     const sql = getSql();
 
-    // Lock row to prevent concurrent execution
-    const rows = await sql`
-      SELECT ti.id, ti.type, ti.amount, ti.currency, ti.status, ti.bank_account_id
-      FROM transfer_intents ti
-      WHERE ti.id = ${intentId} AND ti.user_id = ${userId}
-      FOR UPDATE
-    `;
-    if (!rows[0]) throw new Error('Transfer intent not found');
-    const intent = rows[0];
+    // FOR UPDATE only holds a lock inside a transaction. Running it as a
+    // standalone statement (as this method previously did) releases the lock
+    // immediately and gives no protection against concurrent execution.
+    const claim = await sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT id, type, amount, currency, status, bank_account_id,
+               idempotency_key, provider_reference_id
+        FROM transfer_intents
+        WHERE id = ${intentId} AND user_id = ${userId}
+        FOR UPDATE
+      `;
+      if (!rows[0]) throw new Error('Transfer intent not found');
+      const intent = rows[0];
 
-    if (intent.status !== 'ready') {
-      throw new Error(`Cannot execute intent in status: ${intent.status}. Must be 'ready'.`);
+      const alreadySubmitted =
+        intent.status === 'processing' && intent.provider_reference_id !== null;
+      if (intent.status !== 'ready' && intent.status !== 'submitting' && !alreadySubmitted) {
+        throw new Error(
+          `Cannot execute intent in status: ${intent.status}. Must be 'ready' (or 'submitting' to resume).`,
+        );
+      }
+
+      const persisted = (intent.idempotency_key as string | null) ?? null;
+      // Persist the base key (without the operation suffix) so the value stored
+      // locally is the intent's own identity.
+      const baseKey = persisted ?? `manna_intent_${intentId}`;
+
+      if (!alreadySubmitted) {
+        await tx`
+          UPDATE transfer_intents
+          SET status = 'submitting',
+              idempotency_key = ${baseKey},
+              updated_at = NOW()
+          WHERE id = ${intentId}
+        `;
+      }
+
+      return {
+        type: intent.type as TransferType,
+        amount: Number(intent.amount),
+        bankAccountId: intent.bank_account_id as number,
+        baseKey,
+        existingReferenceId: (intent.provider_reference_id as string | null) ?? null,
+      };
+    }) as unknown as {
+      type: TransferType;
+      amount: number;
+      bankAccountId: number;
+      baseKey: string;
+      existingReferenceId: string | null;
+    };
+
+    // Already submitted and recorded — an idempotent no-op.
+    if (claim.existingReferenceId) {
+      throw Object.assign(new Error('__TRANSFER_SUBMITTED__'), {
+        __submitted: true,
+        stripe_reference_id: claim.existingReferenceId,
+        intent_id: intentId,
+        idempotency_key: claim.baseKey,
+        status: 'processing' as const,
+      });
     }
 
     const stripe = getStripe();
-    const amountCents = Math.round(Number(intent.amount) * 100);
+    const amountCents = Math.round(claim.amount * 100);
     let stripeReferenceId: string;
 
-    if (intent.type === 'add_money') {
+    if (claim.type === 'add_money') {
       // Add Money: Stripe PaymentIntent with ACSS Debit
       const customerId = await getOrCreateStripeCustomer(userId);
-      const paymentMethodId = await getStripeBankPaymentMethod(intent.bank_account_id as number);
+      const paymentMethodId = await getStripeBankPaymentMethod(claim.bankAccountId);
 
       if (!paymentMethodId) {
         throw new Error(
@@ -229,28 +323,35 @@ export class CanadianEFTProvider implements TransferProvider {
         );
       }
 
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: amountCents,
-        currency: 'cad',
-        customer: customerId,
-        payment_method: paymentMethodId,
-        payment_method_types: ['acss_debit'],
-        confirm: true,
-        mandate_data: {
-          customer_acceptance: {
-            type: 'online',
-            online: {
-              ip_address: '0.0.0.0', // Server-side confirmation
-              user_agent: 'Manna/1.0',
+      const idempotencyKey = this.stableIdempotencyKey(intentId, claim.baseKey, 'pi');
+
+      const paymentIntent = await stripe.paymentIntents.create(
+        {
+          amount: amountCents,
+          currency: 'cad',
+          customer: customerId,
+          payment_method: paymentMethodId,
+          payment_method_types: ['acss_debit'],
+          confirm: true,
+          mandate_data: {
+            customer_acceptance: {
+              type: 'online',
+              online: {
+                ip_address: '0.0.0.0', // Server-side confirmation
+                user_agent: 'Manna/1.0',
+              },
             },
           },
+          metadata: {
+            manna_intent_id: String(intentId),
+            manna_user_id: String(userId),
+            transfer_type: 'add_money',
+          },
         },
-        metadata: {
-          manna_intent_id: String(intentId),
-          manna_user_id: String(userId),
-          transfer_type: 'add_money',
-        },
-      });
+        // Stripe idempotency is a request option, not a body field. Replaying
+        // this call with the same key returns the original PaymentIntent.
+        { idempotencyKey },
+      );
 
       stripeReferenceId = paymentIntent.id;
 
@@ -259,16 +360,21 @@ export class CanadianEFTProvider implements TransferProvider {
       // Note: Payouts require a Stripe Connect account or the platform's bank account.
       // For now we create a payout from the platform's Stripe balance.
       // In production this would be a transfer to a connected account.
-      const payout = await stripe.payouts.create({
-        amount: amountCents,
-        currency: 'cad',
-        method: 'standard',
-        metadata: {
-          manna_intent_id: String(intentId),
-          manna_user_id: String(userId),
-          transfer_type: 'cash_out',
+      const idempotencyKey = this.stableIdempotencyKey(intentId, claim.baseKey, 'po');
+
+      const payout = await stripe.payouts.create(
+        {
+          amount: amountCents,
+          currency: 'cad',
+          method: 'standard',
+          metadata: {
+            manna_intent_id: String(intentId),
+            manna_user_id: String(userId),
+            transfer_type: 'cash_out',
+          },
         },
-      });
+        { idempotencyKey },
+      );
 
       stripeReferenceId = payout.id;
     }
@@ -285,8 +391,9 @@ export class CanadianEFTProvider implements TransferProvider {
       intent_id: intentId,
       provider: 'canadian_eft',
       stripe_reference_id: stripeReferenceId,
-      amount: intent.amount,
-      type: intent.type,
+      idempotency_key: claim.baseKey,
+      amount: claim.amount,
+      type: claim.type,
     });
 
     // Return never — transfer is now async; status updates arrive via Stripe webhooks
@@ -294,8 +401,145 @@ export class CanadianEFTProvider implements TransferProvider {
       __submitted: true,
       stripe_reference_id: stripeReferenceId,
       intent_id: intentId,
+      idempotency_key: claim.baseKey,
       status: 'processing' as const,
     });
+  }
+
+  /**
+   * Reconcile a Canadian intent whose provider outcome is unknown.
+   *
+   * Two mechanisms, because Stripe's lookup surface is not uniform:
+   *
+   *   add_money — paymentIntents.search can query the metadata this provider
+   *     already writes (manna_intent_id), so the original PaymentIntent can be
+   *     found directly. This is authoritative provider state.
+   *
+   *   cash_out — the SDK exposes payouts.list and payouts.retrieve but NO
+   *     payouts.search, so a payout cannot be located by metadata. Recovery
+   *     falls back to replaying payouts.create with the same idempotency key,
+   *     which returns the original payout rather than creating a second one.
+   *     This is sound while the key is live; see the 24-hour caveat below.
+   *
+   * Stripe idempotency keys expire after 24 hours. Beyond that window a replay
+   * would create a NEW payout, so cash-out reconciliation must happen inside it.
+   * That limitation is real and is recorded rather than papered over.
+   */
+  async reconcileTransfer(
+    intentId: number,
+    userId: number,
+  ): Promise<{ intent_id: number; status: TransferStatus; provider_reference_id: string | null; outcome: string }> {
+    const sql = getSql();
+
+    const rows = await sql`
+      SELECT id, type, status, amount, bank_account_id, idempotency_key, provider_reference_id
+      FROM transfer_intents
+      WHERE id = ${intentId} AND user_id = ${userId}
+    `;
+    if (!rows[0]) throw new Error('Transfer intent not found');
+    const intent = rows[0];
+
+    if (intent.provider_reference_id) {
+      return {
+        intent_id: intentId,
+        status: intent.status as TransferStatus,
+        provider_reference_id: intent.provider_reference_id as string,
+        outcome: 'already_recorded',
+      };
+    }
+
+    if (intent.status !== 'submitting') {
+      return {
+        intent_id: intentId,
+        status: intent.status as TransferStatus,
+        provider_reference_id: null,
+        outcome: 'not_reconcilable',
+      };
+    }
+
+    const stripe = getStripe();
+    const baseKey = (intent.idempotency_key as string | null) ?? `manna_intent_${intentId}`;
+
+    if (intent.type === 'add_money') {
+      // Authoritative provider lookup by the metadata written at submission.
+      const found = await stripe.paymentIntents.search({
+        query: `metadata['manna_intent_id']:'${intentId}'`,
+        limit: 1,
+      });
+
+      if (found.data.length === 0) {
+        // Nothing exists provider-side: the call never landed. Safe to retry.
+        await sql`
+          UPDATE transfer_intents
+          SET status = 'ready', updated_at = NOW()
+          WHERE id = ${intentId} AND status = 'submitting'
+        `;
+        await auditLog(userId, 'transfer_reconciled', {
+          intent_id: intentId, provider: 'canadian_eft', outcome: 'never_submitted',
+        });
+        return {
+          intent_id: intentId,
+          status: 'ready',
+          provider_reference_id: null,
+          outcome: 'never_submitted',
+        };
+      }
+
+      const reference = found.data[0].id;
+      await sql`
+        UPDATE transfer_intents
+        SET status = 'processing',
+            provider_reference_id = ${reference},
+            updated_at = NOW()
+        WHERE id = ${intentId}
+      `;
+      await auditLog(userId, 'transfer_reconciled', {
+        intent_id: intentId, provider: 'canadian_eft',
+        outcome: 'recovered', stripe_reference_id: reference,
+      });
+      return {
+        intent_id: intentId,
+        status: 'processing',
+        provider_reference_id: reference,
+        outcome: 'recovered',
+      };
+    }
+
+    // cash_out: no payouts.search exists, so replay the create with the same
+    // idempotency key. Stripe returns the original payout if one was made.
+    const idempotencyKey = this.stableIdempotencyKey(intentId, baseKey, 'po');
+    const payout = await stripe.payouts.create(
+      {
+        amount: Math.round(Number(intent.amount) * 100),
+        currency: 'cad',
+        method: 'standard',
+        metadata: {
+          manna_intent_id: String(intentId),
+          manna_user_id: String(userId),
+          transfer_type: 'cash_out',
+        },
+      },
+      { idempotencyKey },
+    );
+
+    await sql`
+      UPDATE transfer_intents
+      SET status = 'processing',
+          provider_reference_id = ${payout.id},
+          updated_at = NOW()
+      WHERE id = ${intentId}
+    `;
+    await auditLog(userId, 'transfer_reconciled', {
+      intent_id: intentId, provider: 'canadian_eft',
+      outcome: 'recovered_by_replay', stripe_reference_id: payout.id,
+    });
+
+    return {
+      intent_id: intentId,
+      status: 'processing',
+      provider_reference_id: payout.id,
+      outcome: 'recovered_by_replay',
+    };
   }
 
   async cancelTransfer(intentId: number, userId: number): Promise<CancelResult> {

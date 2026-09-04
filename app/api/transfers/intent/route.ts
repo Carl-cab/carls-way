@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, auditLog } from '@/lib/auth';
-import { getTransferProvider, regionFromCountry } from '@/lib/transfers/router';
+import { getTransferProvider, regionFromCountry, resolveExecutionMode } from '@/lib/transfers/router';
 
 export async function POST(req: Request) {
   try {
@@ -58,7 +58,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: velocityResult.reason || 'Transfer limit exceeded' }, { status: 429 });
     }
 
-    const provider = getTransferProvider(region);
+    // Resolve execution mode from env flags (live only when explicitly enabled).
+    // The chosen provider persists this mode on the intent row, so the rest of
+    // the lifecycle (review/confirm) stays consistent even if flags change.
+    const mode = resolveExecutionMode(region);
+    const provider = getTransferProvider(region, mode);
     const result = await provider.createIntent(user.userId, bankAccountId, type as 'add_money' | 'cash_out', amount, currency);
 
     return NextResponse.json({ success: true, ...result }, { status: 201 });

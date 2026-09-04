@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
+import { createNotification } from '@/lib/notifications';
+import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
 
 export async function GET(
   _req: NextRequest,
@@ -98,17 +100,6 @@ export async function PATCH(
       return NextResponse.json({ error: velocityCheck.reason }, { status: 429 });
     }
 
-    // Balance check
-    const payerRows = await sql`SELECT balance_cad, balance_usd FROM users WHERE id = ${user.userId}`;
-    const payer = payerRows[0] as { balance_cad: number; balance_usd: number };
-    const payerBalance = payerCurrency === 'USD'
-      ? parseFloat(String(payer.balance_usd))
-      : parseFloat(String(payer.balance_cad));
-
-    if (payerBalance < numAmount) {
-      return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
-    }
-
     // Build FX quote if cross-border
     let receiverAmount = numAmount;
     let fxRate = 1.0;
@@ -123,29 +114,74 @@ export async function PATCH(
       estimatedSettlement = quote.estimatedSettlement;
     }
 
-    // Deduct from payer
-    if (payerCurrency === 'USD') {
-      await sql`UPDATE users SET balance_usd = balance_usd - ${numAmount} WHERE id = ${user.userId}`;
-    } else {
-      await sql`UPDATE users SET balance_cad = balance_cad - ${numAmount} WHERE id = ${user.userId}`;
+    // Atomically: debit payer (with balance guard), credit receiver, mark request completed.
+    try {
+      await sql.begin(async (tx) => {
+        const debited = payerCurrency === 'USD'
+          ? await tx`UPDATE users SET balance_usd = balance_usd - ${numAmount}
+                     WHERE id = ${user.userId} AND balance_usd >= ${numAmount} RETURNING id`
+          : await tx`UPDATE users SET balance_cad = balance_cad - ${numAmount}
+                     WHERE id = ${user.userId} AND balance_cad >= ${numAmount} RETURNING id`;
+        if (debited.length === 0) {
+          throw new Error('INSUFFICIENT_BALANCE');
+        }
+
+        if (receiverCurrency === 'USD') {
+          await tx`UPDATE users SET balance_usd = balance_usd + ${receiverAmount} WHERE id = ${transaction.receiver_id}`;
+        } else {
+          await tx`UPDATE users SET balance_cad = balance_cad + ${receiverAmount} WHERE id = ${transaction.receiver_id}`;
+        }
+
+        // Guard against double-accept: only transition if still pending
+        const updated = await tx`
+          UPDATE transactions SET
+            status = 'completed', type = 'payment',
+            fx_rate = ${fxRate}, fx_fee = ${fxFee},
+            sender_amount = ${numAmount}, receiver_amount = ${receiverAmount},
+            payment_rail = ${transaction.is_cross_border ? 'wire' : 'internal'},
+            estimated_settlement = ${estimatedSettlement ? estimatedSettlement.toISOString() : null}
+          WHERE id = ${transaction.id} AND status = 'pending'
+          RETURNING id
+        `;
+        if (updated.length === 0) {
+          throw new Error('ALREADY_PROCESSED');
+        }
+      });
+    } catch (txErr) {
+      if (txErr instanceof Error && txErr.message === 'INSUFFICIENT_BALANCE') {
+        return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
+      }
+      if (txErr instanceof Error && txErr.message === 'ALREADY_PROCESSED') {
+        return NextResponse.json({ error: 'Request already processed' }, { status: 409 });
+      }
+      throw txErr;
     }
 
-    // Credit receiver
-    if (receiverCurrency === 'USD') {
-      await sql`UPDATE users SET balance_usd = balance_usd + ${receiverAmount} WHERE id = ${transaction.receiver_id}`;
-    } else {
-      await sql`UPDATE users SET balance_cad = balance_cad + ${receiverAmount} WHERE id = ${transaction.receiver_id}`;
+    // Ledger entries for auditability (passive; non-blocking on failure)
+    try {
+      const requesterRows = await sql`SELECT username FROM users WHERE id = ${transaction.receiver_id}`;
+      const requesterUsername = (requesterRows[0]?.username as string) || 'user';
+      if (transaction.is_cross_border) {
+        const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${payerCurrency})`;
+        await createCrossBorderLedgerPair(
+          user.userId, payerCurrency, numAmount,
+          transaction.receiver_id, receiverCurrency, receiverAmount,
+          transaction.id,
+          {
+            senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency} converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
+            receiverDescription: `Request fulfilled by @${user.username}: received ${receiverAmount} ${receiverCurrency} (from ${numAmount} ${payerCurrency} ${fxDescription})`,
+          }
+        );
+      } else {
+        await createLedgerPair(user.userId, transaction.receiver_id, payerCurrency, numAmount, transaction.id, {
+          entryType: 'payment_sent',
+          senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency}`,
+          receiverDescription: `Request fulfilled by @${user.username}: received ${numAmount} ${payerCurrency}`,
+        });
+      }
+    } catch (ledgerErr) {
+      console.error('Ledger entry creation failed (non-blocking):', ledgerErr);
     }
-
-    await sql`
-      UPDATE transactions SET
-        status = 'completed', type = 'payment',
-        fx_rate = ${fxRate}, fx_fee = ${fxFee},
-        sender_amount = ${numAmount}, receiver_amount = ${receiverAmount},
-        payment_rail = ${transaction.is_cross_border ? 'wire' : 'internal'},
-        estimated_settlement = ${estimatedSettlement ? estimatedSettlement.toISOString() : null}
-      WHERE id = ${transaction.id}
-    `;
 
     await recordVelocity(user.userId, numAmount, payerCurrency);
     await auditLog(user.userId, 'request_accepted', {
@@ -154,9 +190,30 @@ export async function PATCH(
       currency: payerCurrency,
       isCrossBorder: transaction.is_cross_border,
     });
+
+    // Notify the requester that their request was paid
+    const acceptDisplayAmount = new Intl.NumberFormat('en-CA', {
+      style: 'currency', currency: receiverCurrency,
+    }).format(receiverAmount);
+    await createNotification({
+      userId: transaction.receiver_id,
+      type: 'payment_received',
+      title: 'Request paid',
+      message: `@${user.username} paid your request. You received ${acceptDisplayAmount}.`,
+      relatedEntityType: 'transaction',
+      relatedEntityId: transaction.id,
+    });
   } else {
-    await sql`UPDATE transactions SET status = 'declined' WHERE id = ${transaction.id}`;
+    await sql`UPDATE transactions SET status = 'declined' WHERE id = ${transaction.id} AND status = 'pending'`;
     await auditLog(user.userId, 'request_declined', { transactionId: transaction.id });
+    await createNotification({
+      userId: transaction.receiver_id,
+      type: 'payment_request',
+      title: 'Request declined',
+      message: `@${user.username} declined your money request.`,
+      relatedEntityType: 'transaction',
+      relatedEntityId: transaction.id,
+    });
   }
   return NextResponse.json({ success: true });
 }

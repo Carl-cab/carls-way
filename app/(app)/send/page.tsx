@@ -92,7 +92,7 @@ function SendForm() {
       <div className="flex gap-2 mb-4">
         {['pay', 'request'].map(t => (
           <button key={t} type="button" onClick={() => { update('type', t); setFxQuote(null); }}
-            className={`flex-1 py-2.5 rounded-lg text-sm font-semibold border transition ${form.type === t ? 'bg-red-700 text-white border-red-700' : 'border-gray-300 text-gray-600 hover:border-red-400'}`}>
+            className={`flex-1 py-2.5 rounded-lg text-sm font-semibold border transition ${form.type === t ? 'bg-blue-700 text-white border-blue-700' : 'border-gray-300 text-gray-600 hover:border-blue-400'}`}>
             {t === 'pay' ? '💸 Send' : '📥 Request'}
           </button>
         ))}
@@ -101,7 +101,7 @@ function SendForm() {
         {me && form.type === 'pay' && (
           <div className="mb-4 text-sm text-gray-500 flex justify-between">
             <span>Available balance</span>
-            <span className={`font-semibold ${insufficient ? 'text-red-600' : 'text-gray-800'}`}>
+            <span className={`font-semibold ${insufficient ? 'text-blue-600' : 'text-gray-800'}`}>
               {new Intl.NumberFormat(currency === 'CAD' ? 'en-CA' : 'en-US', { style: 'currency', currency }).format(balance)}
             </span>
           </div>
@@ -110,14 +110,14 @@ function SendForm() {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">{form.type === 'pay' ? 'To' : 'From'} (username)</label>
             <input type="text" value={form.receiverUsername} onChange={e => update('receiverUsername', e.target.value.replace('@', ''))} required
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500" placeholder="@username" />
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="@username" />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Amount ({currency})</label>
             <div className="relative">
               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">$</span>
               <input type="number" step="0.01" min="0.01" max="10000" value={form.amount} onChange={e => update('amount', e.target.value)} required
-                className="w-full border border-gray-300 rounded-lg pl-8 pr-16 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500" placeholder="0.00" />
+                className="w-full border border-gray-300 rounded-lg pl-8 pr-16 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="0.00" />
               <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">{currency}</span>
             </div>
           </div>
@@ -137,14 +137,14 @@ function SendForm() {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Note / Emoji</label>
             <input type="text" value={form.note} onChange={e => update('note', e.target.value)} maxLength={200}
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-500" placeholder="🍕 Pizza night, ☕ Coffee, 🏒 Game tickets…" />
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="🍕 Pizza night, ☕ Coffee, 🏒 Game tickets…" />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Privacy</label>
             <div className="flex gap-2">
               {['public', 'friends', 'private'].map(p => (
                 <button key={p} type="button" onClick={() => update('privacy', p)}
-                  className={`flex-1 py-2 rounded-lg text-sm font-medium border transition ${form.privacy === p ? 'bg-red-700 text-white border-red-700' : 'border-gray-300 text-gray-600 hover:border-red-400'}`}>
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium border transition ${form.privacy === p ? 'bg-blue-700 text-white border-blue-700' : 'border-gray-300 text-gray-600 hover:border-blue-400'}`}>
                   {p === 'public' ? '🌍 Public' : p === 'friends' ? '👥 Friends' : '🔒 Private'}
                 </button>
               ))}
@@ -154,7 +154,7 @@ function SendForm() {
           {error && <div className="bg-red-50 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>}
           {success && <div className="bg-green-50 text-green-700 px-4 py-2 rounded-lg text-sm">{success}</div>}
           <button type="submit" disabled={loading || insufficient}
-            className="w-full bg-red-700 hover:bg-red-800 text-white font-semibold py-3 rounded-lg transition disabled:opacity-60 text-lg">
+            className="w-full bg-blue-700 hover:bg-blue-800 text-white font-semibold py-3 rounded-lg transition disabled:opacity-60 text-lg">
             {loading ? (form.type === 'pay' ? 'Sending…' : 'Requesting…') : form.type === 'pay' ? `Send ${currency === 'CAD' ? '🍁' : '🦅'}` : `Request ${currency === 'CAD' ? '🍁' : '🦅'}`}
           </button>
         </form>

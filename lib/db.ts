@@ -2,6 +2,27 @@ import postgres from 'postgres';
 
 let _sql: ReturnType<typeof postgres> | null = null;
 
+/**
+ * Resolve the TLS mode for a connection string.
+ *
+ * TLS is required by default. It is relaxed only when the connection string
+ * explicitly asks with the standard libpq parameter `?sslmode=disable`, which is
+ * how a local or CI PostgreSQL instance without certificates is addressed.
+ * Absent, empty, malformed, or unrecognised values all resolve to 'require', so
+ * a typo cannot silently drop encryption.
+ *
+ * Exported for testing: this is a security-relevant default and is asserted in
+ * lib/__tests__/security-database.test.ts.
+ */
+export function resolveSslMode(connectionString: string): 'require' | false {
+  try {
+    const sslMode = new URL(connectionString).searchParams.get('sslmode');
+    return sslMode === 'disable' ? false : 'require';
+  } catch {
+    return 'require';
+  }
+}
+
 export function getSql() {
   if (!_sql) {
     const dbUrl = process.env.DATABASE_URL;
@@ -10,13 +31,16 @@ export function getSql() {
     }
     // Parse URL manually so special characters in the password don't break URL parsing
     const url = new URL(dbUrl);
+
+    const ssl = resolveSslMode(dbUrl);
+
     _sql = postgres({
       host: url.hostname,
       port: parseInt(url.port) || 5432,
       database: url.pathname.replace(/^\//, ''),
       username: decodeURIComponent(url.username),
       password: decodeURIComponent(url.password),
-      ssl: 'require',
+      ssl,
       max: 5,
       idle_timeout: 30,
       connect_timeout: 10,
@@ -125,6 +149,12 @@ export async function initializeSchema() {
       provider_name TEXT NOT NULL DEFAULT 'sandbox_ca',
       execution_mode TEXT NOT NULL DEFAULT 'sandbox',
       provider_reference_id TEXT,
+      -- Plaid returns an authorization before the transfer is created, and that
+      -- authorization id doubles as the provider's idempotency identifier
+      -- (plaid SDK 42.x: TransferCreateRequest.idempotency_key is deprecated in
+      -- its favour). Persisting it BEFORE calling transferCreate is what makes a
+      -- provider-success / database-failure window recoverable.
+      provider_authorization_id TEXT,
       failure_reason TEXT,
       consent_confirmed_at TIMESTAMPTZ,
       idempotency_key TEXT,
@@ -168,6 +198,112 @@ export async function initializeSchema() {
       UNIQUE(provider, provider_event_id)
     )
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS splits (
+      id SERIAL PRIMARY KEY,
+      creator_id INTEGER NOT NULL REFERENCES users(id),
+      total_amount NUMERIC(12,2) NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'CAD',
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS split_participants (
+      id SERIAL PRIMARY KEY,
+      split_id INTEGER NOT NULL REFERENCES splits(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount_owed NUMERIC(12,2) NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      transaction_id INTEGER REFERENCES transactions(id),
+      paid_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(split_id, user_id)
+    )
+  `;
+  // Rolling per-user transaction volume, read by checkVelocityLimit() and
+  // written by recordVelocity() / reverseVelocity() in lib/auth.ts.
+  await sql`
+    CREATE TABLE IF NOT EXISTS velocity_checks (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      window_type TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      transaction_count INTEGER NOT NULL DEFAULT 0,
+      total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'CAD',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  // Partial uniqueness: exactly one accumulating row per window, while the
+  // compensating rows reverseVelocity() appends (transaction_count < 0) stay
+  // append-only. recordVelocity()'s upsert targets this index explicitly.
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
+      ON velocity_checks (user_id, window_type, window_start, currency)
+      WHERE transaction_count >= 0
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
+      ON velocity_checks (user_id, window_type, currency, window_start)
+  `;
+  // Customer-facing audit trail written by auditLog() in lib/auth.ts. That
+  // helper swallows its own errors, so while this table was missing every
+  // audit write across the app silently did nothing.
+  await sql`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id),
+      action TEXT NOT NULL,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action_time ON audit_logs(action, created_at)`;
+  // FX rate cache read and written by getFxRate() in lib/fx.ts. That read is
+  // not guarded, so a missing table failed every cross-border quote outright.
+  await sql`
+    CREATE TABLE IF NOT EXISTS fx_rates (
+      id SERIAL PRIMARY KEY,
+      from_currency TEXT NOT NULL,
+      to_currency TEXT NOT NULL,
+      rate NUMERIC(18,8) NOT NULL,
+      provider TEXT NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (from_currency, to_currency)
+    )
+  `;
+}
+
+/**
+ * True when this database has no account on it yet.
+ *
+ * This is the bootstrap condition for /api/migrate. A brand-new deployment
+ * cannot authenticate anyone — registration needs the `users` table, which
+ * only the migration creates — so the migration has to be reachable exactly
+ * once, before the first account exists, and never again.
+ *
+ * Deliberately conservative: anything unexpected (an unreadable table, a
+ * failed query) reports false, which keeps the endpoint closed. The window
+ * shuts permanently the moment one account is registered.
+ */
+export async function isUninitializedDatabase(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<boolean> {
+  try {
+    const present = await sql`SELECT to_regclass('public.users') IS NOT NULL AS exists`;
+    if (!present[0]?.exists) return true;
+
+    const rows = await sql`SELECT EXISTS (SELECT 1 FROM users) AS any_user`;
+    return rows[0]?.any_user === false;
+  } catch (err) {
+    console.error('Bootstrap check failed; treating database as initialized.', err);
+    return false;
+  }
 }
 
 export default getSql;

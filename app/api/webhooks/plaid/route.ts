@@ -200,7 +200,8 @@ async function handleItemPendingExpiration(payload: PlaidWebhookPayload) {
 
 async function handleTransferEventStatusUpdate(
   payload: PlaidWebhookPayload,
-  webhookId: string
+  webhookId: string,
+  correlationId: string
 ) {
   // Phase B3.1/B3.2a/B3.2b: Handle transfer settlement events
   // Extract transfer_id from payload data
@@ -228,8 +229,9 @@ async function handleTransferEventStatusUpdate(
     };
 
     // B2: Get settlement plan
+    // Milestone 2: Pass correlation ID through settlement pipeline
     const orchestrator = new SettlementOrchestrator();
-    const plan = await orchestrator.orchestrateSettlement(normalizedEvent);
+    const plan = await orchestrator.orchestrateSettlement(normalizedEvent, correlationId);
 
     // B3.1: Execute status transition
     const executor = new SettlementExecutor();
@@ -311,6 +313,10 @@ interface PlaidWebhookPayload {
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // Milestone 2: Extract or generate correlation ID for request tracing
+  const { extractOrGenerateCorrelationId } = await import('@/lib/correlation');
+  const correlationId = extractOrGenerateCorrelationId(req);
+
   // 1. Read raw body — required for signature verification
   const rawBody = await req.text();
 
@@ -344,16 +350,18 @@ export async function POST(req: NextRequest) {
   try {
     // Attempt to insert — the UNIQUE(provider, provider_event_id) constraint
     // makes this naturally idempotent: duplicate webhooks are silently ignored.
+    // Milestone 2: Include correlation_id for request tracing
     const insertResult = await sql`
       INSERT INTO provider_webhook_events
-        (provider, provider_event_id, event_type, related_provider_reference, raw_payload, processing_status)
+        (provider, provider_event_id, event_type, related_provider_reference, raw_payload, processing_status, correlation_id)
       VALUES (
         'plaid',
         ${webhookId},
         ${eventType},
         ${payload.item_id ?? null},
         ${JSON.stringify(payload)},
-        'received'
+        'received',
+        ${correlationId}
       )
       ON CONFLICT (provider, provider_event_id) DO NOTHING
       RETURNING id
@@ -376,7 +384,7 @@ export async function POST(req: NextRequest) {
       } else if (webhook_type === 'ITEM' && webhook_code === 'PENDING_EXPIRATION') {
         await handleItemPendingExpiration(payload);
       } else if (webhook_type === 'TRANSFER' && webhook_code === 'STATUS_UPDATE') {
-        await handleTransferEventStatusUpdate(payload, webhookId);
+        await handleTransferEventStatusUpdate(payload, webhookId, correlationId);
       } else {
         // Unhandled event type — log and acknowledge
         console.log(`[plaid-webhook] Unhandled event: ${eventType}`);
