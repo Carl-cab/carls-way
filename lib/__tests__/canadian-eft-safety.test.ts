@@ -246,9 +246,24 @@ describe('Canadian ACSS transfer safety', () => {
 
       const intent = await readIntent(intentId);
       expect(intent.status).toBe('processing');
-      // The transactional claim serialises the two callers.
+
+      // The invariant that matters is one Stripe object, so the bank is
+      // debited once.
       expect(stripeObjects.size).toBe(1);
-      expect(stripeCalls.paymentIntents.length).toBeLessThanOrEqual(1);
+
+      // The transactional claim serialises the two claims, but it does not
+      // stop the second caller from reaching Stripe: whoever loses the race
+      // reads status 'submitting' with no reference recorded, which is
+      // indistinguishable from resuming after a crash between the Stripe call
+      // and the local write — and that case must retry, or a submitted
+      // transfer would be stranded. So a second call is expected, and what
+      // guarantees a single debit is that every call carries the same
+      // idempotency key, derived from the intent id and persisted before any
+      // Stripe call. Asserting at most one call instead asserted the timing of
+      // the race, which is why this passed locally and failed on CI.
+      expect(stripeCalls.paymentIntents.length).toBeGreaterThanOrEqual(1);
+      const keys = new Set(stripeCalls.paymentIntents.map((c) => c.idempotencyKey));
+      expect(keys).toEqual(new Set([`manna_intent_${intentId}:pi`]));
     });
   });
 
