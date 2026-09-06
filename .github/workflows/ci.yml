@@ -125,6 +125,15 @@ jobs:
         timeout-minutes: 6
         run: |
           set -uo pipefail
+          # Distinguish a broken setup from a registry outage. `npm audit`
+          # without a lockfile exits non-zero with no JSON, which is exactly
+          # what an unreachable service looks like to the check below — so a
+          # failed generate step would otherwise leave this gate silently
+          # passing forever. Fail loudly instead.
+          if [ ! -f package-lock.json ]; then
+            echo "::error::No package-lock.json to audit — the generate step did not produce one. This is a broken audit setup, not a registry outage."
+            exit 1
+          fi
           for attempt in 1 2 3; do
             if timeout 90 npm audit --json > audit.json 2> audit.err; then
               echo "Audit clean."
