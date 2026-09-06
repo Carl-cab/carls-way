@@ -22,6 +22,11 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./', import.meta.url)),
+      // `server-only` throws on import outside a React Server Component, which
+      // is exactly its job in the application and useless noise here. Stubbing
+      // it lets the admin auth primitives be tested directly while the real
+      // package still keeps them out of any client bundle at build time.
+      'server-only': fileURLToPath(new URL('./lib/__tests__/helpers/server-only-stub.ts', import.meta.url)),
     },
   },
 });

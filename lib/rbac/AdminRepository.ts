@@ -395,11 +395,71 @@ export class AdminRepository extends BaseRepository {
    */
   async countAdmins(): Promise<number> {
     return this.executeQuery(async () => {
-      const result = await this.sql<{ count: number }[]>`
+      const result = await this.sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM admin_users
       `;
-      return result[0]?.count || 0;
+      // postgres.js returns COUNT(*) as a string, so `?? 0` alone yields "0"
+      // rather than 0 and `=== 0` is false for an empty table. The bootstrap
+      // gate refuses to run when any administrator exists, so this coercion is
+      // load-bearing for a security decision, not cosmetic.
+      return Number(result[0]?.count ?? 0);
     }, 'AdminRepository.countAdmins');
+  }
+
+  /**
+   * Record a failed administrator login and apply the lockout when the
+   * threshold is crossed.
+   *
+   * @param adminUserId Administrator whose attempt failed
+   * @param attempts New cumulative failure count
+   * @param lockedUntil ISO timestamp to lock until, or null to leave unlocked
+   */
+  async recordFailedLogin(
+    adminUserId: number,
+    attempts: number,
+    lockedUntil: string | null,
+  ): Promise<void> {
+    return this.executeQuery(async () => {
+      await this.sql`
+        UPDATE admin_users
+        SET failed_login_attempts = ${attempts},
+            locked_until = ${lockedUntil},
+            updated_at = NOW()
+        WHERE id = ${adminUserId}
+      `;
+    }, 'AdminRepository.recordFailedLogin');
+  }
+
+  /**
+   * Clear the failure counter and lock after a successful login, and stamp
+   * last_login_at.
+   */
+  async recordSuccessfulLogin(adminUserId: number): Promise<void> {
+    return this.executeQuery(async () => {
+      await this.sql`
+        UPDATE admin_users
+        SET failed_login_attempts = 0,
+            locked_until = NULL,
+            last_login_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ${adminUserId}
+      `;
+    }, 'AdminRepository.recordSuccessfulLogin');
+  }
+
+  /**
+   * Delete every session belonging to an administrator.
+   *
+   * Used when an account is locked or deactivated: leaving live sessions behind
+   * would mean the lock only stops new logins while existing cookies keep
+   * working.
+   */
+  async deleteSessionsForAdmin(adminUserId: number): Promise<void> {
+    return this.executeQuery(async () => {
+      await this.sql`
+        DELETE FROM admin_sessions WHERE admin_user_id = ${adminUserId}
+      `;
+    }, 'AdminRepository.deleteSessionsForAdmin');
   }
 
   /**
