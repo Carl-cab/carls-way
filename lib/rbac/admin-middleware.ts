@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { getAdminRepository } from './AdminRepository';
 import type { AdminContext, AdminUser, Permission, AdminRole } from './types';
 import { ROLE_PERMISSIONS, getFieldsToMask } from './types';
+import { parseSessionCookie, sessionTokenMatches } from './admin-auth';
 
 /**
  * AsyncLocalStorage for admin context (similar to request context).
@@ -56,19 +57,27 @@ export function getCurrentPermissions(): Permission[] {
  * @returns Admin context or null if invalid
  */
 /**
- * Resolve an admin user from a session id.
+ * Resolve an admin user from an `admin_session` cookie value.
  *
  * This is the single source of truth for "is this session currently entitled to
  * act as an admin". Both the API middleware and the server-side page guard call
  * it, so the two enforcement points cannot drift apart.
  *
- * Fails closed: any missing session, inactive account, active lock, or
- * infrastructure error yields null.
+ * The argument is the whole cookie, `<sessionId>.<token>` — not a bare session
+ * id. Verification looks the row up by id and then checks the token against the
+ * stored hash. Previously the lookup was by id alone and `token_hash` was
+ * written but never read, which made the id in the cookie the entire credential
+ * and every stored row a usable admin session for anyone who could read the
+ * table. See lib/rbac/admin-auth.ts.
+ *
+ * Fails closed: a malformed cookie, missing session, wrong token, inactive
+ * account, active lock, or infrastructure error all yield null.
  */
 export async function resolveAdminBySessionId(
-  sessionId: string | undefined | null,
+  cookieValue: string | undefined | null,
 ): Promise<AdminUser | null> {
-  if (!sessionId) {
+  const credential = parseSessionCookie(cookieValue);
+  if (!credential) {
     return null;
   }
 
@@ -76,8 +85,14 @@ export async function resolveAdminBySessionId(
     const adminRepo = getAdminRepository();
 
     // Verify session exists and is not expired
-    const session = await adminRepo.findSession(sessionId);
+    const session = await adminRepo.findSession(credential.sessionId);
     if (!session) {
+      return null;
+    }
+
+    // Verify the presented token against the stored hash. Without this the
+    // session id alone would be sufficient to authenticate.
+    if (!sessionTokenMatches(credential.token, session.token_hash)) {
       return null;
     }
 
@@ -100,17 +115,19 @@ export async function resolveAdminBySessionId(
 }
 
 async function verifyAdminSession(req: NextRequest): Promise<AdminContext | null> {
-  // Look for admin session in cookie or Authorization header
-  const sessionId =
+  // The credential is the whole `<sessionId>.<token>` value, from the cookie or
+  // a bearer header.
+  const cookieValue =
     req.cookies.get('admin_session')?.value ||
     req.headers.get('authorization')?.replace('Bearer ', '');
 
-  if (!sessionId) {
+  const credential = parseSessionCookie(cookieValue);
+  if (!credential) {
     return null;
   }
 
   try {
-    const adminUser = await resolveAdminBySessionId(sessionId);
+    const adminUser = await resolveAdminBySessionId(cookieValue);
     if (!adminUser) {
       return null;
     }
@@ -120,12 +137,15 @@ async function verifyAdminSession(req: NextRequest): Promise<AdminContext | null
     // Get permissions for this role
     const permissions = ROLE_PERMISSIONS[adminUser.role] || [];
 
-    // Update session activity
-    await adminRepo.updateSessionActivity(sessionId);
+    // Update session activity. Keyed by the id half only — the token never
+    // needs to reach the database again after verification.
+    await adminRepo.updateSessionActivity(credential.sessionId);
 
     return {
       adminUser,
-      sessionId,
+      // Downstream consumers (audit records) get the lookup key, never the
+      // secret, so a leaked audit row cannot be replayed as a session.
+      sessionId: credential.sessionId,
       permissions,
       correlationId: req.headers.get('x-correlation-id') || undefined,
       sourceIp: req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown',

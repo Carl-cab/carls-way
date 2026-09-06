@@ -156,10 +156,30 @@ describe('Admin authorization boundary', () => {
   });
 
   describe('API surface cannot be bypassed', () => {
-    const routeFiles = collectRouteFiles(ADMIN_API_DIR);
+    // The authentication endpoints are the one exemption, and it is enumerated
+    // rather than pattern-matched so that adding a route under auth/ does not
+    // silently inherit it. An endpoint that issues a session cannot itself
+    // require one; each is asserted separately below for what it does instead.
+    const PRE_AUTH_ROUTES = [
+      'auth/login/route.ts',
+      'auth/logout/route.ts',
+      'auth/session/route.ts',
+    ];
+
+    const allRouteFiles = collectRouteFiles(ADMIN_API_DIR);
+    const routeFiles = allRouteFiles.filter(
+      (f) => !PRE_AUTH_ROUTES.some((p) => f.endsWith(p)),
+    );
 
     it('finds the admin API routes', () => {
       expect(routeFiles.length).toBeGreaterThan(0);
+    });
+
+    it('exempts only the three authentication endpoints', () => {
+      const exempt = allRouteFiles
+        .filter((f) => PRE_AUTH_ROUTES.some((p) => f.endsWith(p)))
+        .map((f) => f.replace(`${REPO_ROOT}/app/api/admin/`, ''));
+      expect(exempt.sort()).toEqual([...PRE_AUTH_ROUTES].sort());
     });
 
     it.each(routeFiles.map((f) => [f.replace(`${REPO_ROOT}/`, ''), f]))(
@@ -184,6 +204,48 @@ describe('Admin authorization boundary', () => {
       },
     );
 
+    it('login is throttled and does not disclose whether an account exists', () => {
+      const source = readFileSync(join(ADMIN_API_DIR, 'auth/login/route.ts'), 'utf8');
+      // Rate limited before any database or bcrypt work.
+      expect(source).toContain('checkRateLimit');
+      // One message for every rejection: unknown address, wrong password,
+      // locked, and inactive must be indistinguishable to the caller.
+      expect(source).toContain('GENERIC_FAILURE');
+      // Check the responses themselves rather than the prose: every rejection
+      // body must be the one shared constant, or the throttle/500 messages.
+      // Matching on comment text instead would flag the explanation of why
+      // this rule exists.
+      const errorBodies = [...source.matchAll(/\{\s*error:\s*([^}]+?)\s*\}/g)].map(
+        (m) => m[1].trim(),
+      );
+      expect(errorBodies.length).toBeGreaterThan(0);
+      for (const body of errorBodies) {
+        expect([
+          'GENERIC_FAILURE',
+          "'Too many attempts. Please try again later.'",
+          "'Internal server error'",
+        ]).toContain(body);
+      }
+      // Verification runs even with no account, so timing does not answer it.
+      expect(source).toContain('verifyAdminPassword');
+      // A locked or deactivated administrator cannot obtain a session.
+      expect(source).toContain('locked_until');
+      expect(source).toContain("status !== 'active'");
+    });
+
+    it('logout destroys the server-side session, not just the cookie', () => {
+      const source = readFileSync(join(ADMIN_API_DIR, 'auth/logout/route.ts'), 'utf8');
+      // Clearing the cookie alone would leave a working credential behind for
+      // anyone who had copied it.
+      expect(source).toContain('deleteSession');
+    });
+
+    it('the session endpoint resolves through the shared server guard', () => {
+      const source = readFileSync(join(ADMIN_API_DIR, 'auth/session/route.ts'), 'utf8');
+      expect(source).toContain('getServerAdmin');
+      expect(source).toContain('401');
+    });
+
     it('the privileged ledger mutation additionally requires a permission', () => {
       const source = readFileSync(
         join(ADMIN_API_DIR, 'ledger/backfill-opening-balances/route.ts'),
@@ -197,7 +259,14 @@ describe('Admin authorization boundary', () => {
   });
 
   describe('admin pages are guarded server-side', () => {
-    const layout = readFileSync(join(REPO_ROOT, 'app/admin/layout.tsx'), 'utf8');
+    // The console lives in the (console) route group so that the sign-in page
+    // can sit at /admin/login without this guard above it — a layout that
+    // notFound()s every anonymous caller would otherwise make login
+    // unreachable for the people who need it.
+    const layout = readFileSync(
+      join(REPO_ROOT, 'app/admin/(console)/layout.tsx'),
+      'utf8',
+    );
 
     it('resolves the admin on the server before rendering the console', () => {
       expect(layout).toContain('getServerAdmin');
@@ -207,6 +276,16 @@ describe('Admin authorization boundary', () => {
     it('is a server component (no client directive)', () => {
       // A 'use client' layout could not perform a server-side authorization check.
       expect(layout).not.toContain("'use client'");
+    });
+
+    it('keeps every console page inside the guarded route group', () => {
+      // A page added directly under app/admin/ would render with no server-side
+      // authorization above it. Only the sign-in page is allowed to live there.
+      const entries = readdirSync(join(REPO_ROOT, 'app/admin'), { withFileTypes: true });
+      const outsideGroup = entries
+        .filter((e) => e.name !== '(console)' && e.name !== 'login')
+        .map((e) => e.name);
+      expect(outsideGroup).toEqual([]);
     });
 
     it('shares one session resolver with the API guard, preventing drift', () => {

@@ -41,13 +41,27 @@ import { verifyToken } from '@/lib/auth';
 const PUBLIC_PATHS = ['/login', '/register'];
 const AUTH_PATHS = ['/feed', '/send', '/request', '/history', '/profile', '/friends', '/transfers'];
 const ADMIN_PATH = '/admin';
+const ADMIN_LOGIN_PATH = '/admin/login';
 
 export function proxy(request: NextRequest) {
   const token = request.cookies.get('manna-token')?.value;
   const { pathname } = request.nextUrl;
 
+  // The administrator sign-in page is necessarily reachable without a session,
+  // or nobody could ever obtain one. It renders outside the console's route
+  // group, so no guarded layout sits above it.
+  //
+  // This does disclose that an admin console exists to anyone who guesses the
+  // path, which the 404 below otherwise avoids. That is unavoidable for a
+  // browser-based login and is bounded: the page holds no data, the endpoint
+  // behind it returns one generic failure for every rejection, and it is rate
+  // limited per client.
+  if (pathname === ADMIN_LOGIN_PATH) {
+    return NextResponse.next();
+  }
+
   // Admin console: gate on the admin credential, never the customer one.
-  // Authoritative verification happens server-side in the admin layout.
+  // Authoritative verification happens server-side in the console layout.
   if (pathname === ADMIN_PATH || pathname.startsWith(`${ADMIN_PATH}/`)) {
     const adminSession = request.cookies.get('admin_session')?.value;
     if (!adminSession) {
