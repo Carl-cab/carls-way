@@ -97,21 +97,55 @@ jobs:
           node-version: 20
 
       # The rest of this workflow installs with pnpm, which is what Vercel
-      # runs. The audit is the one exception, because `pnpm audit` queries
-      # registry.npmjs.org/-/npm/v1/security/audits/quick, which returned
-      # socket timeouts and a 500 on two consecutive runs here and hung until
-      # the job timed out. `npm audit` queries the bulk advisories endpoint
-      # instead, which answered in about twenty seconds on these same runners.
-      #
-      # No lockfile is committed for npm any more, so one is generated in the
-      # runner's workspace. It is never committed. Resolution is from the
-      # ranges in package.json, so it can differ slightly from what pnpm-lock
-      # pins; for an advisory gate that is an acceptable approximation, and a
-      # gate that reports is worth more than one that cannot run.
+      # runs. The audit is the one exception: it needs an npm-shaped tree, and
+      # no npm lockfile is committed any more, so one is generated here in the
+      # runner and never committed. Resolution comes from the ranges in
+      # package.json rather than pnpm-lock's pins — an acceptable
+      # approximation for an advisory gate.
       - name: Generate an npm lockfile for auditing only
         run: npm install --package-lock-only --no-audit
-      # Advisory for now: fails the job only on high/critical advisories so a
-      # newly published low-severity advisory cannot block an unrelated fix.
-      - name: npm audit (high and above)
-        timeout-minutes: 5
-        run: npm audit --audit-level=high
+
+      # registry.npmjs.org's advisory endpoints are not dependable. pnpm's
+      # (audits/quick) returned socket timeouts and a 500 and hung to the job
+      # timeout; npm's (advisories/bulk) answered in 35s on one run and then
+      # hung past five minutes on the next, three minutes later. Both clients
+      # are affected, intermittently.
+      #
+      # So this step separates two outcomes that a bare `npm audit` conflates:
+      #
+      #   the audit ran and found high/critical advisories  -> fail the build
+      #   the audit could not reach the service             -> warn, but pass
+      #
+      # A registry outage is an availability signal, not a security one, and
+      # failing every push on it would train people to ignore a red gate. The
+      # gate itself is unchanged: still high and above, nothing suppressed,
+      # and a real finding still fails. GitHub's Dependabot alerts are the
+      # durable backstop, since they do not depend on this endpoint at CI time.
+      - name: npm audit (high and above, tolerant of registry outages)
+        timeout-minutes: 6
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if timeout 90 npm audit --json > audit.json 2> audit.err; then
+              echo "Audit clean."
+              exit 0
+            fi
+            # A non-zero exit means either findings or failure to run. Valid
+            # JSON with a vulnerabilities block means the audit actually ran.
+            if jq -e '.metadata.vulnerabilities' audit.json > /dev/null 2>&1; then
+              high=$(jq '.metadata.vulnerabilities.high // 0' audit.json)
+              crit=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
+              echo "Audit ran: ${crit} critical, ${high} high."
+              if [ "$high" -gt 0 ] || [ "$crit" -gt 0 ]; then
+                npm audit --audit-level=high || true
+                echo "::error::Dependency audit found ${crit} critical and ${high} high advisories."
+                exit 1
+              fi
+              echo "No high or critical advisories."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: advisory service did not answer."
+            sed -n '1,5p' audit.err || true
+            if [ "$attempt" -lt 3 ]; then sleep 20; fi
+          done
+          echo "::warning::Dependency audit skipped — registry.npmjs.org's advisory service did not respond after three attempts. This is an availability failure, not a clean bill of health. Check Dependabot alerts."

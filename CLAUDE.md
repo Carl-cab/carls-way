@@ -64,7 +64,10 @@ Client (React 19)
 
 **TypeScript** is used throughout. All new files must be `.ts` or `.tsx`. Avoid `any` types; define interfaces for all API request and response shapes.
 
-**Styling** uses Tailwind CSS utility classes exclusively. Do not write custom CSS outside of `app/globals.css`. The design language uses `red-700` as the primary brand color.
+**Styling** uses Tailwind CSS utility classes exclusively. Do not write custom CSS outside of `app/globals.css`. The design language uses `blue-700` as the primary brand color. Red is
+reserved for semantic meaning only — errors, failed and returned transfer
+states, insufficient-balance warnings — so a red element should mean
+something is wrong, never merely that it is prominent.
 
 **Components** are Server Components by default. Add `'use client'` only when React hooks (`useState`, `useEffect`, etc.) or browser event listeners are required.
 
@@ -122,7 +125,14 @@ yarn lockfile back.
 
 After deploying, call `GET /api/migrate` once (authenticated) to apply the migration to production.
 
-**Tests:** `npm test` (vitest) runs unit tests in `lib/__tests__`. As of Release 0.95 Phase 1 these are 83 pass / 53 fail; every failure is in admin RBAC/audit/repository/correlation code and is a pre-existing defect inherited from the feature branch — no money-loop test fails. Also available: `npm run typecheck`, `npm run lint`.
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. As of
+Release 0.95 all 398 pass, and the suite is expected to stay fully green.
+Several files run against a real PostgreSQL instance rather than a mock,
+because the defects they cover were mismatches between SQL in the app and the
+actual schema — exactly what a hand-written fake cannot catch. Set
+`DATABASE_URL` to a scratch database before running them. Also available:
+`pnpm run typecheck` and `pnpm run lint` (0 errors; ~33 unused-variable
+warnings are tolerated).
 
 ---
 
@@ -136,8 +146,11 @@ All previously tracked issues (request acceptance legacy balance, Plaid plaintex
 
 Transfers use a provider abstraction in `lib/transfers/`. All providers implement `TransferProvider` (see `lib/transfers/types.ts`). Provider routing is in `lib/transfers/router.ts`:
 
-- US users (`country = 'US'`) → `SandboxUSProvider` (future: `PlaidTransferProvider`)
-- CA users (`country = 'CA'`) → `SandboxCAProvider` (future: `CanadianEFTProvider`)
+- US users (`country = 'US'`) → `SandboxUSProvider`, or `PlaidTransferProvider` when `PLAID_TRANSFER_LIVE` is set
+- CA users (`country = 'CA'`) → `SandboxCAProvider`, or `CanadianEFTProvider` when `CA_EFT_LIVE` is set
+
+Both live providers are implemented and both flags default off. Selection is
+made only in `lib/providers/TransferProviderFactory.ts`.
 
 **Transfer flow (3 steps):**
 1. `POST /api/transfers/intent` — creates `status='draft'`, routes to correct provider
@@ -152,17 +165,34 @@ Transfers use a provider abstraction in `lib/transfers/`. All providers implemen
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
 
-**To add a live provider:** Create `lib/transfers/plaid-transfer.ts` implementing `TransferProvider`, swap it into `router.ts` behind an env-gated condition. The interface and API routes do not change.
+**To add a live provider:** implement `TransferProvider` and select it from
+`TransferProviderFactory` behind an env-gated condition. The interface and API
+routes do not change.
+
+**Live execution safety.** Both live providers persist a stable idempotency
+key derived from the intent id *before* calling the provider, and claim the
+intent inside a transaction with `SELECT ... FOR UPDATE`. The lock serialises
+the claim; it is the idempotency key, not the lock, that guarantees a single
+debit — a caller that finds `status='submitting'` with no reference recorded
+deliberately retries, because that state is indistinguishable from a crash
+between the provider call and the local write.
 
 ## Current Priorities
 
 The following tasks are ordered by business impact and should be worked in sequence:
 
-1. **Run `/api/migrate`** — Apply new `transfer_intents` columns (`provider_region`, `provider_name`, `execution_mode`, `consent_confirmed_at`, `idempotency_key`, `bank_account_id`) to production
+1. **Run `/api/migrate` against production** — outstanding since the Release
+   0.95 merge. It creates `velocity_checks`, `audit_logs` and `fx_rates`,
+   which application code reads and writes but which no earlier migration
+   created. Until it runs, sends return 500 without `velocity_checks` and
+   every cross-border quote fails without `fx_rates`, since that read is
+   unguarded. All statements are additive and idempotent.
 2. **Validate 3-step transfer flow in production** — US and CA user paths through intent → review → confirm
 3. **KYC live test** — Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL` in Vercel; register Stripe webhook
-4. **Implement PlaidTransferProvider** — US live ACH debit/credit (after Plaid products updated to include Transfer)
-5. **Implement CanadianEFTProvider** — CA live EFT integration
+4. **Enable `PlaidTransferProvider`** — implemented; needs Plaid products
+   updated to include Transfer, then `PLAID_TRANSFER_LIVE` set
+5. **Enable `CanadianEFTProvider`** — implemented; needs live Stripe ACSS
+   credentials, then `CA_EFT_LIVE` set
 
 ---
 
@@ -170,13 +200,13 @@ The following tasks are ordered by business impact and should be worked in seque
 
 ```bash
 # Start local dev server
-npm run dev
+pnpm dev
 
 # Build for production (also runs by Vercel on deploy)
-npm run build
+pnpm run build
 
 # Lint the codebase
-npm run lint
+pnpm run lint
 
 # Run schema migration on production (call this after deploying schema changes)
 curl -b <auth-cookie> https://carloscab74.vercel.app/api/migrate
