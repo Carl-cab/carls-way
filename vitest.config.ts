@@ -18,6 +18,9 @@ export default defineConfig({
     environment: 'node',
     include: ['lib/__tests__/**/*.test.ts'],
     setupFiles: ['./vitest.setup.ts'],
+    // Several integration tests share and truncate the same PostgreSQL schema.
+    // Running files in parallel causes teardown/setup races and catalog DDL races.
+    fileParallelism: false,
   },
   resolve: {
     alias: {

@@ -38,7 +38,8 @@ afterAll(async () => {
   if (scratch) await scratch.end();
   await admin.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH_DB}`);
   await admin.end();
-  await sql`DELETE FROM audit_logs WHERE user_id = ${USER_ID}`;
+  // This test creates no audit-log rows. Do not assume another test worker
+  // has already initialized audit_logs in the shared CI database.
   await sql`DELETE FROM users WHERE id = ${USER_ID}`;
 }, 60000);
 

@@ -51,8 +51,15 @@ export function getSql() {
 }
 
 export async function initializeSchema() {
-  const sql = getSql();
-  await sql`
+  const db = getSql();
+
+  // PostgreSQL's CREATE TABLE IF NOT EXISTS is not race-safe when multiple
+  // workers attempt the first catalog write at the same instant. Keep every
+  // DDL statement on one transaction-scoped advisory lock so test workers and
+  // independent cold starts initialize the shared schema deterministically.
+  await db.begin(async (sql) => {
+    await sql`SELECT pg_advisory_xact_lock(1760304512)`;
+    await sql`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -266,17 +273,18 @@ export async function initializeSchema() {
   await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action_time ON audit_logs(action, created_at)`;
   // FX rate cache read and written by getFxRate() in lib/fx.ts. That read is
   // not guarded, so a missing table failed every cross-border quote outright.
-  await sql`
-    CREATE TABLE IF NOT EXISTS fx_rates (
-      id SERIAL PRIMARY KEY,
-      from_currency TEXT NOT NULL,
-      to_currency TEXT NOT NULL,
-      rate NUMERIC(18,8) NOT NULL,
-      provider TEXT NOT NULL,
-      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (from_currency, to_currency)
-    )
-  `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS fx_rates (
+        id SERIAL PRIMARY KEY,
+        from_currency TEXT NOT NULL,
+        to_currency TEXT NOT NULL,
+        rate NUMERIC(18,8) NOT NULL,
+        provider TEXT NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (from_currency, to_currency)
+      )
+    `;
+  });
 }
 
 /**
