@@ -1,8 +1,8 @@
 /**
- * Admin Webhook Service
+ * Read-only access to provider webhook event processing for the Operations Console.
  *
- * Read-only access to webhook event processing for investigation.
- * Used by Operations Console for webhook debugging and tracing.
+ * Provider webhooks are persisted in `provider_webhook_events`; this service projects
+ * that canonical table into the console's historical webhook response contract.
  */
 
 import { checkPermission } from '@/lib/rbac';
@@ -14,12 +14,8 @@ export interface AdminWebhookDTO {
   event_id: string;
   event_type: string;
   status: string;
-  related_resource_id?: number;
-  related_resource_type?: string;
-  http_status_code?: number;
   processing_attempts: number;
   error_message?: string;
-  next_retry_at?: string;
   correlation_id?: string;
   created_at: string;
   updated_at: string;
@@ -27,7 +23,7 @@ export interface AdminWebhookDTO {
 
 export interface AdminWebhookListResponse {
   webhooks: AdminWebhookDTO[];
-  total_count: number;
+  total_count: number | string;
   page: number;
   page_size: number;
 }
@@ -36,23 +32,38 @@ export interface WebhookSearchFilters {
   provider?: string;
   eventType?: string;
   status?: string;
-  relatedResourceType?: string;
+  correlationId?: string;
   startDate?: Date;
   endDate?: Date;
-  correlationId?: string;
 }
 
-/**
- * Raw row shape returned by this service's queries. The SELECTs project
- * exactly the AdminWebhookDTO columns, so the row and the DTO share a shape.
- */
-type AdminWebhookRow = AdminWebhookDTO;
+type AdminWebhookRow = {
+  id: number;
+  provider: string;
+  event_id: string;
+  event_type: string;
+  status: string;
+  processing_attempts: number;
+  error_message: string | null;
+  correlation_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const eventProjection = `
+  id,
+  provider,
+  provider_event_id AS event_id,
+  event_type,
+  processing_status AS status,
+  1::integer AS processing_attempts,
+  processing_error AS error_message,
+  correlation_id,
+  created_at,
+  COALESCE(processed_at, created_at) AS updated_at
+`;
 
 export class AdminWebhookService {
-  /**
-   * Search webhooks (paginated).
-   * Requires provider_events:view permission.
-   */
   async searchWebhooks(
     filters: WebhookSearchFilters,
     page: number = 1,
@@ -63,124 +74,95 @@ export class AdminWebhookService {
     }
 
     const sql = getSql();
-    const limit = Math.min(pageSize, 100);
-    const offset = (page - 1) * limit;
+    const limit = Math.min(Math.max(pageSize, 1), 100);
+    const safePage = Math.max(page, 1);
+    const offset = (safePage - 1) * limit;
 
-    // Build query
-    let query = sql`SELECT * FROM webhooks WHERE 1=1`;
+    let query = sql.unsafe(`SELECT ${eventProjection} FROM provider_webhook_events WHERE TRUE`);
+    let countQuery = sql`SELECT COUNT(*) AS count FROM provider_webhook_events WHERE TRUE`;
 
     if (filters.provider) {
       query = sql`${query} AND provider = ${filters.provider}`;
+      countQuery = sql`${countQuery} AND provider = ${filters.provider}`;
     }
-
     if (filters.eventType) {
       query = sql`${query} AND event_type = ${filters.eventType}`;
+      countQuery = sql`${countQuery} AND event_type = ${filters.eventType}`;
     }
-
     if (filters.status) {
-      query = sql`${query} AND status = ${filters.status}`;
+      query = sql`${query} AND processing_status = ${filters.status}`;
+      countQuery = sql`${countQuery} AND processing_status = ${filters.status}`;
     }
-
-    if (filters.relatedResourceType) {
-      query = sql`${query} AND related_resource_type = ${filters.relatedResourceType}`;
-    }
-
     if (filters.startDate) {
       query = sql`${query} AND created_at >= ${filters.startDate}`;
+      countQuery = sql`${countQuery} AND created_at >= ${filters.startDate}`;
     }
-
     if (filters.endDate) {
       query = sql`${query} AND created_at <= ${filters.endDate}`;
+      countQuery = sql`${countQuery} AND created_at <= ${filters.endDate}`;
     }
-
     if (filters.correlationId) {
       query = sql`${query} AND correlation_id = ${filters.correlationId}`;
+      countQuery = sql`${countQuery} AND correlation_id = ${filters.correlationId}`;
     }
 
-    query = sql`${query} ORDER BY created_at DESC LIMIT ${limit + 1} OFFSET ${offset}`;
+    query = sql`${query} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 
-    // Get count
-    let countQ = sql`SELECT COUNT(*) as count FROM webhooks WHERE 1=1`;
-
-    if (filters.provider) countQ = sql`${countQ} AND provider = ${filters.provider}`;
-    if (filters.eventType) countQ = sql`${countQ} AND event_type = ${filters.eventType}`;
-    if (filters.status) countQ = sql`${countQ} AND status = ${filters.status}`;
-    if (filters.relatedResourceType) countQ = sql`${countQ} AND related_resource_type = ${filters.relatedResourceType}`;
-    if (filters.startDate) countQ = sql`${countQ} AND created_at >= ${filters.startDate}`;
-    if (filters.endDate) countQ = sql`${countQ} AND created_at <= ${filters.endDate}`;
-    if (filters.correlationId) countQ = sql`${countQ} AND correlation_id = ${filters.correlationId}`;
-
-    const [rows, countResult] = await Promise.all([query, countQ]);
-
+    const [rows, countResult] = await Promise.all([query, countQuery]);
     return {
-      webhooks: (rows as unknown as AdminWebhookRow[]).slice(0, limit).map((w) => this.toDTO(w)),
-      total_count: countResult[0]?.count || 0,
-      page,
+      webhooks: (rows as unknown as AdminWebhookRow[]).map((row) => this.toDTO(row)),
+      total_count: countResult[0]?.count ?? 0,
+      page: safePage,
       page_size: limit,
     };
   }
 
-  /**
-   * Get a specific webhook by ID.
-   * Requires provider_events:view permission.
-   */
   async getWebhookById(id: number): Promise<AdminWebhookDTO | null> {
     if (!checkPermission('provider_events:view')) {
       throw new Error('Permission denied: provider_events:view');
     }
 
     const sql = getSql();
-    const rows = await sql`SELECT * FROM webhooks WHERE id = ${id}`;
-
-    return rows.length ? this.toDTO(rows[0] as unknown as AdminWebhookRow) : null;
+    const rows = await sql.unsafe<AdminWebhookRow[]>(
+      `SELECT ${eventProjection} FROM provider_webhook_events WHERE id = $1`,
+      [id]
+    );
+    return rows.length > 0 ? this.toDTO(rows[0]) : null;
   }
 
-  /**
-   * Get webhooks by correlation ID.
-   * Requires provider_events:view permission.
-   */
   async getWebhooksByCorrelationId(correlationId: string): Promise<AdminWebhookDTO[]> {
     if (!checkPermission('provider_events:view')) {
       throw new Error('Permission denied: provider_events:view');
     }
 
     const sql = getSql();
-    const rows = await sql`
-      SELECT * FROM webhooks
-      WHERE correlation_id = ${correlationId}
-      ORDER BY created_at ASC
-    `;
-
-    return (rows as unknown as AdminWebhookRow[]).map((w) => this.toDTO(w));
+    const rows = await sql.unsafe<AdminWebhookRow[]>(
+      `SELECT ${eventProjection}
+       FROM provider_webhook_events
+       WHERE correlation_id = $1
+       ORDER BY created_at ASC`,
+      [correlationId]
+    );
+    return rows.map((row) => this.toDTO(row));
   }
 
-  /**
-   * Get webhooks for a specific provider.
-   * Requires provider_events:view permission.
-   */
-  async getProviderWebhooks(
-    provider: string,
-    limit: number = 100
-  ): Promise<AdminWebhookDTO[]> {
+  async getProviderWebhooks(provider: string, limit: number = 100): Promise<AdminWebhookDTO[]> {
     if (!checkPermission('provider_events:view')) {
       throw new Error('Permission denied: provider_events:view');
     }
 
     const sql = getSql();
-    const rows = await sql`
-      SELECT * FROM webhooks
-      WHERE provider = ${provider}
-      ORDER BY created_at DESC
-      LIMIT ${limit}
-    `;
-
-    return (rows as unknown as AdminWebhookRow[]).map((w) => this.toDTO(w));
+    const rows = await sql.unsafe<AdminWebhookRow[]>(
+      `SELECT ${eventProjection}
+       FROM provider_webhook_events
+       WHERE provider = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [provider, Math.min(Math.max(limit, 1), 100)]
+    );
+    return rows.map((row) => this.toDTO(row));
   }
 
-  /**
-   * Get webhook statistics.
-   * Requires provider_events:view permission.
-   */
   async getWebhookStats(startDate?: Date, endDate?: Date): Promise<{
     total_webhooks: number;
     by_provider: Record<string, number>;
@@ -194,87 +176,61 @@ export class AdminWebhookService {
     }
 
     const sql = getSql();
-
-    let query = sql`SELECT provider, event_type, status, COUNT(*) as count FROM webhooks WHERE 1=1`;
-
-    if (startDate) {
-      query = sql`${query} AND created_at >= ${startDate}`;
-    }
-
-    if (endDate) {
-      query = sql`${query} AND created_at <= ${endDate}`;
-    }
-
-    query = sql`${query} GROUP BY provider, event_type, status`;
-
-    const rows = await query;
-
-    const byProvider: Record<string, number> = {};
-    const byStatus: Record<string, number> = {};
-    const byEventType: Record<string, number> = {};
-    let total = 0;
-    let failed = 0;
-    let retries = 0;
-
-    // COUNT(*) is bigint; postgres.js returns it as a string.
-    type StatsRow = {
-      provider: string;
-      status: string;
-      event_type: string;
-      count: string;
-    };
-
-    (rows as unknown as StatsRow[]).forEach((row) => {
-      const count = Number(row.count);
-      byProvider[row.provider] = (byProvider[row.provider] || 0) + count;
-      byStatus[row.status] = (byStatus[row.status] || 0) + count;
-      byEventType[row.event_type] = (byEventType[row.event_type] || 0) + count;
-      total += count;
-
-      if (row.status === 'failed') {
-        failed += count;
-      }
-    });
-
-    // Get retry count
-    const retryResult = await sql`
-      SELECT COUNT(*) as count FROM webhooks
-      WHERE processing_attempts > 1
-      ${startDate ? sql`AND created_at >= ${startDate}` : sql``}
-      ${endDate ? sql`AND created_at <= ${endDate}` : sql``}
+    let query = sql`
+      SELECT provider, event_type, processing_status AS status, COUNT(*) AS count
+      FROM provider_webhook_events
+      WHERE TRUE
     `;
 
-    retries = retryResult[0]?.count || 0;
+    if (startDate) query = sql`${query} AND created_at >= ${startDate}`;
+    if (endDate) query = sql`${query} AND created_at <= ${endDate}`;
+    query = sql`${query} GROUP BY provider, event_type, processing_status`;
+
+    const rows = await query as unknown as Array<{
+      provider: string;
+      event_type: string;
+      status: string;
+      count: string;
+    }>;
+
+    const by_provider: Record<string, number> = {};
+    const by_status: Record<string, number> = {};
+    const by_event_type: Record<string, number> = {};
+    let total_webhooks = 0;
+    let failed_count = 0;
+
+    for (const row of rows) {
+      const count = Number(row.count);
+      by_provider[row.provider] = (by_provider[row.provider] ?? 0) + count;
+      by_status[row.status] = (by_status[row.status] ?? 0) + count;
+      by_event_type[row.event_type] = (by_event_type[row.event_type] ?? 0) + count;
+      total_webhooks += count;
+      if (row.status === 'failed') failed_count += count;
+    }
 
     return {
-      total_webhooks: total,
-      by_provider: byProvider,
-      by_status: byStatus,
-      by_event_type: byEventType,
-      failed_count: failed,
-      retry_count: retries,
+      total_webhooks,
+      by_provider,
+      by_status,
+      by_event_type,
+      failed_count,
+      // provider_webhook_events does not track individual retry attempts yet.
+      retry_count: 0,
     };
   }
 
-  /**
-   * Convert webhook to DTO.
-   */
-  private toDTO(webhook: AdminWebhookRow): AdminWebhookDTO {
+  private toDTO(row: AdminWebhookRow): AdminWebhookDTO {
     return {
-      id: webhook.id,
-      provider: webhook.provider,
-      event_id: webhook.event_id,
-      event_type: webhook.event_type,
-      status: webhook.status,
-      related_resource_id: webhook.related_resource_id,
-      related_resource_type: webhook.related_resource_type,
-      http_status_code: webhook.http_status_code,
-      processing_attempts: webhook.processing_attempts,
-      error_message: webhook.error_message,
-      next_retry_at: webhook.next_retry_at,
-      correlation_id: webhook.correlation_id,
-      created_at: webhook.created_at,
-      updated_at: webhook.updated_at,
+      id: row.id,
+      provider: row.provider,
+      event_id: row.event_id,
+      event_type: row.event_type,
+      status: row.status,
+      processing_attempts: row.processing_attempts,
+      error_message: row.error_message ?? undefined,
+      correlation_id: row.correlation_id ?? undefined,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     };
   }
 }
