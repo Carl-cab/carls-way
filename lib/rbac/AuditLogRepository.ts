@@ -278,27 +278,27 @@ export class AuditLogRepository extends BaseRepository {
     const sql = getSql();
 
     try {
-      let countQuery = sql`SELECT COUNT(*) as count FROM admin_audit_logs WHERE 1=1`;
-      let successQuery = sql`SELECT COUNT(*) as count FROM admin_audit_logs WHERE status = 'success'`;
-      let failedQuery = sql`SELECT COUNT(*) as count FROM admin_audit_logs WHERE status = 'failed'`;
+      // Keep total, successful, and failed counts in one aggregate query. The
+      // dashboard itself generates audit rows while it loads, so three separate
+      // queries can observe different moments and incorrectly yield >100%.
+      let summaryQuery = sql`
+        SELECT
+          COUNT(*) AS total_count,
+          COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+          COUNT(*) FILTER (WHERE status = 'failed') AS failed_count
+        FROM admin_audit_logs
+        WHERE TRUE
+      `;
 
       if (startDate) {
-        countQuery = sql`${countQuery} AND created_at >= ${startDate}`;
-        successQuery = sql`${successQuery} AND created_at >= ${startDate}`;
-        failedQuery = sql`${failedQuery} AND created_at >= ${startDate}`;
+        summaryQuery = sql`${summaryQuery} AND created_at >= ${startDate}`;
       }
 
       if (endDate) {
-        countQuery = sql`${countQuery} AND created_at <= ${endDate}`;
-        successQuery = sql`${successQuery} AND created_at <= ${endDate}`;
-        failedQuery = sql`${failedQuery} AND created_at <= ${endDate}`;
+        summaryQuery = sql`${summaryQuery} AND created_at <= ${endDate}`;
       }
 
-      const [countResult, successResult, failedResult] = await Promise.all([
-        countQuery,
-        successQuery,
-        failedQuery,
-      ]);
+      const summaryResult = await summaryQuery;
 
       // Get actions breakdown
       let actionQuery = sql`
@@ -336,10 +336,10 @@ export class AuditLogRepository extends BaseRepository {
       });
 
       return {
-        // COUNT(*) is bigint; postgres.js returns it as a string.
-        total_count: Number(countResult[0]?.count ?? 0),
-        success_count: Number(successResult[0]?.count ?? 0),
-        failed_count: Number(failedResult[0]?.count ?? 0),
+        // PostgreSQL returns COUNT(*) as a bigint string through postgres.js.
+        total_count: Number(summaryResult[0]?.total_count ?? 0),
+        success_count: Number(summaryResult[0]?.success_count ?? 0),
+        failed_count: Number(summaryResult[0]?.failed_count ?? 0),
         actions,
         admin_users,
       };
