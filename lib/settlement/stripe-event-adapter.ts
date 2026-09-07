@@ -38,14 +38,17 @@ const STRIPE_SETTLEMENT_EVENTS: Record<string, SettlementEventType> = {
   'payment_intent.payment_failed': 'failed',
   'payment_intent.canceled': 'cancelled',
 
-  // Cash out: payout from the platform balance. Mapped so that a payout event
-  // arriving from an environment where payouts were used is understood rather
-  // than silently dropped — this does not enable the cash-out rail, which
-  // remains disabled because stripe.payouts.create targets the platform's own
-  // external account rather than the customer's.
-  'payout.paid': 'settled',
-  'payout.failed': 'failed',
-  'payout.canceled': 'cancelled',
+  // Cash out is deliberately absent.
+  //
+  // `payout.*` is NOT mapped, and must stay unmapped until a recipient-owned
+  // Canadian disbursement rail exists. stripe.payouts.create moves money to the
+  // platform's own external account, not the customer's, so settling a
+  // `payout.paid` would mark a customer cash-out complete on the strength of a
+  // transfer that never reached them — and, since the settled plan carries a
+  // balance effect, would debit their wallet for it.
+  //
+  // These events are still recorded as operational evidence by the webhook's
+  // record-only list; they simply produce no settlement.
 };
 
 export interface StripeEventLike {

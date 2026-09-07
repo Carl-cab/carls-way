@@ -170,5 +170,17 @@ export function isTerminalStatus(status: SettlementStatus): boolean {
 }
 
 export function isProcessingStatus(status: SettlementStatus): boolean {
-  return ['submitted', 'authorized', 'pending', 'posted'].includes(status);
+  // Includes the statuses the application actually writes. It previously listed
+  // only the skeleton's labels, so an intent sitting in `submitting` or
+  // `processing` — where every live transfer sits — reported false, which is the
+  // opposite of the truth for the only statuses that occur in practice.
+  return [
+    'ready',
+    'submitting',
+    'processing',
+    'submitted',
+    'authorized',
+    'pending',
+    'posted',
+  ].includes(status);
 }

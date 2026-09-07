@@ -89,12 +89,23 @@ export async function POST(req: NextRequest) {
         req.headers.get('x-correlation-id') ?? '',
       );
 
-      // A failure here is deliberately not thrown: the event row already
-      // carries the error and stays un-processed, and Stripe's own retry is
-      // the recovery path. Returning 200 for an event we durably recorded is
-      // correct; returning 500 would also re-run the KYC branch above.
       if (result.outcome === 'failed') {
         console.error('Stripe settlement failed for event', event.id, result.reason);
+      }
+
+      // A retryable failure must not be acknowledged. Answering 200 tells
+      // Stripe the event is handled and it will never redeliver; there is no
+      // worker draining failed provider_webhook_events rows, so the event
+      // would be lost. 500 puts it back on Stripe's retry schedule.
+      //
+      // Terminal outcomes are acknowledged: an intent that does not exist, or
+      // a transition the state machine rejects, produces the same answer on
+      // every redelivery, so retrying only repeats the failure.
+      if (result.retryable) {
+        return NextResponse.json(
+          { error: 'Settlement failed; event will be retried' },
+          { status: 500 },
+        );
       }
     }
 
@@ -137,6 +148,11 @@ function isFinancialEvent(eventType: string): boolean {
     'charge.succeeded',
     'charge.failed',
     'payout.created',
+    // Recorded, never settled: the cash-out rail pays the platform's own
+    // external account rather than the customer's. See the adapter.
+    'payout.paid',
+    'payout.failed',
+    'payout.canceled',
   ];
 
   return isSettlementEvent(eventType) || recordOnly.includes(eventType);

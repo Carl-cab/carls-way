@@ -94,8 +94,11 @@ describe('stripe event adapter', () => {
   it('maps the settlement events and nothing else', () => {
     expect(isSettlementEvent('payment_intent.succeeded')).toBe(true);
     expect(isSettlementEvent('payment_intent.payment_failed')).toBe(true);
-    expect(isSettlementEvent('payout.paid')).toBe(true);
-    expect(isSettlementEvent('payout.failed')).toBe(true);
+    // payout.* is deliberately unmapped until a recipient-owned Canadian
+    // disbursement rail exists; settling one would mark a customer cash-out
+    // complete for a transfer that only reached the platform's own account.
+    expect(isSettlementEvent('payout.paid')).toBe(false);
+    expect(isSettlementEvent('payout.failed')).toBe(false);
 
     // charge.* is deliberately excluded: a successful ACSS debit emits both a
     // charge and a payment_intent event for one movement of money.
@@ -122,8 +125,7 @@ describe('stripe event adapter', () => {
       .toBe('failed');
     expect(adaptStripeEvent(stripeEvent('payment_intent.processing', 'pi_x')).normalized?.eventType)
       .toBe('pending');
-    expect(adaptStripeEvent(stripeEvent('payout.paid', 'po_x')).normalized?.eventType)
-      .toBe('settled');
+    expect(adaptStripeEvent(stripeEvent('payout.paid', 'po_x')).normalized).toBeNull();
   });
 
   it('declines an unmapped type rather than guessing', () => {
@@ -157,8 +159,8 @@ describe('stripe event adapter', () => {
       expect.arrayContaining([
         'payment_intent.succeeded',
         'payment_intent.payment_failed',
-        'payout.paid',
-        'payout.failed',
+        'payment_intent.processing',
+        'payment_intent.canceled',
       ]),
     );
   });
@@ -298,6 +300,118 @@ describe('settlement handling', () => {
     // intent looking settled.
     expect(intent[0].status).not.toBe('settled');
     expect(['applied', 'failed', 'recorded_only', 'invalid_transition']).toContain(result.outcome);
+  });
+
+  it('does not settle twice when two distinct event ids describe one outcome', async () => {
+    // The blocker found in design review. Idempotency was keyed on
+    // provider_event_id — the unique constraint on provider_webhook_events and
+    // the ledger's UNIQUE(transfer_intent_id, provider_event_id, entry_type).
+    // Both protect only against a redelivery of the same event. Stripe can emit
+    // two distinct event ids for one PaymentIntent reaching one outcome, and
+    // measured before the fix this credited the wallet twice: 25 then 50, with
+    // two ledger entries.
+    const ref = nextRef();
+    const intentId = await createIntent(ref);
+    await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+
+    const a = await handleStripeSettlementEvent(
+      stripeEvent('payment_intent.succeeded', ref, `evt_dbl_a_${Date.now()}`),
+    );
+    const afterA = await sql<{ balance_cad: number }[]>`
+      SELECT balance_cad FROM users WHERE id = ${USER_ID}
+    `;
+    const ledgerA = await sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+    `;
+
+    const b = await handleStripeSettlementEvent(
+      stripeEvent('payment_intent.succeeded', ref, `evt_dbl_b_${Date.now()}`),
+    );
+    const afterB = await sql<{ balance_cad: number }[]>`
+      SELECT balance_cad FROM users WHERE id = ${USER_ID}
+    `;
+    const ledgerB = await sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+    `;
+
+    expect(a.outcome).toBe('applied');
+    // The second event is recorded for audit but must move no money.
+    expect(Number(afterB[0].balance_cad)).toBe(Number(afterA[0].balance_cad));
+    expect(ledgerB[0].n).toBe(ledgerA[0].n);
+    expect(b.outcome).toBe('no_change');
+  });
+
+  it('credits the wallet exactly once on a first settlement', async () => {
+    const ref = nextRef();
+    const intentId = await createIntent(ref, 'processing', 'add_money', 25);
+    await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+
+    await handleStripeSettlementEvent(stripeEvent('payment_intent.succeeded', ref));
+
+    const user = await sql<{ balance_cad: number }[]>`
+      SELECT balance_cad FROM users WHERE id = ${USER_ID}
+    `;
+    const status = await sql<{ status: string }[]>`
+      SELECT status FROM transfer_intents WHERE id = ${intentId}
+    `;
+    expect(status[0].status).toBe('settled');
+    expect(Number(user[0].balance_cad)).toBe(25);
+  });
+
+  it('leaves financial values unchanged on a redelivery of the same event id', async () => {
+    const ref = nextRef();
+    const intentId = await createIntent(ref);
+    await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+    const event = stripeEvent('payment_intent.succeeded', ref);
+
+    await handleStripeSettlementEvent(event);
+    const first = await sql<{ balance_cad: number }[]>`SELECT balance_cad FROM users WHERE id = ${USER_ID}`;
+    await handleStripeSettlementEvent(event);
+    const second = await sql<{ balance_cad: number }[]>`SELECT balance_cad FROM users WHERE id = ${USER_ID}`;
+
+    expect(Number(second[0].balance_cad)).toBe(Number(first[0].balance_cad));
+    const ledger = await sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+    `;
+    expect(ledger[0].n).toBeLessThanOrEqual(1);
+  });
+
+  it('a failure event transitions to failed and credits nothing', async () => {
+    const ref = nextRef();
+    const intentId = await createIntent(ref);
+    await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+
+    await handleStripeSettlementEvent(stripeEvent('payment_intent.payment_failed', ref));
+
+    const status = await sql<{ status: string }[]>`
+      SELECT status FROM transfer_intents WHERE id = ${intentId}
+    `;
+    const user = await sql<{ balance_cad: number }[]>`
+      SELECT balance_cad FROM users WHERE id = ${USER_ID}
+    `;
+    expect(status[0].status).toBe('failed');
+    expect(Number(user[0].balance_cad)).toBe(0);
+  });
+
+  it('charge.* never moves money or status', async () => {
+    const ref = nextRef();
+    const intentId = await createIntent(ref);
+    await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+
+    await handleStripeSettlementEvent(stripeEvent('charge.succeeded', ref));
+
+    const status = await sql<{ status: string }[]>`
+      SELECT status FROM transfer_intents WHERE id = ${intentId}
+    `;
+    const user = await sql<{ balance_cad: number }[]>`
+      SELECT balance_cad FROM users WHERE id = ${USER_ID}
+    `;
+    const ledger = await sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+    `;
+    expect(status[0].status).toBe('processing');
+    expect(Number(user[0].balance_cad)).toBe(0);
+    expect(ledger[0].n).toBe(0);
   });
 
   it('keeps two different events for the same reference distinct', async () => {

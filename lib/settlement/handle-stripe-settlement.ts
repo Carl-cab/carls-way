@@ -5,7 +5,7 @@ import {
   getProviderEvent,
 } from '@/lib/provider-events';
 import { SettlementOrchestrator } from './SettlementOrchestrator';
-import { SettlementExecutor } from './SettlementExecutor';
+import { applySettlementAtomically } from './apply-settlement';
 import { adaptStripeEvent, isSettlementEvent, type StripeEventLike } from './stripe-event-adapter';
 
 /**
@@ -62,6 +62,11 @@ export type SettlementHandlingOutcome =
   // `pending`, for instance — and reusing the status name for the handler's
   // result made those two meanings impossible to tell apart.
   | 'applied'
+  // The event was valid and recorded, but moved nothing: the outcome had
+  // already been claimed by an earlier event, or the plan's next state equals
+  // the current one. Distinct provider event ids describing a single outcome
+  // land here rather than settling it twice.
+  | 'no_change'
   | 'recorded_only'
   | 'duplicate_ignored'
   | 'no_matching_intent'
@@ -72,6 +77,13 @@ export interface SettlementHandlingResult {
   outcome: SettlementHandlingOutcome;
   /** True when the event row ended in `processed`. */
   markedProcessed: boolean;
+  /**
+   * True when the failure was local and transient, so the caller should answer
+   * 500 and let the provider redeliver. A terminal provider result — a rejected
+   * transfer, an event for an unknown intent — is not retryable: redelivering
+   * produces the same answer, so it is recorded and acknowledged.
+   */
+  retryable?: boolean;
   intentId?: string;
   transition?: string;
   reason?: string;
@@ -142,31 +154,25 @@ export async function handleStripeSettlementEvent(
       };
     }
 
-    // Step 3. Apply. Status first, then ledger, then balance — the executor
-    // makes each idempotent, so a retry that reaches here twice converges.
-    const executor = new SettlementExecutor();
-
-    const statusResult = await executor.executeSettlementPlan(plan);
-    if (!statusResult.success) {
-      throw new Error(statusResult.error ?? statusResult.reason);
-    }
-
-    if (plan.createLedgerEntries.shouldCreate) {
-      const ledgerResult = await executor.executeLedgerCreation(plan);
-      if (!ledgerResult.success) {
-        throw new Error(ledgerResult.error ?? 'Ledger creation failed');
-      }
-    }
-
-    if (plan.updateBalance.shouldUpdate) {
-      const balanceResult = await executor.executeBalanceUpdate(plan);
-      if (!balanceResult.success) {
-        throw new Error(balanceResult.error ?? 'Balance update failed');
-      }
-    }
+    // Step 3. Apply, once per business outcome. Idempotency is keyed on the
+    // intent's status transition rather than on provider_event_id: two distinct
+    // Stripe event ids can describe the same PaymentIntent reaching the same
+    // outcome, and every event-keyed guard lets the second one through. Status,
+    // ledger and balance move in one transaction.
+    const applied = await applySettlementAtomically(plan);
 
     // Step 4. Only now is the event complete.
     await markProviderEventProcessed('stripe', providerEventId);
+
+    if (!applied.applied) {
+      return {
+        outcome: 'no_change',
+        markedProcessed: true,
+        intentId: plan.intentId,
+        transition: plan.transition,
+        reason: applied.reason,
+      };
+    }
 
     return {
       outcome: 'applied',
@@ -176,10 +182,14 @@ export async function handleStripeSettlementEvent(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Left un-processed on purpose: the row stays retryable and the failure is
-    // visible rather than being buried behind a `processed` status.
+    // A local execution failure — a database timeout, a transaction conflict,
+    // a lost connection — is not a terminal provider result. The row is left
+    // un-processed and `retryable` is set so the route answers 500 and Stripe
+    // redelivers. Recording the failure and answering 200, as this did before,
+    // meant Stripe never retried and there is no worker that drains failed
+    // rows, so the event was lost.
     await markProviderEventFailed('stripe', providerEventId, message);
-    return { outcome: 'failed', markedProcessed: false, reason: message };
+    return { outcome: 'failed', markedProcessed: false, retryable: true, reason: message };
   }
 }
 
