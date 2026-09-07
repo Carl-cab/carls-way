@@ -94,6 +94,41 @@ interface PaginatedResponse<T> {
   total_count: number;
 }
 
+type NamedListResponse<T, Key extends string> = {
+  [P in Key]: T[];
+} & {
+  total_count: number | string;
+  page: number;
+  page_size: number;
+};
+
+type NormalizedListResponse<T, Key extends string> = {
+  [P in Key]: T[];
+} & {
+  data: T[];
+  total_count: number;
+  page: number;
+  page_size: number;
+};
+
+function normalizeNamedListResponse<T, Key extends string>(
+  response: ApiResponse<NamedListResponse<T, Key>>,
+  key: Key
+): ApiResponse<NormalizedListResponse<T, Key>> {
+  if (!response.data) {
+    return { ...response, data: null };
+  }
+
+  return {
+    ...response,
+    data: {
+      ...response.data,
+      data: response.data[key],
+      total_count: Number(response.data.total_count),
+    },
+  };
+}
+
 interface AuditStatsResponse {
   total_events: number;
   success_rate: number;
@@ -160,11 +195,17 @@ async function fetchFromApi<T>(
 export const adminApi = {
   // Users
   async getUsers(page: number = 1, pageSize: number = 50) {
-    return fetchFromApi<PaginatedResponse<AdminUser>>(`/api/admin/users?page=${page}&page_size=${pageSize}`);
+    const response = await fetchFromApi<NamedListResponse<AdminUser, 'admins'>>(
+      `/api/admin/users?page=${page}&page_size=${pageSize}`
+    );
+    return normalizeNamedListResponse(response, 'admins');
   },
 
   async getUsersByRole(role: string) {
-    return fetchFromApi<PaginatedResponse<AdminUser>>(`/api/admin/users?role=${encodeURIComponent(role)}`);
+    const response = await fetchFromApi<NamedListResponse<AdminUser, 'admins'>>(
+      `/api/admin/users?role=${encodeURIComponent(role)}`
+    );
+    return normalizeNamedListResponse(response, 'admins');
   },
 
   // Transfers
@@ -182,7 +223,10 @@ export const adminApi = {
           .map(([k, v]) => [k, String(v)])
       ),
     });
-    return fetchFromApi<PaginatedResponse<AdminTransfer>>(`/api/admin/transfers?${params}`);
+    const response = await fetchFromApi<NamedListResponse<AdminTransfer, 'transfers'>>(
+      `/api/admin/transfers?${params}`
+    );
+    return normalizeNamedListResponse(response, 'transfers');
   },
 
   async getTransferById(id: number) {
@@ -208,11 +252,17 @@ export const adminApi = {
           .map(([k, v]) => [k, String(v)])
       ),
     });
-    return fetchFromApi<PaginatedResponse<LedgerEntry>>(`/api/admin/ledger?${params}`);
+    const response = await fetchFromApi<NamedListResponse<LedgerEntry, 'entries'>>(
+      `/api/admin/ledger?${params}`
+    );
+    return normalizeNamedListResponse(response, 'entries');
   },
 
   async getUserLedger(userId: number) {
-    return fetchFromApi<PaginatedResponse<LedgerEntry>>(`/api/admin/ledger/${userId}`);
+    const response = await fetchFromApi<NamedListResponse<LedgerEntry, 'entries'>>(
+      `/api/admin/ledger/${userId}`
+    );
+    return normalizeNamedListResponse(response, 'entries');
   },
 
   async getUserBalance(userId: number, currency: string) {
@@ -234,7 +284,10 @@ export const adminApi = {
           .map(([k, v]) => [k, String(v)])
       ),
     });
-    return fetchFromApi<PaginatedResponse<ProviderEvent>>(`/api/admin/events?${params}`);
+    const response = await fetchFromApi<NamedListResponse<ProviderEvent, 'events'>>(
+      `/api/admin/events?${params}`
+    );
+    return normalizeNamedListResponse(response, 'events');
   },
 
   async getProviderEventById(id: number) {
@@ -260,7 +313,10 @@ export const adminApi = {
           .map(([k, v]) => [k, String(v)])
       ),
     });
-    return fetchFromApi<PaginatedResponse<Webhook>>(`/api/admin/webhooks?${params}`);
+    const response = await fetchFromApi<NamedListResponse<Webhook, 'webhooks'>>(
+      `/api/admin/webhooks?${params}`
+    );
+    return normalizeNamedListResponse(response, 'webhooks');
   },
 
   async getWebhookById(id: number) {
@@ -286,7 +342,10 @@ export const adminApi = {
           .map(([k, v]) => [k, String(v)])
       ),
     });
-    return fetchFromApi<PaginatedResponse<AuditLog>>(`/api/admin/audit-logs?${params}`);
+    const response = await fetchFromApi<NamedListResponse<AuditLog, 'events'>>(
+      `/api/admin/audit-logs?${params}`
+    );
+    return normalizeNamedListResponse(response, 'events');
   },
 
   async traceAuditLog(correlationId: string) {
@@ -323,7 +382,10 @@ export const adminApi = {
           .map(([k, v]) => [k, String(v)])
       ),
     });
-    return fetchFromApi<PaginatedResponse<Settlement>>(`/api/admin/settlements?${params}`);
+    const response = await fetchFromApi<NamedListResponse<Settlement, 'settlements'>>(
+      `/api/admin/settlements?${params}`
+    );
+    return normalizeNamedListResponse(response, 'settlements');
   },
 
   async getSettlementById(id: number) {
