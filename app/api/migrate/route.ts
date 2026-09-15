@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSql, initializeSchema, isUninitializedDatabase } from '@/lib/db';
+import {
+  getSql,
+  initializeSchema,
+  isUninitializedDatabase,
+  upgradeLegacyMoneyColumns,
+} from '@/lib/db';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 
@@ -78,8 +83,8 @@ export async function GET(req: NextRequest) {
     await sql`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
 
     // Add missing columns to users table if they don't exist
-    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_cad REAL NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_usd REAL NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_cad NUMERIC(14,2) NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_usd NUMERIC(14,2) NOT NULL DEFAULT 0`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_status TEXT NOT NULL DEFAULT 'pending'`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_provider TEXT`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_session_id TEXT`;
@@ -127,7 +132,7 @@ export async function GET(req: NextRequest) {
         user_id INTEGER NOT NULL REFERENCES users(id),
         bank_account_id INTEGER REFERENCES bank_accounts(id),
         type TEXT NOT NULL,
-        amount REAL NOT NULL,
+        amount NUMERIC(14,2) NOT NULL,
         currency TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'draft',
         provider_region TEXT NOT NULL DEFAULT 'CA',
@@ -307,8 +312,8 @@ export async function GET(req: NextRequest) {
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS receiver_currency TEXT NOT NULL DEFAULT 'CAD'`;
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS fx_rate NUMERIC(12,6) NOT NULL DEFAULT 1.0`;
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS fx_fee NUMERIC(10,2) NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS sender_amount NUMERIC(12,2)`;
-    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS receiver_amount NUMERIC(12,2)`;
+    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS sender_amount NUMERIC(14,2)`;
+    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS receiver_amount NUMERIC(14,2)`;
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_cross_border BOOLEAN NOT NULL DEFAULT false`;
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS payment_rail TEXT NOT NULL DEFAULT 'internal'`;
     await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS estimated_settlement TIMESTAMPTZ`;
@@ -463,6 +468,19 @@ export async function GET(req: NextRequest) {
     await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON admin_audit_logs(action)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON admin_audit_logs(resource_type)`;
 
+    // ── money precision ──────────────────────────────────────────────────────
+    // `ADD COLUMN IF NOT EXISTS` never changes the type of a column that already
+    // exists, so a database created before money became NUMERIC still stores
+    // balances as float4 — which cannot hold a cent exactly. This converts them
+    // in place, and skips any column holding a value that was never a cent
+    // amount rather than rounding someone's money on its own authority.
+    const moneyUpgrades = await upgradeLegacyMoneyColumns(sql);
+    if (moneyUpgrades.length > 0) {
+      await auditLog(null, 'money_precision_upgraded', {
+        columns: moneyUpgrades.map((u) => `${u.table}.${u.column}`),
+      });
+    }
+
     if (bootstrap) {
       await auditLog(null, 'schema_migration_bootstrap', { client: clientIdentifier(req) });
     }
@@ -475,6 +493,9 @@ export async function GET(req: NextRequest) {
       success: true,
       message: 'Schema migration completed successfully',
       ...(bootstrap ? { bootstrap: true } : {}),
+      ...(moneyUpgrades.length > 0
+        ? { moneyColumnsUpgraded: moneyUpgrades.map((u) => `${u.table}.${u.column}`) }
+        : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     });
   } catch (err) {

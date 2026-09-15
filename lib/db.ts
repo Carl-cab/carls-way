@@ -45,6 +45,29 @@ export function getSql() {
       idle_timeout: 30,
       connect_timeout: 10,
       prepare: false, // Required for Supabase transaction/session pooler
+      types: {
+        // Money columns are NUMERIC, and postgres.js returns NUMERIC as a
+        // *string* by default. Without this parser every balance arriving from
+        // the database would be a string, and `balance + amount` would silently
+        // concatenate instead of add: "100.50" + 5 === "100.505". The rest of
+        // the codebase — arithmetic, comparisons, toFixed, JSON response shapes
+        // — is written against numbers, so the driver hands back numbers.
+        //
+        // Safe for money: NUMERIC(14,2) tops out at 999999999999.99, and a JS
+        // double represents every cent value exactly up to 2^53 cents (~$90
+        // trillion). The conversion is exact across the entire column domain.
+        //
+        // This does not make float arithmetic safe in the application — it is
+        // the *storage* that had to stop being float. Values still round-trip
+        // through NUMERIC on every write, so the database remains the authority
+        // on cent exactness.
+        numeric: {
+          to: 1700,
+          from: [1700],
+          serialize: (x: number | string) => x.toString(),
+          parse: (x: string) => parseFloat(x),
+        },
+      },
     });
   }
   return _sql;
@@ -67,9 +90,9 @@ export async function initializeSchema() {
       email TEXT UNIQUE NOT NULL,
       phone TEXT,
       password_hash TEXT NOT NULL,
-      balance REAL NOT NULL DEFAULT 100.00,
-      balance_cad REAL NOT NULL DEFAULT 0,
-      balance_usd REAL NOT NULL DEFAULT 0,
+      balance NUMERIC(14,2) NOT NULL DEFAULT 100.00,
+      balance_cad NUMERIC(14,2) NOT NULL DEFAULT 0,
+      balance_usd NUMERIC(14,2) NOT NULL DEFAULT 0,
       province TEXT,
       country TEXT NOT NULL DEFAULT 'CA',
       avatar_color TEXT NOT NULL DEFAULT '#CC0000',
@@ -121,7 +144,7 @@ export async function initializeSchema() {
       id SERIAL PRIMARY KEY,
       sender_id INTEGER NOT NULL REFERENCES users(id),
       receiver_id INTEGER NOT NULL REFERENCES users(id),
-      amount REAL NOT NULL,
+      amount NUMERIC(14,2) NOT NULL,
       currency TEXT NOT NULL DEFAULT 'CAD',
       note TEXT,
       type TEXT NOT NULL DEFAULT 'payment',
@@ -149,7 +172,7 @@ export async function initializeSchema() {
       user_id INTEGER NOT NULL REFERENCES users(id),
       bank_account_id INTEGER REFERENCES bank_accounts(id),
       type TEXT NOT NULL,
-      amount REAL NOT NULL,
+      amount NUMERIC(14,2) NOT NULL,
       currency TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'draft',
       provider_region TEXT NOT NULL DEFAULT 'CA',
@@ -285,6 +308,17 @@ export async function initializeSchema() {
       )
     `;
   });
+
+  // Runs outside the DDL transaction above: a database created before money
+  // became NUMERIC still has float columns, and CREATE TABLE IF NOT EXISTS will
+  // never fix them. No-op once converted.
+  const upgraded = await upgradeLegacyMoneyColumns(db);
+  if (upgraded.length > 0) {
+    console.warn(
+      'Converted legacy float money columns to NUMERIC(14,2): ' +
+        upgraded.map((u) => `${u.table}.${u.column} (was ${u.from})`).join(', '),
+    );
+  }
 }
 
 /**
@@ -312,6 +346,115 @@ export async function isUninitializedDatabase(
     console.error('Bootstrap check failed; treating database as initialized.', err);
     return false;
   }
+}
+
+/**
+ * Money columns that must hold exact cent values.
+ *
+ * Shared by `upgradeLegacyMoneyColumns()` and the migrate endpoint so the two
+ * cannot drift. Columns absent from a given deployment are skipped.
+ */
+export const MONEY_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['users', 'balance'],
+  ['users', 'balance_cad'],
+  ['users', 'balance_usd'],
+  ['transactions', 'amount'],
+  ['transactions', 'sender_amount'],
+  ['transactions', 'receiver_amount'],
+  ['transfer_intents', 'amount'],
+] as const;
+
+export interface MoneyColumnUpgrade {
+  table: string;
+  column: string;
+  from: string;
+}
+
+/**
+ * Convert any money column still stored as REAL/DOUBLE PRECISION to
+ * NUMERIC(14,2), in place.
+ *
+ * `CREATE TABLE IF NOT EXISTS` only shapes a *new* database, so a deployment
+ * created before this change keeps float money columns forever unless something
+ * alters them. This is that something: it runs on every boot, and on a database
+ * already converted it does nothing but read information_schema.
+ *
+ * ## Why the conversion is safe to run unattended here
+ *
+ * A value is converted only when it survives a round trip — when re-encoding
+ * its cent value in the column's own float type reproduces the stored value
+ * exactly. That identity holds for every amount that was ever a real cent
+ * amount, at any magnitude, and fails only for values that were never cent
+ * amounts (fractional cents, sub-cent dust). If any such value exists the
+ * column is left alone and its rows are reported, because choosing what
+ * 0.333333 "should have been" is a decision for a person, not a boot sequence.
+ *
+ * A tempting alternative — comparing against a fixed absolute tolerance — does
+ * not work on float4, whose error scales with magnitude: it rejects ordinary
+ * balances over a few hundred dollars. See
+ * migrations/20260907_money_real_to_numeric.sql for the measurements.
+ *
+ * For a large production table, prefer that migration script: it takes explicit
+ * locks and is meant to run during a maintenance window. This function exists
+ * so fresh and small deployments are correct without one.
+ *
+ * @returns the columns it converted, empty when there was nothing to do
+ */
+export async function upgradeLegacyMoneyColumns(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<MoneyColumnUpgrade[]> {
+  const upgraded: MoneyColumnUpgrade[] = [];
+
+  for (const [table, column] of MONEY_COLUMNS) {
+    const meta = await sql<{ data_type: string }[]>`
+      SELECT data_type FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = ${table}
+        AND column_name = ${column}
+    `;
+
+    const dataType = meta[0]?.data_type;
+    // Missing column: an older deployment that never had it. Already numeric:
+    // nothing to do. Either way, leave it be.
+    if (dataType !== 'real' && dataType !== 'double precision') continue;
+
+    // Identifiers cannot be bound as parameters. Both come from MONEY_COLUMNS
+    // above — a module-level constant, never from a request — and postgres.js
+    // quotes them via sql(). The round-trip cast target is chosen from the two
+    // literal branches rather than interpolated, so no value reaches the query
+    // text.
+    const roundTrip =
+      dataType === 'real'
+        ? sql`${sql(column)} <> ROUND((${sql(column)}::double precision)::numeric, 2)::real`
+        : sql`${sql(column)} <> ROUND((${sql(column)}::double precision)::numeric, 2)::double precision`;
+
+    const unsafeRows = await sql<{ count: number }[]>`
+      SELECT COUNT(*)::int AS count FROM ${sql(table)}
+      WHERE ${sql(column)} IS NOT NULL
+        AND (
+          ${sql(column)}::text IN ('NaN', 'Infinity', '-Infinity')
+          OR ABS((${sql(column)}::double precision)::numeric) > 999999999999.99
+          OR ${roundTrip}
+        )
+    `;
+
+    if ((unsafeRows[0]?.count ?? 0) > 0) {
+      console.error(
+        `Money precision upgrade skipped for ${table}.${column}: ` +
+          `${unsafeRows[0].count} value(s) are not exact cent amounts. ` +
+          `Run migrations/20260907_money_real_to_numeric.sql to audit and reconcile them.`,
+      );
+      continue;
+    }
+
+    await sql.unsafe(
+      `ALTER TABLE public."${table}" ALTER COLUMN "${column}" ` +
+        `TYPE NUMERIC(14,2) USING ROUND(("${column}"::double precision)::numeric, 2)`,
+    );
+    upgraded.push({ table, column, from: dataType });
+  }
+
+  return upgraded;
 }
 
 export default getSql;
