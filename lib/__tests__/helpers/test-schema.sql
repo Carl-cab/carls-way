@@ -241,3 +241,28 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
+
+
+-- ── Ledger ──────────────────────────────────────────────────────────────────
+-- Mirrors lib/db.ts. This was absent from the test schema, so a test touching
+-- ledger_entries passed locally — where an earlier initializeSchema() had
+-- already created the table — and failed on CI's clean database. Split
+-- payments now write ledger rows, which is how the gap surfaced.
+-- Declared last: it references both transactions and transfer_intents.
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  transaction_id INTEGER REFERENCES transactions(id),
+  transfer_intent_id INTEGER REFERENCES transfer_intents(id),
+  currency TEXT NOT NULL,
+  account_type TEXT NOT NULL DEFAULT 'wallet',
+  entry_type TEXT NOT NULL,
+  debit NUMERIC(12,2) NOT NULL DEFAULT 0,
+  credit NUMERIC(12,2) NOT NULL DEFAULT 0,
+  provider TEXT,
+  provider_reference TEXT,
+  provider_event_id TEXT,
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(transfer_intent_id, provider_event_id, entry_type)
+);
