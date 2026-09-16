@@ -9,7 +9,10 @@ export async function GET() {
   const sql = getSql();
   const friends = await sql`
     SELECT f.id as friendship_id, f.status, f.requested_by, f.created_at as friendship_date,
-      u.id, u.name, u.username, u.email, u.avatar_color, u.province,
+      -- u.email is deliberately absent. This list includes pending
+      -- friendships, so anyone who sent an unanswered request could read the
+      -- address of the person they requested. The UI never used it.
+      u.id, u.name, u.username, u.avatar_color, u.province,
       CASE WHEN f.user_id = ${user.userId} THEN 'outgoing' ELSE 'incoming' END as direction
     FROM friends f
     JOIN users u ON (CASE WHEN f.user_id = ${user.userId} THEN f.friend_id ELSE f.user_id END) = u.id

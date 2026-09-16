@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers';
 import jwt from 'jsonwebtoken';
+import type postgres from 'postgres';
 import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
 
@@ -43,6 +44,16 @@ export interface JWTPayload {
   userId: number;
   email: string;
   username: string;
+  /**
+   * The account's token version at the moment this token was issued.
+   *
+   * A signed JWT is otherwise valid until it expires — there was no way to
+   * revoke one, so a stolen token stayed usable for a full seven days and
+   * changing the password did nothing to it. Comparing this against
+   * `users.token_version` on each request makes a bump an immediate,
+   * account-wide logout.
+   */
+  tv?: number;
 }
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
@@ -58,12 +69,59 @@ export function verifyToken(token: string): JWTPayload | null {
   }
 }
 
+/**
+ * Issue a token carrying the account's current version.
+ *
+ * Every login path should use this rather than signToken directly, so the
+ * version is never omitted by accident — a token without one is rejected.
+ */
+export async function signTokenForUser(
+  payload: Omit<JWTPayload, 'tv'>,
+): Promise<string> {
+  const sql = getSql();
+  const rows = await sql<{ token_version: number }[]>`
+    SELECT token_version FROM users WHERE id = ${payload.userId}
+  `;
+  return signToken({ ...payload, tv: Number(rows[0]?.token_version ?? 0) });
+}
+
+/**
+ * Invalidate every token already issued for an account.
+ *
+ * Called on password reset: a password change that leaves the attacker's
+ * existing session alive is not a recovery.
+ */
+export async function revokeUserSessions(
+  userId: number,
+  executor?: postgres.ISql,
+): Promise<void> {
+  const sql = executor ?? getSql();
+  await sql`UPDATE users SET token_version = token_version + 1 WHERE id = ${userId}`;
+}
+
 export async function getAuthUser(): Promise<JWTPayload | null> {
   try {
     const cookieStore = await cookies();
     const token = cookieStore.get(COOKIE_NAME)?.value;
     if (!token) return null;
-    return verifyToken(token);
+
+    const payload = verifyToken(token);
+    if (!payload) return null;
+
+    // A token with no version predates revocation support and cannot be
+    // checked, so it is refused. Deploying this logs everyone in once more;
+    // that is the intended one-time cost of being able to revoke at all.
+    if (typeof payload.tv !== 'number') return null;
+
+    const sql = getSql();
+    const rows = await sql<{ token_version: number }[]>`
+      SELECT token_version FROM users WHERE id = ${payload.userId}
+    `;
+    // Unknown account, or a version that has moved on: fail closed.
+    if (!rows[0]) return null;
+    if (Number(rows[0].token_version) !== payload.tv) return null;
+
+    return payload;
   } catch {
     return null;
   }

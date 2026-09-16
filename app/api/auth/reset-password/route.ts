@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { validatePasswordResetToken, markTokenAsUsed } from '@/lib/password-reset';
-import { validatePassword } from '@/lib/auth';
+import { validatePassword, revokeUserSessions } from '@/lib/auth';
 import bcrypt from 'bcryptjs';
 
 export async function POST(req: Request) {
@@ -43,8 +43,15 @@ export async function POST(req: Request) {
     // The two changes belong together and must not be separated.
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Update password and mark token as used
-    await sql`UPDATE users SET password_hash = ${passwordHash} WHERE id = ${tokenData.userId}`;
+    // Update password, revoke existing sessions, and mark the token as used.
+    //
+    // The revocation is the point of resetting after a compromise. Without it
+    // the attacker's cookie stays valid for the rest of its seven days, so the
+    // owner changes their password and nothing actually changes.
+    await sql.begin(async (tx) => {
+      await tx`UPDATE users SET password_hash = ${passwordHash} WHERE id = ${tokenData.userId}`;
+      await revokeUserSessions(tokenData.userId, tx);
+    });
     await markTokenAsUsed(token);
 
     return NextResponse.json({ success: true });

@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import {
-  signToken, COOKIE_NAME, validateEmail, sanitizeString,
-  checkAccountLocked, recordFailedLogin, resetFailedLogins, auditLog, verifyUserPassword
+  COOKIE_NAME, validateEmail, sanitizeString,
+  checkAccountLocked, recordFailedLogin, resetFailedLogins, auditLog, verifyUserPassword, signTokenForUser
 } from '@/lib/auth';
 import { checkRateLimit, rateLimitHeaders, clientIdentifier } from '@/lib/rate-limit';
 
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
     await resetFailedLogins(user.id);
     await auditLog(user.id, 'login_success', { email });
 
-    const token = signToken({ userId: user.id, email: user.email, username: user.username });
+    const token = await signTokenForUser({ userId: user.id, email: user.email, username: user.username });
     const response = NextResponse.json({
       success: true,
       username: user.username,

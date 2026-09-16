@@ -102,6 +102,8 @@ export async function initializeSchema() {
       kyc_verified_at TIMESTAMPTZ,
       kyc_rejection_reason TEXT,
       failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+      -- Bumped to invalidate every JWT already issued for this account.
+      token_version INTEGER NOT NULL DEFAULT 0,
       locked_until TIMESTAMPTZ,
       last_login_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -149,7 +151,9 @@ export async function initializeSchema() {
       note TEXT,
       type TEXT NOT NULL DEFAULT 'payment',
       status TEXT NOT NULL DEFAULT 'completed',
-      privacy TEXT NOT NULL DEFAULT 'public',
+      -- Private by default: a payment should not be published to the feed
+      -- because its sender never found a setting they had no reason to look for.
+      privacy TEXT NOT NULL DEFAULT 'private',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;

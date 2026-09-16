@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS users (
   kyc_status TEXT NOT NULL DEFAULT 'pending',
   stripe_customer_id TEXT,
   failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+  token_version INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -194,7 +195,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   note TEXT,
   type TEXT NOT NULL DEFAULT 'payment',
   status TEXT NOT NULL DEFAULT 'completed',
-  privacy TEXT NOT NULL DEFAULT 'public',
+  privacy TEXT NOT NULL DEFAULT 'private',
   sender_currency TEXT,
   receiver_currency TEXT,
   sender_amount NUMERIC(14,2),

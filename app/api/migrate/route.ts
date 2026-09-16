@@ -91,6 +91,12 @@ export async function GET(req: NextRequest) {
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_verified_at TIMESTAMPTZ`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`;
+
+    // Transactions default to private. Existing rows keep whatever they were
+    // given; this only changes what a row created from now on gets when no
+    // privacy is supplied.
+    await sql`ALTER TABLE transactions ALTER COLUMN privacy SET DEFAULT 'private'`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`;
 

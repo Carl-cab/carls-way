@@ -58,7 +58,12 @@ export async function POST(req: NextRequest) {
     }
 
     const cleanNote = sanitizeString(note || '', 200);
-    const txPrivacy = ['public', 'friends', 'private'].includes(privacy) ? privacy : 'public';
+    // An unrecognised or absent value falls back to 'private', not 'public'.
+    // This was the effective default for every payment the API created, so a
+    // client that simply omitted the field published the transaction to the
+    // feed. Defaulting to the least exposure is the only safe direction for
+    // money movement; a sender who wants it public still says so explicitly.
+    const txPrivacy = ['public', 'friends', 'private'].includes(privacy) ? privacy : 'private';
 
     const sql = getSql();
 
