@@ -368,6 +368,89 @@ export async function isUninitializedDatabase(
 }
 
 /**
+ * Columns on `users` that the authentication path reads.
+ *
+ * If any of these is absent, login, registration and every authenticated
+ * request fail with `42703 column ... does not exist` — nobody can obtain a
+ * cookie, which means nobody can reach an endpoint that requires one.
+ *
+ * Adding a column here that the auth path reads is what keeps the bootstrap
+ * window honest; `lib/__tests__/schema-bootstrap.test.ts` fails if lib/auth.ts
+ * reads a `users` column this list does not name.
+ */
+export const AUTH_CRITICAL_USER_COLUMNS = [
+  'password_hash',
+  'token_version',
+] as const;
+
+/**
+ * True when the schema is missing something authentication needs.
+ *
+ * ## Why this exists
+ *
+ * Release 1.0 added `users.token_version`, which `getAuthUser()` and
+ * `signTokenForUser()` both read, and put the `ALTER TABLE` that creates it in
+ * `/api/migrate` — an endpoint that requires an authenticated caller. On a live
+ * database the result was a closed cycle: registration 500s on the missing
+ * column, login 500s on it too, so no cookie can be obtained, so the migration
+ * that would add the column cannot be reached. Production was locked out until
+ * someone ran the `ALTER` by hand against the database.
+ *
+ * `isUninitializedDatabase()` did not open the window, because the database was
+ * not empty — it had accounts, they just could not be used.
+ *
+ * The bootstrap window exists precisely because authentication is impossible.
+ * "No accounts yet" is one way for that to be true; "the schema auth depends on
+ * is incomplete" is another, and the remedy is identical — run the additive,
+ * idempotent DDL that fixes it. So the window opens for both.
+ *
+ * Conservative in the same way as the check above: anything unexpected reports
+ * false and keeps the endpoint closed. A database whose `users` table is absent
+ * entirely is not this condition — that is `isUninitializedDatabase()`.
+ */
+export async function isAuthBlockedBySchema(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<boolean> {
+  try {
+    const present = await sql`SELECT to_regclass('public.users') IS NOT NULL AS exists`;
+    if (!present[0]?.exists) return false;
+
+    const rows = await sql<{ column_name: string }[]>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'users'
+    `;
+    const have = new Set(rows.map((r) => r.column_name));
+    const missing = AUTH_CRITICAL_USER_COLUMNS.filter((c) => !have.has(c));
+
+    if (missing.length > 0) {
+      console.warn(
+        `Authentication is blocked by the schema: users is missing ${missing.join(', ')}. ` +
+          'Opening the bootstrap window so /api/migrate can add it.',
+      );
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error('Auth schema check failed; treating auth as reachable.', err);
+    return false;
+  }
+}
+
+/**
+ * Whether /api/migrate may run without a cookie.
+ *
+ * True only when nobody could present one: an empty database, or one whose
+ * schema cannot satisfy the auth path. Both are states where requiring
+ * authentication would make the fix unreachable.
+ */
+export async function isBootstrapAllowed(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<boolean> {
+  if (await isUninitializedDatabase(sql)) return true;
+  return isAuthBlockedBySchema(sql);
+}
+
+/**
  * Money columns that must hold exact cent values.
  *
  * Shared by `upgradeLegacyMoneyColumns()` and the migrate endpoint so the two

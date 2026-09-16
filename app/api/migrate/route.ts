@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   getSql,
   initializeSchema,
-  isUninitializedDatabase,
+  isBootstrapAllowed,
   upgradeLegacyMoneyColumns,
 } from '@/lib/db';
 import { getAuthUser, auditLog } from '@/lib/auth';
@@ -15,12 +15,19 @@ import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-l
  * It was once reachable anonymously, which left an unauthenticated
  * schema-mutation endpoint exposed on the public internet; that is closed.
  *
- * The one exception is first-run bootstrap. A brand-new deployment cannot
- * authenticate anyone, because registration needs the `users` table that only
- * this migration creates — schema, account, and cookie form a cycle with no
- * entry point. So when the database holds no account at all, this runs
- * unauthenticated, and it stops doing so permanently once the first account
- * exists.
+ * The one exception is bootstrap: the window opens when nobody *could* present
+ * a cookie, because requiring one would put the fix out of reach.
+ *
+ * Two states qualify, and they are the same problem. A brand-new deployment
+ * cannot authenticate anyone, because registration needs the `users` table that
+ * only this migration creates. And a live database whose schema is missing a
+ * column the auth path reads cannot authenticate anyone either — login and
+ * registration both fail on it, so no cookie can be obtained, so this endpoint
+ * cannot be reached to add the column. Release 1.0 hit exactly that with
+ * `users.token_version` and locked production out until the ALTER was run by
+ * hand. See isAuthBlockedBySchema in lib/db.ts.
+ *
+ * The window shuts as soon as either condition clears.
  *
  * What that window can be used for is bounded: every statement here is
  * idempotent (CREATE TABLE / ADD COLUMN / CREATE INDEX ... IF NOT EXISTS) and
@@ -40,7 +47,7 @@ export async function GET(req: NextRequest) {
     let bootstrap = false;
 
     if (!user) {
-      bootstrap = await isUninitializedDatabase();
+      bootstrap = await isBootstrapAllowed();
       if (!bootstrap) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
