@@ -166,6 +166,21 @@ export async function initializeSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  // Password reset tokens. This lived only in app/api/migrate/route.ts, so a
+  // deployment that came up through initializeSchema() — which is every cold
+  // start and every test database — had no table at all, and password reset
+  // failed with a 500 on the first query. CLAUDE.md requires both sources to
+  // carry every table for exactly this reason.
+  await sql`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
   await sql`
     CREATE TABLE IF NOT EXISTS transfer_intents (
       id SERIAL PRIMARY KEY,
