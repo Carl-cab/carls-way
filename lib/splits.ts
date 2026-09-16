@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { createLedgerPair } from '@/lib/ledger';
 
 /**
  * Bill splitting.
@@ -9,8 +10,10 @@ import { getSql } from '@/lib/db';
  *
  * Money movement reuses the existing atomic P2P path: paying a portion debits
  * the payer and credits the split creator inside one database transaction, and
- * writes the same ledger pair any other payment writes. Splits add bookkeeping
- * on top of that path; they do not introduce a second way to move money.
+ * writes the same ledger pair any other payment writes — on that same
+ * transaction, so the record cannot survive a rolled-back payment or go missing
+ * from a committed one. Splits add bookkeeping on top of that path; they do not
+ * introduce a second way to move money.
  */
 
 export type SplitStatus = 'open' | 'settled' | 'cancelled';
@@ -231,6 +234,31 @@ export async function paySplitPortion(
       RETURNING id
     `;
     const transactionId = txRows[0].id as number;
+
+    // Ledger pair, on this same transaction.
+    //
+    // This file's own docstring claimed splits "write the same ledger pair any
+    // other payment writes". They did not: the money moved above and nothing
+    // was ever recorded, so the ledger — documented as a passive audit log of
+    // ALL financial movement — was silently blank for an entire money-moving
+    // feature. The false comment is most of why it went unnoticed.
+    await createLedgerPair(
+      payerId,
+      participant.creator_id,
+      participant.currency,
+      amount,
+      transactionId,
+      {
+        executor: tx,
+        entryType: 'split_payment',
+        senderDescription: participant.description
+          ? `Paid split portion: ${participant.description}`
+          : 'Paid split portion',
+        receiverDescription: participant.description
+          ? `Split portion received: ${participant.description}`
+          : 'Split portion received',
+      },
+    );
 
     // `status = 'pending'` in the WHERE clause is the second guard against a
     // double payment: if another transaction won the race, this updates nothing.

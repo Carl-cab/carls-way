@@ -43,6 +43,10 @@ async function cleanup() {
     WHERE split_id IN (SELECT id FROM splits WHERE creator_id = ${CREATOR})
   `;
   await sql`DELETE FROM splits WHERE creator_id = ${CREATOR}`;   // cascades participants
+  // Split payments now write a ledger pair, and ledger_entries.transaction_id
+  // references transactions — so the entries go before the rows they cite.
+  await sql`DELETE FROM ledger_entries
+            WHERE user_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})`;
   await sql`DELETE FROM transactions WHERE sender_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})
                                         OR receiver_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})`;
 }
