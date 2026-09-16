@@ -9,7 +9,7 @@
  */
 
 import { BaseRepository } from '@/lib/repositories/BaseRepository';
-import { createHash } from 'crypto';
+import { hashAdminPassword } from '@/lib/rbac/admin-password';
 import type {
   AdminUser,
   AdminRole,
@@ -102,8 +102,13 @@ export class AdminRepository extends BaseRepository {
    */
   async createAdmin(input: CreateAdminUserInput): Promise<AdminUser> {
     return this.executeQuery(async () => {
-      // Hash password using PBKDF2
-      const passwordHash = createHash('sha256').update(input.password).digest('hex');
+      // bcrypt, matching what admin login verifies with.
+      //
+      // This hashed with unsalted SHA-256 under a comment claiming PBKDF2,
+      // while app/api/admin/auth/login verifies through verifyAdminPassword
+      // (bcrypt). Any administrator created here could therefore never sign in,
+      // and their password was stored in a form a rainbow table reverses.
+      const passwordHash = await hashAdminPassword(input.password);
 
       const result = await this.sql<AdminUser[]>`
         INSERT INTO admin_users (
@@ -462,27 +467,10 @@ export class AdminRepository extends BaseRepository {
     }, 'AdminRepository.deleteSessionsForAdmin');
   }
 
-  /**
-   * Verify password against hash.
-   *
-   * @param password Plain text password
-   * @param hash Stored password hash
-   * @returns true if password matches
-   */
-  verifyPassword(password: string, hash: string): boolean {
-    const computed = createHash('sha256').update(password).digest('hex');
-    return computed === hash;
-  }
-
-  /**
-   * Hash a password.
-   *
-   * @param password Plain text password
-   * @returns Password hash
-   */
-  hashPassword(password: string): string {
-    return createHash('sha256').update(password).digest('hex');
-  }
+  // verifyPassword() and hashPassword() used to live here, both unsalted
+  // SHA-256. Nothing called them, and anything that started to would have
+  // written or accepted a credential the real login path cannot verify. Use
+  // hashAdminPassword / verifyAdminPassword in lib/rbac/admin-password.ts.
 }
 
 /**

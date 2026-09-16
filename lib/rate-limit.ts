@@ -168,14 +168,44 @@ export function rateLimitHeaders(result: RateLimitResult): Record<string, string
 /**
  * Client identifier for an unauthenticated request.
  *
+ * ## Which part of X-Forwarded-For can be trusted
+ *
+ * `X-Forwarded-For` is built left to right: each proxy appends the address it
+ * received the connection from. The client controls what it sends, so the
+ * *leftmost* entries are whatever the client made up, and only the entry
+ * appended by the nearest trusted proxy is authentic — the rightmost one.
+ *
+ * This read the leftmost entry. Every rate limit keyed on it could therefore be
+ * bypassed outright: send a different `X-Forwarded-For: <random>` per request
+ * and each attempt looks like a new client, so the counter never accumulates.
+ * That removes the ceiling from login, registration and password reset at once.
+ *
+ * `x-real-ip` is preferred where present because a proxy that sets it writes a
+ * single address it observed directly, with no client-supplied prefix to strip.
+ *
  * Falls back to a constant when no forwarding header is present, which makes the
  * limit global rather than per-client. That is the safe direction: it throttles
  * more, not less.
+ *
+ * This is correct for a deployment sitting behind exactly one trusted proxy,
+ * which is how Vercel serves this app. Behind a chain of N trusted proxies the
+ * authentic entry is the Nth from the right; that needs a configured hop count
+ * rather than a fixed rule, and should be revisited if the topology changes.
  */
 export function clientIdentifier(req: { headers: { get(name: string): string | null } }): string {
+  const realIp = req.headers.get('x-real-ip')?.trim();
+  if (realIp) return realIp;
+
   const forwarded = req.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
-  return req.headers.get('x-real-ip') ?? 'unknown-client';
+  if (forwarded) {
+    const hops = forwarded
+      .split(',')
+      .map((hop) => hop.trim())
+      .filter((hop) => hop.length > 0);
+    if (hops.length > 0) return hops[hops.length - 1];
+  }
+
+  return 'unknown-client';
 }
 
 /** Test-only: clear in-process counters between cases. */

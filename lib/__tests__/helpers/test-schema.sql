@@ -88,12 +88,13 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT UNIQUE NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  balance_cad REAL NOT NULL DEFAULT 0,
-  balance_usd REAL NOT NULL DEFAULT 0,
+  balance_cad NUMERIC(14,2) NOT NULL DEFAULT 0,
+  balance_usd NUMERIC(14,2) NOT NULL DEFAULT 0,
   country TEXT NOT NULL DEFAULT 'CA',
   kyc_status TEXT NOT NULL DEFAULT 'pending',
   stripe_customer_id TEXT,
   failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+  token_version INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -117,12 +118,21 @@ CREATE TABLE IF NOT EXISTS bank_accounts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  token_hash TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS transfer_intents (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id),
   bank_account_id INTEGER REFERENCES bank_accounts(id),
   type TEXT NOT NULL,
-  amount REAL NOT NULL,
+  amount NUMERIC(14,2) NOT NULL,
   currency TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'draft',
   provider_region TEXT NOT NULL DEFAULT 'CA',
@@ -180,16 +190,16 @@ CREATE TABLE IF NOT EXISTS transactions (
   id SERIAL PRIMARY KEY,
   sender_id INTEGER NOT NULL REFERENCES users(id),
   receiver_id INTEGER NOT NULL REFERENCES users(id),
-  amount REAL NOT NULL,
+  amount NUMERIC(14,2) NOT NULL,
   currency TEXT NOT NULL DEFAULT 'CAD',
   note TEXT,
   type TEXT NOT NULL DEFAULT 'payment',
   status TEXT NOT NULL DEFAULT 'completed',
-  privacy TEXT NOT NULL DEFAULT 'public',
+  privacy TEXT NOT NULL DEFAULT 'private',
   sender_currency TEXT,
   receiver_currency TEXT,
-  sender_amount REAL,
-  receiver_amount REAL,
+  sender_amount NUMERIC(14,2),
+  receiver_amount NUMERIC(14,2),
   is_cross_border BOOLEAN DEFAULT false,
   payment_rail TEXT,
   external_ref TEXT,
@@ -231,3 +241,28 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
+
+
+-- ── Ledger ──────────────────────────────────────────────────────────────────
+-- Mirrors lib/db.ts. This was absent from the test schema, so a test touching
+-- ledger_entries passed locally — where an earlier initializeSchema() had
+-- already created the table — and failed on CI's clean database. Split
+-- payments now write ledger rows, which is how the gap surfaced.
+-- Declared last: it references both transactions and transfer_intents.
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  transaction_id INTEGER REFERENCES transactions(id),
+  transfer_intent_id INTEGER REFERENCES transfer_intents(id),
+  currency TEXT NOT NULL,
+  account_type TEXT NOT NULL DEFAULT 'wallet',
+  entry_type TEXT NOT NULL,
+  debit NUMERIC(12,2) NOT NULL DEFAULT 0,
+  credit NUMERIC(12,2) NOT NULL DEFAULT 0,
+  provider TEXT,
+  provider_reference TEXT,
+  provider_event_id TEXT,
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(transfer_intent_id, provider_event_id, entry_type)
+);

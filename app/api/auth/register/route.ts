@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
-import { signToken, COOKIE_NAME, validateEmail, validatePassword, sanitizeString, auditLog } from '@/lib/auth';
+import { signTokenForUser, COOKIE_NAME, validateEmail, validatePassword, sanitizeString, auditLog } from '@/lib/auth';
 import { checkRateLimit, rateLimitHeaders, clientIdentifier } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
 
     await auditLog(userId, 'user_registered', { email, country: userCountry });
 
-    const token = signToken({ userId, email, username });
+    const token = await signTokenForUser({ userId, email, username });
     const response = NextResponse.json({ success: true, username }, { status: 201 });
     response.cookies.set(COOKIE_NAME, token, {
       httpOnly: true,

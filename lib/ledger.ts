@@ -1,4 +1,21 @@
+import type postgres from 'postgres';
 import { getSql } from '@/lib/db';
+
+/**
+ * Something that can run a query: the connection pool, or a transaction handle
+ * handed to `sql.begin(async (tx) => ...)`.
+ *
+ * `ISql` is the interface both `Sql` and `TransactionSql` extend — the query
+ * surface without the pool-lifecycle methods (`END`, `CLOSE`, `listen`) that a
+ * transaction handle deliberately lacks. Typing against it is what lets one
+ * function body serve both callers without a cast.
+ *
+ * The ledger is described as a passive audit log of all financial movement. It
+ * can only be that if its entries commit with the movement they record, which
+ * means writing them on the caller's transaction rather than a fresh
+ * connection.
+ */
+export type LedgerExecutor = postgres.ISql;
 
 export interface LedgerEntry {
   id: number;
@@ -117,6 +134,15 @@ export async function createLedgerPair(
     senderDescription?: string;
     receiverDescription?: string;
     provider?: string;
+    /**
+     * Transaction to write inside, from `sql.begin(async (tx) => ...)`.
+     *
+     * Without this the entries go out on a separate connection, so they commit
+     * independently of the balance change they describe — and a caller that
+     * wants both to succeed or neither has no way to ask for it. Callers that
+     * move money should always pass their transaction.
+     */
+    executor?: LedgerExecutor;
   }
 ): Promise<{ debitEntryId: number; creditEntryId: number }> {
   if (senderUserId === receiverUserId) {
@@ -131,10 +157,11 @@ export async function createLedgerPair(
     throw new Error(`Invalid currency: ${currency}. Must be CAD or USD.`);
   }
 
-  const sql = getSql();
+  const sql = options?.executor ?? getSql();
   const entryType = options?.entryType ?? 'payment';
 
-  // Insert both entries in a single batch for atomicity
+  // One statement, so the pair can never be half-written. When `executor` is a
+  // caller's transaction this also commits with the balance change it records.
   const results = await sql`
     WITH sender_entry AS (
       INSERT INTO ledger_entries (
@@ -182,6 +209,8 @@ export async function createCrossBorderLedgerPair(
     senderDescription?: string;
     receiverDescription?: string;
     provider?: string;
+    /** Transaction to write inside. See createLedgerPair. */
+    executor?: LedgerExecutor;
   }
 ): Promise<{ senderEntryId: number; receiverEntryId: number }> {
   if (senderUserId === receiverUserId) {
@@ -197,9 +226,9 @@ export async function createCrossBorderLedgerPair(
     throw new Error('Both currencies must be CAD or USD.');
   }
 
-  const sql = getSql();
+  const sql = options?.executor ?? getSql();
 
-  // Insert both entries in a single transaction for atomicity
+  // Insert both entries in a single statement for atomicity
   const results = await sql`
     WITH sender_entry AS (
       INSERT INTO ledger_entries (

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
 import {
-  signToken, COOKIE_NAME, validateEmail, sanitizeString,
-  checkAccountLocked, recordFailedLogin, resetFailedLogins, auditLog
+  COOKIE_NAME, validateEmail, sanitizeString,
+  checkAccountLocked, recordFailedLogin, resetFailedLogins, auditLog, verifyUserPassword, signTokenForUser
 } from '@/lib/auth';
 import { checkRateLimit, rateLimitHeaders, clientIdentifier } from '@/lib/rate-limit';
 
@@ -38,8 +37,9 @@ export async function POST(req: NextRequest) {
     } | undefined;
 
     if (!user) {
-      // Timing-safe: still run bcrypt to prevent user enumeration
-      await bcrypt.compare(password, '$2b$10$invalidhashfortimingnormalization');
+      // Runs a real bcrypt comparison at the production cost so an unknown
+      // address takes as long to reject as a known one. See verifyUserPassword.
+      await verifyUserPassword(password, null);
       return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 });
     }
 
@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Account temporarily locked due to too many failed attempts. Try again in 30 minutes.' }, { status: 429 });
     }
 
-    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    const passwordMatch = await verifyUserPassword(password, user.password_hash);
     if (!passwordMatch) {
       await recordFailedLogin(user.id);
       await auditLog(user.id, 'login_failed', { email });
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
     await resetFailedLogins(user.id);
     await auditLog(user.id, 'login_success', { email });
 
-    const token = signToken({ userId: user.id, email: user.email, username: user.username });
+    const token = await signTokenForUser({ userId: user.id, email: user.email, username: user.username });
     const response = NextResponse.json({
       success: true,
       username: user.username,

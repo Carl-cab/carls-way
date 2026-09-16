@@ -106,7 +106,14 @@ describe('session credential', () => {
     const cred = issueSessionCredential();
     const { token } = parseSessionCookie(cred.cookieValue)!;
     expect(sessionTokenMatches(token, cred.tokenHash)).toBe(true);
-    expect(sessionTokenMatches(`${token.slice(0, -1)}0`, cred.tokenHash)).toBe(false);
+    // Flip the last character to a *different* hex digit. Hard-coding '0' made
+    // this a 1-in-16 flake: when the token already ended in '0' the "wrong"
+    // token was the right one, and the assertion failed for the correct reason.
+    // (Same fix as on phase3/stripe-settlement, which has not merged; ported
+    // here so this PR's CI is not hostage to that one.)
+    const last = token[token.length - 1];
+    const wrong = `${token.slice(0, -1)}${last === '0' ? '1' : '0'}`;
+    expect(sessionTokenMatches(wrong, cred.tokenHash)).toBe(false);
     expect(sessionTokenMatches(token, 'not-hex')).toBe(false);
     expect(sessionTokenMatches(token, '')).toBe(false);
   });

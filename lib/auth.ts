@@ -1,5 +1,7 @@
 import { cookies } from 'next/headers';
 import jwt from 'jsonwebtoken';
+import type postgres from 'postgres';
+import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
 
 export const COOKIE_NAME = 'manna-token';
@@ -42,6 +44,16 @@ export interface JWTPayload {
   userId: number;
   email: string;
   username: string;
+  /**
+   * The account's token version at the moment this token was issued.
+   *
+   * A signed JWT is otherwise valid until it expires — there was no way to
+   * revoke one, so a stolen token stayed usable for a full seven days and
+   * changing the password did nothing to it. Comparing this against
+   * `users.token_version` on each request makes a bump an immediate,
+   * account-wide logout.
+   */
+  tv?: number;
 }
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
@@ -57,12 +69,59 @@ export function verifyToken(token: string): JWTPayload | null {
   }
 }
 
+/**
+ * Issue a token carrying the account's current version.
+ *
+ * Every login path should use this rather than signToken directly, so the
+ * version is never omitted by accident — a token without one is rejected.
+ */
+export async function signTokenForUser(
+  payload: Omit<JWTPayload, 'tv'>,
+): Promise<string> {
+  const sql = getSql();
+  const rows = await sql<{ token_version: number }[]>`
+    SELECT token_version FROM users WHERE id = ${payload.userId}
+  `;
+  return signToken({ ...payload, tv: Number(rows[0]?.token_version ?? 0) });
+}
+
+/**
+ * Invalidate every token already issued for an account.
+ *
+ * Called on password reset: a password change that leaves the attacker's
+ * existing session alive is not a recovery.
+ */
+export async function revokeUserSessions(
+  userId: number,
+  executor?: postgres.ISql,
+): Promise<void> {
+  const sql = executor ?? getSql();
+  await sql`UPDATE users SET token_version = token_version + 1 WHERE id = ${userId}`;
+}
+
 export async function getAuthUser(): Promise<JWTPayload | null> {
   try {
     const cookieStore = await cookies();
     const token = cookieStore.get(COOKIE_NAME)?.value;
     if (!token) return null;
-    return verifyToken(token);
+
+    const payload = verifyToken(token);
+    if (!payload) return null;
+
+    // A token with no version predates revocation support and cannot be
+    // checked, so it is refused. Deploying this logs everyone in once more;
+    // that is the intended one-time cost of being able to revoke at all.
+    if (typeof payload.tv !== 'number') return null;
+
+    const sql = getSql();
+    const rows = await sql<{ token_version: number }[]>`
+      SELECT token_version FROM users WHERE id = ${payload.userId}
+    `;
+    // Unknown account, or a version that has moved on: fail closed.
+    if (!rows[0]) return null;
+    if (Number(rows[0].token_version) !== payload.tv) return null;
+
+    return payload;
   } catch {
     return null;
   }
@@ -277,6 +336,47 @@ export async function reverseVelocity(
     // Log but don't block: reversal is for audit/compliance, not transaction-critical
     console.error('Velocity reversal failed (non-blocking):', err);
   }
+}
+
+// ─── Password verification ───────────────────────────────────────────────────
+
+/** Cost factor for customer password hashes. Must match app/api/auth/register. */
+export const USER_PASSWORD_ROUNDS = 12;
+
+/**
+ * A valid bcrypt hash, at the same cost as a real one, of a random value that
+ * was generated once and discarded. Nothing can ever match it.
+ *
+ * Being well-formed is the entire point. The login route previously compared
+ * against the string '$2b$10$invalidhashfortimingnormalization', which is not a
+ * valid bcrypt digest — bcrypt rejects it immediately instead of running the
+ * 2^12 rounds, so the comparison returned in roughly 0ms against ~315ms for a
+ * real account. That is a 300-millisecond answer to "is this email
+ * registered?", readable by anyone with a stopwatch, and the code carried a
+ * comment claiming it prevented exactly that.
+ *
+ * The cost here must track USER_PASSWORD_ROUNDS. A dummy at a lower cost is a
+ * quieter version of the same leak.
+ */
+const ABSENT_USER_DUMMY_HASH =
+  '$2b$12$Whhtn9J4nkw6o6lG1y3PSOSEDwYNjgeTliCsXTDCqorkSkIwpvoH6';
+
+/**
+ * Verify a password against a stored hash, taking the same time whether or not
+ * the account exists.
+ *
+ * Pass `null`/`undefined` for an unknown account: the bcrypt work still runs,
+ * against a hash nothing matches, and the answer is false.
+ */
+export async function verifyUserPassword(
+  password: string,
+  storedHash: string | null | undefined,
+): Promise<boolean> {
+  if (!storedHash) {
+    await bcrypt.compare(password, ABSENT_USER_DUMMY_HASH).catch(() => false);
+    return false;
+  }
+  return bcrypt.compare(password, storedHash).catch(() => false);
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────

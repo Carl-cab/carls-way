@@ -58,7 +58,12 @@ export async function POST(req: NextRequest) {
     }
 
     const cleanNote = sanitizeString(note || '', 200);
-    const txPrivacy = ['public', 'friends', 'private'].includes(privacy) ? privacy : 'public';
+    // An unrecognised or absent value falls back to 'private', not 'public'.
+    // This was the effective default for every payment the API created, so a
+    // client that simply omitted the field published the transaction to the
+    // feed. Defaulting to the least exposure is the only safe direction for
+    // money movement; a sender who wants it public still says so explicitly.
+    const txPrivacy = ['public', 'friends', 'private'].includes(privacy) ? privacy : 'private';
 
     const sql = getSql();
 
@@ -150,45 +155,52 @@ export async function POST(req: NextRequest) {
             )
             RETURNING id
           `;
-          return result[0].id as number;
+          const newTxId = result[0].id as number;
+
+          // Ledger entries are written HERE, on this transaction.
+          //
+          // They used to run after the block, wrapped in a try/catch that
+          // logged and continued, commented "passive/audit-only; failure
+          // should not block the transaction". The effect was that balances
+          // could move while the record explaining the movement silently did
+          // not exist — ledger and wallets disagreeing with nothing but a
+          // console line to say so. "Passive" describes what the ledger is
+          // for, not how reliably it has to be written.
+          //
+          // Inside the transaction, a ledger failure now rolls the money back
+          // with it. Either both happened or neither did.
+          if (isCrossBorder) {
+            const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${senderCurrency})`;
+            await createCrossBorderLedgerPair(
+              user.userId,
+              senderCurrency,
+              numAmount,
+              receiver.id,
+              receiverCurrency,
+              receiverAmount,
+              newTxId,
+              {
+                executor: tx,
+                senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}; converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
+                receiverDescription: `Received ${receiverAmount} ${receiverCurrency} from @${user.username} (converted from ${numAmount} ${senderCurrency} ${fxDescription})`,
+              },
+            );
+          } else {
+            await createLedgerPair(user.userId, receiver.id, senderCurrency, numAmount, newTxId, {
+              executor: tx,
+              entryType: 'payment_sent',
+              senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}`,
+              receiverDescription: `Received ${numAmount} ${senderCurrency} from @${user.username}`,
+            });
+          }
+
+          return newTxId;
         }) as unknown as number;
       } catch (txErr) {
         if (txErr instanceof Error && txErr.message === 'INSUFFICIENT_BALANCE') {
           return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
         }
         throw txErr;
-      }
-
-      // Create passive ledger entries for auditability
-      try {
-        if (isCrossBorder) {
-          // Cross-border: atomic creation of sender debit (sender currency) + receiver credit (receiver currency)
-          const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${senderCurrency})`;
-
-          await createCrossBorderLedgerPair(
-            user.userId,
-            senderCurrency,
-            numAmount,
-            receiver.id,
-            receiverCurrency,
-            receiverAmount,
-            txId,
-            {
-              senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}; converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
-              receiverDescription: `Received ${receiverAmount} ${receiverCurrency} from @${user.username} (converted from ${numAmount} ${senderCurrency} ${fxDescription})`,
-            }
-          );
-        } else {
-          // Same-currency: atomic pair of entries (debit + credit)
-          await createLedgerPair(user.userId, receiver.id, senderCurrency, numAmount, txId, {
-            entryType: 'payment_sent',
-            senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}`,
-            receiverDescription: `Received ${numAmount} ${senderCurrency} from @${user.username}`,
-          });
-        }
-      } catch (ledgerErr) {
-        console.error('Ledger entry creation failed (non-blocking):', ledgerErr);
-        // Ledger entries are passive/audit-only; failure should not block the transaction
       }
 
       await recordVelocity(user.userId, numAmount, senderCurrency);
