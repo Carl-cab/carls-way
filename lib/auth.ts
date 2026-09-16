@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
 
 export const COOKIE_NAME = 'manna-token';
@@ -277,6 +278,47 @@ export async function reverseVelocity(
     // Log but don't block: reversal is for audit/compliance, not transaction-critical
     console.error('Velocity reversal failed (non-blocking):', err);
   }
+}
+
+// ─── Password verification ───────────────────────────────────────────────────
+
+/** Cost factor for customer password hashes. Must match app/api/auth/register. */
+export const USER_PASSWORD_ROUNDS = 12;
+
+/**
+ * A valid bcrypt hash, at the same cost as a real one, of a random value that
+ * was generated once and discarded. Nothing can ever match it.
+ *
+ * Being well-formed is the entire point. The login route previously compared
+ * against the string '$2b$10$invalidhashfortimingnormalization', which is not a
+ * valid bcrypt digest — bcrypt rejects it immediately instead of running the
+ * 2^12 rounds, so the comparison returned in roughly 0ms against ~315ms for a
+ * real account. That is a 300-millisecond answer to "is this email
+ * registered?", readable by anyone with a stopwatch, and the code carried a
+ * comment claiming it prevented exactly that.
+ *
+ * The cost here must track USER_PASSWORD_ROUNDS. A dummy at a lower cost is a
+ * quieter version of the same leak.
+ */
+const ABSENT_USER_DUMMY_HASH =
+  '$2b$12$Whhtn9J4nkw6o6lG1y3PSOSEDwYNjgeTliCsXTDCqorkSkIwpvoH6';
+
+/**
+ * Verify a password against a stored hash, taking the same time whether or not
+ * the account exists.
+ *
+ * Pass `null`/`undefined` for an unknown account: the bcrypt work still runs,
+ * against a hash nothing matches, and the answer is false.
+ */
+export async function verifyUserPassword(
+  password: string,
+  storedHash: string | null | undefined,
+): Promise<boolean> {
+  if (!storedHash) {
+    await bcrypt.compare(password, ABSENT_USER_DUMMY_HASH).catch(() => false);
+    return false;
+  }
+  return bcrypt.compare(password, storedHash).catch(() => false);
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────
