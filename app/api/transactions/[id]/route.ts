@@ -114,7 +114,9 @@ export async function PATCH(
       estimatedSettlement = quote.estimatedSettlement;
     }
 
-    // Atomically: debit payer (with balance guard), credit receiver, mark request completed.
+    // Atomically: debit payer (with balance guard), credit receiver, complete
+    // the request, and create its ledger pair. A ledger failure must roll back
+    // the money movement; it is not a best-effort audit side effect.
     try {
       await sql.begin(async (tx) => {
         const debited = payerCurrency === 'USD'
@@ -146,6 +148,31 @@ export async function PATCH(
         if (updated.length === 0) {
           throw new Error('ALREADY_PROCESSED');
         }
+
+        const requesterRows = await tx`SELECT username FROM users WHERE id = ${transaction.receiver_id}`;
+        const requesterUsername = (requesterRows[0]?.username as string) || 'user';
+
+        if (transaction.is_cross_border) {
+          const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${payerCurrency})`;
+          await createCrossBorderLedgerPair(
+            user.userId, payerCurrency, numAmount,
+            transaction.receiver_id, receiverCurrency, receiverAmount,
+            transaction.id,
+            {
+              executor: tx,
+              senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency} converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
+              receiverDescription: `Request fulfilled by @${user.username}: received ${receiverAmount} ${receiverCurrency} (from ${numAmount} ${payerCurrency} ${fxDescription})`,
+            }
+          );
+        } else {
+          await createLedgerPair(user.userId, transaction.receiver_id, payerCurrency, numAmount, transaction.id, {
+            executor: tx,
+            senderEntryType: 'payment_sent',
+            receiverEntryType: 'payment_received',
+            senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency}`,
+            receiverDescription: `Request fulfilled by @${user.username}: received ${numAmount} ${payerCurrency}`,
+          });
+        }
       });
     } catch (txErr) {
       if (txErr instanceof Error && txErr.message === 'INSUFFICIENT_BALANCE') {
@@ -155,33 +182,6 @@ export async function PATCH(
         return NextResponse.json({ error: 'Request already processed' }, { status: 409 });
       }
       throw txErr;
-    }
-
-    // Ledger entries for auditability (passive; non-blocking on failure)
-    try {
-      const requesterRows = await sql`SELECT username FROM users WHERE id = ${transaction.receiver_id}`;
-      const requesterUsername = (requesterRows[0]?.username as string) || 'user';
-      if (transaction.is_cross_border) {
-        const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${payerCurrency})`;
-        await createCrossBorderLedgerPair(
-          user.userId, payerCurrency, numAmount,
-          transaction.receiver_id, receiverCurrency, receiverAmount,
-          transaction.id,
-          {
-            senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency} converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
-            receiverDescription: `Request fulfilled by @${user.username}: received ${receiverAmount} ${receiverCurrency} (from ${numAmount} ${payerCurrency} ${fxDescription})`,
-          }
-        );
-      } else {
-        await createLedgerPair(user.userId, transaction.receiver_id, payerCurrency, numAmount, transaction.id, {
-          senderEntryType: 'payment_sent',
-          receiverEntryType: 'payment_received',
-          senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency}`,
-          receiverDescription: `Request fulfilled by @${user.username}: received ${numAmount} ${payerCurrency}`,
-        });
-      }
-    } catch (ledgerErr) {
-      console.error('Ledger entry creation failed (non-blocking):', ledgerErr);
     }
 
     await recordVelocity(user.userId, numAmount, payerCurrency);

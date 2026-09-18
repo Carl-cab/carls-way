@@ -239,16 +239,22 @@ describe('ledger writes share the caller transaction', () => {
 });
 
 describe('peer-to-peer ledger failures are not swallowed', () => {
-  it('no longer carries a catch that logs and continues', async () => {
-    const source = await (await import('node:fs/promises')).readFile(
+  it('keeps direct and request-acceptance ledger writes inside their payment transaction', async () => {
+    const directPayment = await (await import('node:fs/promises')).readFile(
       'app/api/transactions/route.ts',
       'utf8',
     );
+    const requestPayment = await (await import('node:fs/promises')).readFile(
+      'app/api/transactions/[id]/route.ts',
+      'utf8',
+    );
 
-    expect(source).not.toContain('non-blocking');
-    expect(source).not.toMatch(/catch \(ledgerErr\)/);
-    // And the writes must be handed the transaction, not left on the pool.
-    expect(source).toContain('executor: tx');
+    for (const source of [directPayment, requestPayment]) {
+      expect(source).not.toContain('non-blocking');
+      expect(source).not.toMatch(/catch \(ledgerErr\)/);
+      // The writes must be handed the transaction, not left on the pool.
+      expect(source).toContain('executor: tx');
+    }
   });
 
   it('uses a receiver-specific label for each domestic P2P credit path', async () => {
