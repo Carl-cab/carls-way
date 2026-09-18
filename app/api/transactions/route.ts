@@ -188,7 +188,8 @@ export async function POST(req: NextRequest) {
           } else {
             await createLedgerPair(user.userId, receiver.id, senderCurrency, numAmount, newTxId, {
               executor: tx,
-              entryType: 'payment_sent',
+              senderEntryType: 'payment_sent',
+              receiverEntryType: 'payment_received',
               senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}`,
               receiverDescription: `Received ${numAmount} ${senderCurrency} from @${user.username}`,
             });

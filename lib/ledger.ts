@@ -130,7 +130,15 @@ export async function createLedgerPair(
   amount: number,
   transactionId: number,
   options?: {
+    /**
+     * A shared operation label for both sides of the pair, such as
+     * `split_payment`. Prefer directional labels for ordinary P2P transfers.
+     */
     entryType?: string;
+    /** Entry type applied to the sender's debit. */
+    senderEntryType?: string;
+    /** Entry type applied to the recipient's credit. */
+    receiverEntryType?: string;
     senderDescription?: string;
     receiverDescription?: string;
     provider?: string;
@@ -158,7 +166,14 @@ export async function createLedgerPair(
   }
 
   const sql = options?.executor ?? getSql();
-  const entryType = options?.entryType ?? 'payment';
+  // A payment direction belongs to the individual ledger row, not the pair.
+  // The original single `entryType` option applied `payment_sent` to both
+  // entries, which made the recipient's credit appear to be an outgoing
+  // payment in ledger history and reporting. A shared type remains supported
+  // for operations whose accounting label is deliberately neutral (for
+  // example, `split_payment`).
+  const senderEntryType = options?.senderEntryType ?? options?.entryType ?? 'payment_sent';
+  const receiverEntryType = options?.receiverEntryType ?? options?.entryType ?? 'payment_received';
 
   // One statement, so the pair can never be half-written. When `executor` is a
   // caller's transaction this also commits with the balance change it records.
@@ -168,7 +183,7 @@ export async function createLedgerPair(
         user_id, transaction_id, currency, account_type, entry_type,
         debit, credit, provider, description
       ) VALUES (
-        ${senderUserId}, ${transactionId}, ${currency}, 'wallet', ${entryType},
+        ${senderUserId}, ${transactionId}, ${currency}, 'wallet', ${senderEntryType},
         ${amount}, 0, ${options?.provider ?? null}, ${options?.senderDescription ?? null}
       )
       RETURNING id
@@ -178,7 +193,7 @@ export async function createLedgerPair(
         user_id, transaction_id, currency, account_type, entry_type,
         debit, credit, provider, description
       ) VALUES (
-        ${receiverUserId}, ${transactionId}, ${currency}, 'wallet', ${entryType},
+        ${receiverUserId}, ${transactionId}, ${currency}, 'wallet', ${receiverEntryType},
         0, ${amount}, ${options?.provider ?? null}, ${options?.receiverDescription ?? null}
       )
       RETURNING id

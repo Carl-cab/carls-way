@@ -174,7 +174,8 @@ export async function PATCH(
         );
       } else {
         await createLedgerPair(user.userId, transaction.receiver_id, payerCurrency, numAmount, transaction.id, {
-          entryType: 'payment_sent',
+          senderEntryType: 'payment_sent',
+          receiverEntryType: 'payment_received',
           senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency}`,
           receiverDescription: `Request fulfilled by @${user.username}: received ${numAmount} ${payerCurrency}`,
         });
