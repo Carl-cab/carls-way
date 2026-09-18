@@ -91,10 +91,12 @@ describe('split payments write to the ledger', () => {
     expect(debit.user_id).toBe(payer);
     expect(Number(debit.debit)).toBe(40);
     expect(Number(debit.credit)).toBe(0);
+    expect(debit.entry_type).toBe('split_payment');
 
     expect(credit.user_id).toBe(creator);
     expect(Number(credit.credit)).toBe(40);
     expect(Number(credit.debit)).toBe(0);
+    expect(credit.entry_type).toBe('split_payment');
   });
 
   it('keeps the ledger in step with the wallets it describes', async () => {
@@ -199,19 +201,76 @@ describe('ledger writes share the caller transaction', () => {
     expect(pair.debitEntryId).toBeGreaterThan(0);
     expect(pair.creditEntryId).toBeGreaterThan(0);
   });
+
+  it('labels ordinary payment debits and credits by their respective directions', async () => {
+    const txRows = await sql<{ id: number }[]>`
+      INSERT INTO transactions (sender_id, receiver_id, amount, currency, type, status)
+      VALUES (${payer}, ${creator}, 12.34, 'CAD', 'payment', 'completed') RETURNING id
+    `;
+
+    await createLedgerPair(payer, creator, 'CAD', 12.34, txRows[0].id, {
+      senderEntryType: 'payment_sent',
+      receiverEntryType: 'payment_received',
+    });
+
+    const entries = await ledgerRowsFor(txRows[0].id);
+    expect(entries).toHaveLength(2);
+
+    const debit = entries.find((entry) => Number(entry.debit) === 12.34);
+    const credit = entries.find((entry) => Number(entry.credit) === 12.34);
+    expect(debit).toMatchObject({ user_id: payer, entry_type: 'payment_sent' });
+    expect(credit).toMatchObject({ user_id: creator, entry_type: 'payment_received' });
+  });
+
+  it('uses directional payment labels when no shared type is supplied', async () => {
+    const txRows = await sql<{ id: number }[]>`
+      INSERT INTO transactions (sender_id, receiver_id, amount, currency, type, status)
+      VALUES (${payer}, ${creator}, 7.89, 'CAD', 'payment', 'completed') RETURNING id
+    `;
+
+    await createLedgerPair(payer, creator, 'CAD', 7.89, txRows[0].id);
+
+    const entries = await ledgerRowsFor(txRows[0].id);
+    const debit = entries.find((entry) => Number(entry.debit) === 7.89);
+    const credit = entries.find((entry) => Number(entry.credit) === 7.89);
+    expect(debit).toMatchObject({ user_id: payer, entry_type: 'payment_sent' });
+    expect(credit).toMatchObject({ user_id: creator, entry_type: 'payment_received' });
+  });
 });
 
 describe('peer-to-peer ledger failures are not swallowed', () => {
-  it('no longer carries a catch that logs and continues', async () => {
-    const source = await (await import('node:fs/promises')).readFile(
+  it('keeps direct and request-acceptance ledger writes inside their payment transaction', async () => {
+    const directPayment = await (await import('node:fs/promises')).readFile(
       'app/api/transactions/route.ts',
       'utf8',
     );
+    const requestPayment = await (await import('node:fs/promises')).readFile(
+      'app/api/transactions/[id]/route.ts',
+      'utf8',
+    );
 
-    expect(source).not.toContain('non-blocking');
-    expect(source).not.toMatch(/catch \(ledgerErr\)/);
-    // And the writes must be handed the transaction, not left on the pool.
-    expect(source).toContain('executor: tx');
+    for (const source of [directPayment, requestPayment]) {
+      expect(source).not.toContain('non-blocking');
+      expect(source).not.toMatch(/catch \(ledgerErr\)/);
+      // The writes must be handed the transaction, not left on the pool.
+      expect(source).toContain('executor: tx');
+    }
+  });
+
+  it('uses a receiver-specific label for each domestic P2P credit path', async () => {
+    const directPayment = await (await import('node:fs/promises')).readFile(
+      'app/api/transactions/route.ts',
+      'utf8',
+    );
+    const requestPayment = await (await import('node:fs/promises')).readFile(
+      'app/api/transactions/[id]/route.ts',
+      'utf8',
+    );
+
+    for (const source of [directPayment, requestPayment]) {
+      expect(source).toContain("senderEntryType: 'payment_sent'");
+      expect(source).toContain("receiverEntryType: 'payment_received'");
+    }
   });
 
   it('keeps splits writing their pair on the payment transaction', async () => {
