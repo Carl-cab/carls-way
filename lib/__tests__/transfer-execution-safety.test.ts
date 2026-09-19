@@ -19,7 +19,7 @@ import { getSql } from '../db';
 
 // ── Plaid SDK mock ───────────────────────────────────────────────────────────
 // Records every call so tests can assert exactly what was sent to the provider.
-interface AuthCall { amount: string }
+interface AuthCall { amount: string; idempotency_key: string }
 interface CreateCall { authorization_id: string }
 
 const plaidCalls = {
@@ -31,6 +31,14 @@ const plaidCalls = {
 /** Transfers the fake provider believes exist, keyed by authorization id. */
 const providerTransfers = new Map<string, string>();
 
+/**
+ * Plaid's authorization endpoint is idempotent on the supplied key. This map
+ * models provider-side authorizations, rather than merely counting HTTP calls:
+ * a retry can reach the provider more than once but must not create a second
+ * authorization or produce a different authorization id.
+ */
+const providerAuthorizations = new Map<string, string>();
+
 let authorizationDecision: 'approved' | 'declined' = 'approved';
 let transferCreateBehaviour: 'ok' | 'timeout' = 'ok';
 let authSeq = 0;
@@ -38,13 +46,32 @@ let transferSeq = 0;
 
 vi.mock('@/lib/plaid', () => ({
   plaidClient: {
-    transferAuthorizationCreate: async (req: { amount: string }) => {
-      plaidCalls.authorizations.push({ amount: req.amount });
+    transferAuthorizationCreate: async (req: { amount: string; idempotency_key: string }) => {
+      plaidCalls.authorizations.push({
+        amount: req.amount,
+        idempotency_key: req.idempotency_key,
+      });
+
+      const existing = providerAuthorizations.get(req.idempotency_key);
+      if (existing) {
+        return {
+          data: {
+            authorization: {
+              id: existing,
+              decision: authorizationDecision,
+              decision_rationale: null,
+            },
+          },
+        };
+      }
+
       authSeq += 1;
+      const authorizationId = `auth_${authSeq}`;
+      providerAuthorizations.set(req.idempotency_key, authorizationId);
       return {
         data: {
           authorization: {
-            id: `auth_${authSeq}`,
+            id: authorizationId,
             decision: authorizationDecision,
             decision_rationale:
               authorizationDecision === 'declined'
@@ -141,6 +168,7 @@ async function execute(intentId: number): Promise<{
 beforeEach(async () => {
   plaidCalls.reset();
   providerTransfers.clear();
+  providerAuthorizations.clear();
   authSeq = 0;
   transferSeq = 0;
   authorizationDecision = 'approved';
@@ -230,8 +258,12 @@ describe('Transfer execution safety', () => {
 
       // Exactly one transfer exists at the provider regardless of interleaving.
       expect(providerTransfers.size).toBe(1);
-      // And at most one authorization was ever created.
-      expect(plaidCalls.authorizations.length).toBeLessThanOrEqual(1);
+      // Retries may make more than one network call, but Plaid must create one
+      // authorization only and return its same id for the stable key.
+      expect(providerAuthorizations.size).toBe(1);
+      expect(new Set(plaidCalls.authorizations.map((call) => call.idempotency_key))).toEqual(
+        new Set(['plaid_concurrent_key']),
+      );
 
       const submitted = [a, b].filter((r) => r.submitted);
       expect(submitted.length).toBeGreaterThanOrEqual(1);
