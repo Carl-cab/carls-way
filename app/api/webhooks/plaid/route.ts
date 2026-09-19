@@ -5,6 +5,11 @@ import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
 import type { SettlementEventType } from '@/lib/settlement';
+import {
+  markProviderEventFailed,
+  getProviderEvent,
+  MAX_WEBHOOK_RETRIES,
+} from '@/lib/provider-events';
 
 // ─── JWK cache ────────────────────────────────────────────────────────────────
 // Plaid rotates keys infrequently; cache the JWKS for the lifetime of the
@@ -367,13 +372,28 @@ export async function POST(req: NextRequest) {
       RETURNING id
     `;
 
-    // If no row was returned, this is a duplicate — return 200 immediately
+    // If no row was returned, this is a redelivery. Processed and dead-lettered
+    // events are acknowledged without reprocessing; events that previously
+    // failed (or crashed mid-processing) are reprocessed so provider retries
+    // actually retry — this is what feeds the dead-letter queue.
+    let eventRowId: number;
     if (insertResult.length === 0) {
-      console.log(`[plaid-webhook] Duplicate event ignored: ${webhookId} (${eventType})`);
-      return NextResponse.json({ received: true, duplicate: true });
+      const existing = (await getProviderEvent('plaid', webhookId)) as {
+        id: number;
+        processing_status: string;
+      } | null;
+      const existingStatus = existing?.processing_status;
+      if (!existing || existingStatus === 'processed' || existingStatus === 'dead_letter') {
+        console.log(`[plaid-webhook] Duplicate event ignored: ${webhookId} (${eventType})`);
+        return NextResponse.json({ received: true, duplicate: true });
+      }
+      console.log(
+        `[plaid-webhook] Reprocessing ${existingStatus} event: ${webhookId} (${eventType})`
+      );
+      eventRowId = existing.id;
+    } else {
+      eventRowId = (insertResult[0] as { id: number }).id;
     }
-
-    const eventRowId = (insertResult[0] as { id: number }).id;
 
     // 5. Dispatch to event handler
     try {
@@ -397,20 +417,28 @@ export async function POST(req: NextRequest) {
             processed_at = NOW()
         WHERE id = ${eventRowId}
       `;
+      return NextResponse.json({ received: true });
     } catch (handlerErr) {
       const errMsg = handlerErr instanceof Error ? handlerErr.message : String(handlerErr);
       console.error(`[plaid-webhook] Handler error for ${eventType}:`, handlerErr);
 
-      // Mark as failed but still return 200 so Plaid does not retry
-      await sql`
-        UPDATE provider_webhook_events
-        SET processing_status = 'failed',
-            processing_error = ${errMsg}
-        WHERE id = ${eventRowId}
-      `;
+      // C1.4: track the failure; after MAX_WEBHOOK_RETRIES the event moves to
+      // the dead-letter queue. Return 500 so Plaid redelivers — previously a
+      // handler failure was acknowledged with 200, which meant the event was
+      // silently lost (Plaid never retries a 200).
+      const outcome = await markProviderEventFailed('plaid', webhookId, errMsg);
+      if (outcome.deadLettered) {
+        console.error(
+          `[plaid-webhook] Event dead-lettered after ${outcome.retryCount} attempts: ${webhookId} (${eventType})`
+        );
+      }
+      return NextResponse.json(
+        { error: 'Webhook handler failed; event will be retried' },
+        { status: 500 }
+      );
     }
 
-    return NextResponse.json({ received: true });
+    // Unreachable: both paths above return.
   } catch (err) {
     console.error('[plaid-webhook] Database error:', err);
     // Return 500 so Plaid will retry

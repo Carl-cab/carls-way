@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getStripe } from '@/lib/stripe';
 import { auditLog } from '@/lib/auth';
-import { recordProviderEvent, markProviderEventProcessed } from '@/lib/provider-events';
+import { recordProviderEvent, markProviderEventProcessed, markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
 
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -77,10 +77,22 @@ export async function POST(req: NextRequest) {
       const dataObject = event.data.object as unknown;
       const relatedRef = (dataObject as Record<string, unknown> | null)?.id as string | undefined;
 
-      await recordProviderEvent('stripe', providerEventId, event.type, {
+      const isNew = await recordProviderEvent('stripe', providerEventId, event.type, {
         relatedProviderReference: relatedRef,
         rawPayload: event as unknown as Record<string, unknown>,
       });
+
+      // C1.4: a redelivered dead-lettered event is acknowledged without
+      // reprocessing; a redelivered failed event is reprocessed below so
+      // retries actually retry.
+      if (!isNew) {
+        const existing = (await getProviderEvent('stripe', providerEventId)) as {
+          processing_status: string;
+        } | null;
+        if (existing?.processing_status === 'dead_letter') {
+          return NextResponse.json({ received: true, duplicate: true });
+        }
+      }
 
       // Phase B2: Will call SettlementProcessor and apply side effects
       // For now, just mark as processed (structure ready)
@@ -104,6 +116,25 @@ export async function POST(req: NextRequest) {
     //
     // This also matches the Plaid webhook, which already returns 500 here.
     console.error('Stripe webhook handler error:', err);
+    // C1.4: track the failure so repeated failures dead-letter instead of
+    // retrying forever unseen. Failure tracking must never mask the 500 —
+    // the 500 is what makes Stripe redeliver.
+    try {
+      if (event?.id && isFinancialEvent(event.type)) {
+        const outcome = await markProviderEventFailed(
+          'stripe',
+          event.id,
+          err instanceof Error ? err : String(err)
+        );
+        if (outcome.deadLettered) {
+          console.error(
+            `[stripe-webhook] Event dead-lettered after ${outcome.retryCount} attempts: ${event.id} (${event.type})`
+          );
+        }
+      }
+    } catch {
+      // Failure tracking is best-effort; the 500 below is what matters.
+    }
     return NextResponse.json(
       { error: 'Webhook handler failed; event will be retried' },
       { status: 500 },
