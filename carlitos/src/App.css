@@ -1,0 +1,5 @@
+/* App-specific overrides live here. Global tokens are in index.css. */
+
+#root {
+  min-height: 100vh;
+}
