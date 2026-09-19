@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid amount' }, { status: 400 });
     }
 
-    const quote = await buildFxQuote(numAmount, fromCurrency.toUpperCase(), toCurrency.toUpperCase());
+    const quote = await buildFxQuote(numAmount, fromCurrency.toUpperCase(), toCurrency.toUpperCase(), { userId: user.userId });
     return NextResponse.json(quote);
   } catch (err) {
     console.error('FX quote error:', err);
