@@ -211,6 +211,25 @@ export async function initializeSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  // C1.3: stuck-transfer recovery flags. One open flag per intent (partial
+  // unique index), so concurrent sweeps cannot double-flag. Flagging never
+  // mutates the intent row itself.
+  await sql`
+    CREATE TABLE IF NOT EXISTS transfer_recovery_flags (
+      id SERIAL PRIMARY KEY,
+      transfer_intent_id INTEGER NOT NULL REFERENCES transfer_intents(id),
+      status TEXT NOT NULL,
+      recovery_action TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      flagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      resolved_by TEXT
+    )
+  `;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_open_recovery_flag
+      ON transfer_recovery_flags (transfer_intent_id) WHERE resolved_at IS NULL
+  `;
   await sql`
     CREATE TABLE IF NOT EXISTS ledger_entries (
       id SERIAL PRIMARY KEY,
