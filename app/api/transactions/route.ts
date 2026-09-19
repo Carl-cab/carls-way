@@ -4,6 +4,7 @@ import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog, sanitizeStri
 import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
+import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
 
 export async function GET(req: NextRequest) {
   try {
@@ -41,6 +42,16 @@ export async function POST(req: NextRequest) {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // C1.1: rate-limit money movement per user.
+    const rate = await checkRateLimit('money:send', `user:${user.userId}`);
+    if (!rate.allowed) {
+      await auditLog(user.userId, 'transaction_rate_limited', {});
+      return NextResponse.json(
+        { error: 'Too many payment attempts. Please try again later.' },
+        { status: 429, headers: rateLimitHeaders(rate) },
+      );
+    }
 
     const body = await req.json();
     const { receiverUsername, amount, note, type, privacy } = body;

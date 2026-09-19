@@ -5,6 +5,7 @@ import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
 import type { SettlementEventType } from '@/lib/settlement';
+import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 
 // ─── JWK cache ────────────────────────────────────────────────────────────────
 // Plaid rotates keys infrequently; cache the JWKS for the lifetime of the
@@ -313,6 +314,17 @@ interface PlaidWebhookPayload {
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // C1.1: reject floods before any verification work. Keyed on source IP —
+  // webhooks are unauthenticated at this point, so per-user keying is not
+  // possible yet. Legitimate provider traffic is far below this ceiling.
+  const webhookRate = await checkRateLimit('webhook:events', clientIdentifier(req));
+  if (!webhookRate.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests' },
+      { status: 429, headers: rateLimitHeaders(webhookRate) },
+    );
+  }
+
   // Milestone 2: Extract or generate correlation ID for request tracing
   const { extractOrGenerateCorrelationId } = await import('@/lib/correlation');
   const correlationId = extractOrGenerateCorrelationId(req);

@@ -3,6 +3,7 @@ import { getAuthUser, auditLog } from '@/lib/auth';
 import { createNotification } from '@/lib/notifications';
 import { paySplitPortion, SplitPaymentError } from '@/lib/splits';
 import { getSql } from '@/lib/db';
+import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
 
 /**
  * POST /api/splits/[id]/pay — pay the caller's own portion of a split.
@@ -18,6 +19,17 @@ export async function POST(
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // C1.1: split payments move money; limit per user. Payment itself is
+    // atomic and idempotent, so this is purely anti-automation.
+    const rate = await checkRateLimit('money:split-pay', `user:${user.userId}`);
+    if (!rate.allowed) {
+      await auditLog(user.userId, 'split_pay_rate_limited', {});
+      return NextResponse.json(
+        { error: 'Too many payment attempts. Please try again later.' },
+        { status: 429, headers: rateLimitHeaders(rate) },
+      );
+    }
 
     const { id } = await params;
     const splitId = parseInt(id, 10);
