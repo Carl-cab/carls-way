@@ -2,8 +2,11 @@
 // Phase B3.1: Updates transfer_intents.status only.
 // Phase B3.2a: Creates ledger entries.
 // Phase B3.2b: Updates wallet balances.
+// Phase B3.3: Sends notifications and reverses velocity (both non-blocking).
 
 import { getSql } from '@/lib/db';
+import { createNotification } from '@/lib/notifications';
+import { reverseVelocity } from '@/lib/auth';
 import type { SettlementStatus } from './types';
 import type { SettlementPlan } from './SettlementOrchestrator';
 
@@ -32,6 +35,22 @@ export interface BalanceExecutionResult {
   currency?: string;
   amountApplied?: number; // Amount added or subtracted
   operation?: 'add' | 'subtract';
+  reason: string;
+  error?: string;
+}
+
+export interface NotificationExecutionResult {
+  success: boolean;
+  intentId: string;
+  notificationSent: boolean; // Whether a notification row was created
+  reason: string;
+  error?: string;
+}
+
+export interface VelocityReversalExecutionResult {
+  success: boolean;
+  intentId: string;
+  velocityReversed: boolean; // Whether compensating velocity records were written
   reason: string;
   error?: string;
 }
@@ -489,6 +508,182 @@ export class SettlementExecutor {
         balanceUpdated: false,
         reason: `Balance execution error: ${errorMsg}`,
         error: 'BALANCE_EXECUTION_ERROR',
+      };
+    }
+  }
+
+  /**
+   * Execute user notification from settlement plan.
+   * Phase B3.3: Create an in-app notification only. No email/SMS/push.
+   * Non-blocking: failures are captured in the result and never thrown, so a
+   * notification failure can never fail the settlement that triggered it.
+   */
+  async executeNotification(plan: SettlementPlan): Promise<NotificationExecutionResult> {
+    if (!plan.notifyUser) {
+      return {
+        success: true,
+        intentId: plan.intentId,
+        notificationSent: false,
+        reason: 'Notification not required for this transition',
+      };
+    }
+
+    try {
+      const sql = getSql();
+      const intentRows = await sql`
+        SELECT id, user_id, type, amount, currency
+        FROM transfer_intents
+        WHERE id = ${plan.intentId}
+        LIMIT 1
+      `;
+
+      if (!intentRows[0]) {
+        return {
+          success: false,
+          intentId: plan.intentId,
+          notificationSent: false,
+          reason: `Transfer intent not found: ${plan.intentId}`,
+          error: 'INTENT_NOT_FOUND',
+        };
+      }
+
+      const intent = intentRows[0] as {
+        id: number;
+        user_id: number;
+        type: string;
+        amount: string;
+        currency: string;
+      };
+
+      const typeLabel = intent.type === 'add_money' ? 'Add Money' : 'Cash Out';
+      const amountStr = `${Number(intent.amount).toFixed(2)} ${intent.currency}`;
+
+      let type: string;
+      let title: string;
+      let message: string;
+      switch (plan.nextStatus) {
+        case 'settled':
+          type = 'transfer_settled';
+          title = 'Transfer settled';
+          message = `Your ${typeLabel} of ${amountStr} has settled.`;
+          break;
+        case 'failed':
+          type = 'transfer_failed';
+          title = 'Transfer failed';
+          message = `Your ${typeLabel} of ${amountStr} could not be completed. No money moved.`;
+          break;
+        case 'returned':
+          type = 'transfer_returned';
+          title = 'Transfer returned';
+          message = `Your ${typeLabel} of ${amountStr} was returned by the receiving bank. Any applied balance change has been reversed.`;
+          break;
+        default:
+          type = `transfer_${plan.nextStatus}`;
+          title = `Transfer ${plan.nextStatus}`;
+          message = `Your ${typeLabel} of ${amountStr} is now ${plan.nextStatus}.`;
+          break;
+      }
+
+      await createNotification({
+        userId: intent.user_id,
+        type,
+        title,
+        message,
+        relatedEntityType: 'transfer_intent',
+        relatedEntityId: intent.id,
+      });
+
+      return {
+        success: true,
+        intentId: plan.intentId,
+        notificationSent: true,
+        reason: `Notification sent: ${type}`,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      return {
+        success: false,
+        intentId: plan.intentId,
+        notificationSent: false,
+        reason: `Notification execution error: ${errorMsg}`,
+        error: 'NOTIFICATION_EXECUTION_ERROR',
+      };
+    }
+  }
+
+  /**
+   * Execute velocity reversal from settlement plan.
+   * Phase B3.3: Releases the user's velocity headroom when a transfer is
+   * returned, via compensating negative velocity_checks rows (see
+   * reverseVelocity in lib/auth.ts). Only runs when plan.reverseVelocity is
+   * set, which the orchestrator limits to 'returned' transitions.
+   * Non-blocking: failures are captured in the result and never thrown.
+   */
+  async executeVelocityReversal(plan: SettlementPlan): Promise<VelocityReversalExecutionResult> {
+    if (!plan.reverseVelocity) {
+      return {
+        success: true,
+        intentId: plan.intentId,
+        velocityReversed: false,
+        reason: 'Velocity reversal not required for this transition',
+      };
+    }
+
+    try {
+      const sql = getSql();
+      const intentRows = await sql`
+        SELECT id, user_id, amount, currency
+        FROM transfer_intents
+        WHERE id = ${plan.intentId}
+        LIMIT 1
+      `;
+
+      if (!intentRows[0]) {
+        return {
+          success: false,
+          intentId: plan.intentId,
+          velocityReversed: false,
+          reason: `Transfer intent not found: ${plan.intentId}`,
+          error: 'INTENT_NOT_FOUND',
+        };
+      }
+
+      const intent = intentRows[0] as {
+        id: number;
+        user_id: number;
+        amount: string;
+        currency: string;
+      };
+
+      const amount = Number(intent.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return {
+          success: false,
+          intentId: plan.intentId,
+          velocityReversed: false,
+          reason: `Invalid intent amount for velocity reversal: ${intent.amount}`,
+          error: 'INVALID_AMOUNT',
+        };
+      }
+
+      // reverseVelocity() is itself non-blocking (catches internally), but we
+      // still guard so this method can never throw into the settlement chain.
+      await reverseVelocity(intent.user_id, amount, intent.currency, 'transfer_returned', intent.id);
+
+      return {
+        success: true,
+        intentId: plan.intentId,
+        velocityReversed: true,
+        reason: `Velocity reversed: ${amount} ${intent.currency}`,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      return {
+        success: false,
+        intentId: plan.intentId,
+        velocityReversed: false,
+        reason: `Velocity reversal execution error: ${errorMsg}`,
+        error: 'VELOCITY_EXECUTION_ERROR',
       };
     }
   }
