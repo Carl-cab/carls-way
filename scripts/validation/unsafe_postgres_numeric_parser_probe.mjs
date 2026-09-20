@@ -1,4 +1,4 @@
-const postgres = require('postgres');
+import postgres from 'postgres';
 
 const sql = postgres({
   host: '/var/run/postgresql',

@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs');
+import bcrypt from 'bcryptjs';
 
 const password = 'ExamplePassword1';
 const malformed = '$2b$10$invalidhashfortimingnormalization';
