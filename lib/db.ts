@@ -497,7 +497,11 @@ export interface MoneyColumnUpgrade {
  * migrations/20260907_money_real_to_numeric.sql for the measurements.
  *
  * For a large production table, prefer that migration script: it takes explicit
- * locks and is meant to run during a maintenance window. This function exists
+ * locks and is meant to run during a maintenance window — and per sql/README.md
+ * that run needs a reviewed procedure, a verified backup, a write drain and
+ * explicit authorization, not a developer deciding on the spot. Note the
+ * archived copy under sql/archive/ is the superseded draft and must not be run;
+ * the corrected script is the one named above. This function exists
  * so fresh and small deployments are correct without one.
  *
  * @returns the columns it converted, empty when there was nothing to do
@@ -544,7 +548,9 @@ export async function upgradeLegacyMoneyColumns(
       console.error(
         `Money precision upgrade skipped for ${table}.${column}: ` +
           `${unsafeRows[0].count} value(s) are not exact cent amounts. ` +
-          `Run migrations/20260907_money_real_to_numeric.sql to audit and reconcile them.`,
+          `Run migrations/20260907_money_real_to_numeric.sql (Stage 1 audits without ` +
+          `converting) under the maintenance procedure in sql/README.md. Do not run ` +
+          `the superseded draft in sql/archive/.`,
       );
       continue;
     }
