@@ -3,6 +3,7 @@ import { getSql } from '@/lib/db';
 import { getStripe } from '@/lib/stripe';
 import { auditLog } from '@/lib/auth';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
+import { getProviderEvent, markProviderEventFailed } from '@/lib/provider-events';
 import {
   handleStripeSettlementEvent,
 } from '@/lib/settlement/handle-stripe-settlement';
@@ -94,6 +95,23 @@ export async function POST(req: NextRequest) {
     // silently complete. It records unmapped financial events too, so nothing
     // that used to be captured stops being captured.
     if (isFinancialEvent(event.type)) {
+      // C1.4: a redelivered event that has already been dead-lettered is
+      // acknowledged without reprocessing.
+      //
+      // This check moved ahead of the handler during the merge. C1.4 was
+      // written against the old webhook, which recorded the event here and
+      // then marked it processed inline. handleStripeSettlementEvent now owns
+      // recordProviderEvent / markProviderEventProcessed / markProviderEventFailed,
+      // and dead-lettering happens inside markProviderEventFailed once retries
+      // are exhausted — so asking afterwards would be asking too late. The
+      // Plaid route reads the same way.
+      const recorded = (await getProviderEvent('stripe', event.id)) as {
+        processing_status: string;
+      } | null;
+      if (recorded?.processing_status === 'dead_letter') {
+        return NextResponse.json({ received: true, duplicate: true });
+      }
+
       const result = await handleStripeSettlementEvent(
         event as unknown as StripeEventLike,
         req.headers.get('x-correlation-id') ?? '',
@@ -136,6 +154,25 @@ export async function POST(req: NextRequest) {
     //
     // This also matches the Plaid webhook, which already returns 500 here.
     console.error('Stripe webhook handler error:', err);
+    // C1.4: track the failure so repeated failures dead-letter instead of
+    // retrying forever unseen. Failure tracking must never mask the 500 —
+    // the 500 is what makes Stripe redeliver.
+    try {
+      if (event?.id && isFinancialEvent(event.type)) {
+        const outcome = await markProviderEventFailed(
+          'stripe',
+          event.id,
+          err instanceof Error ? err : String(err)
+        );
+        if (outcome.deadLettered) {
+          console.error(
+            `[stripe-webhook] Event dead-lettered after ${outcome.retryCount} attempts: ${event.id} (${event.type})`
+          );
+        }
+      }
+    } catch {
+      // Failure tracking is best-effort; the 500 below is what matters.
+    }
     return NextResponse.json(
       { error: 'Webhook handler failed; event will be retried' },
       { status: 500 },
