@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getStripe } from '@/lib/stripe';
 import { auditLog } from '@/lib/auth';
+import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 import { getProviderEvent, markProviderEventFailed } from '@/lib/provider-events';
 import {
   handleStripeSettlementEvent,
@@ -12,6 +13,15 @@ import { isSettlementEvent } from '@/lib/settlement/stripe-event-adapter';
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
 export async function POST(req: NextRequest) {
+  // C1.1: reject floods before signature verification burns compute.
+  const webhookRate = await checkRateLimit('webhook:events', clientIdentifier(req));
+  if (!webhookRate.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests' },
+      { status: 429, headers: rateLimitHeaders(webhookRate) },
+    );
+  }
+
   if (!WEBHOOK_SECRET) {
     console.error('STRIPE_WEBHOOK_SECRET is not set');
     return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });

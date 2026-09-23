@@ -44,6 +44,10 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
   'money:send': { limit: 20, windowSeconds: 3600 },
   'money:split-pay': { limit: 30, windowSeconds: 3600 },
   'contacts:add': { limit: 30, windowSeconds: 3600 },
+  // Provider webhooks are server-to-server and signature-verified, but an
+  // unauthenticated flood still burns compute before verification rejects it.
+  // 120/hour per source IP is far above legitimate provider burst traffic.
+  'webhook:events': { limit: 120, windowSeconds: 3600 },
   default: { limit: 100, windowSeconds: 900 },
 };
 
