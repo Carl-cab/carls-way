@@ -20,7 +20,7 @@ import { listOpenRecoveryFlags, runTransferRecoverySweep } from '@/lib/transfers
  * (same bar as the manual reconcile endpoint — this drives operational
  * remediation of real money movement).
  */
-async function listHandler(_req: NextRequest): Promise<NextResponse> {
+async function listHandler(): Promise<NextResponse> {
   requirePermission('transfers:view');
   const flags = await listOpenRecoveryFlags();
   return NextResponse.json({ flags });
