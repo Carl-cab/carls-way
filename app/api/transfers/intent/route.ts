@@ -2,11 +2,24 @@ import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, auditLog } from '@/lib/auth';
 import { getTransferProvider, regionFromCountry, resolveExecutionMode } from '@/lib/transfers/router';
+import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
 
 export async function POST(req: Request) {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // C1.1: blunt abusive automation of transfer intents without impeding a
+    // person making several genuine transfers. Keyed on the user, not the IP,
+    // so one abusive client cannot lock out everybody else.
+    const rate = await checkRateLimit('money:send', `user:${user.userId}`);
+    if (!rate.allowed) {
+      await auditLog(user.userId, 'transfer_intent_rate_limited', {});
+      return NextResponse.json(
+        { error: 'Too many transfer attempts. Please try again later.' },
+        { status: 429, headers: rateLimitHeaders(rate) },
+      );
+    }
 
     const sql = getSql();
 
