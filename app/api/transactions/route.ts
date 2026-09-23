@@ -122,7 +122,7 @@ export async function POST(req: NextRequest) {
       let estimatedSettlement: Date | null = null;
 
       if (isCrossBorder) {
-        const quote = await buildFxQuote(numAmount, senderCurrency, receiverCurrency);
+        const quote = await buildFxQuote(numAmount, senderCurrency, receiverCurrency, { userId: user.userId });
         receiverAmount = quote.receiverAmount;
         fxRate = quote.rate;
         fxFee = quote.feeAmount;

@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { auditLog } from '@/lib/auth';
 
 const WISE_API_KEY = process.env.WISE_API_KEY || '';
 const WISE_API_BASE = process.env.WISE_ENV === 'production'
@@ -27,14 +28,59 @@ export interface FxQuote {
   provider: string;
 }
 
-export async function getFxRate(fromCurrency: string, toCurrency: string): Promise<number> {
-  if (fromCurrency === toCurrency) return 1.0;
+export interface FxRateOptions {
+  /**
+   * Owner of the audit trail entry. Pass the acting user's id from request
+   * handlers; omit (or null) for system-initiated resolutions.
+   */
+  userId?: number | null;
+}
+
+type FxRateSource = 'cache' | 'live';
+
+interface ResolvedFxRate {
+  rate: number;
+  /** 'wise' when the live API answered, 'fallback' when the hardcoded table did, 'identity' for same-currency. */
+  provider: string;
+  source: FxRateSource;
+}
+
+/**
+ * Resolve an FX rate and write the audit trail for the resolution.
+ *
+ * C1.2: every rate that can end up inside a quote — cached, freshly fetched,
+ * or hardcoded fallback — is recorded in audit_logs with its provider and
+ * provenance. The fallback path gets its own loud event because applying a
+ * hardcoded rate to real money is the highest-risk outcome here; without the
+ * audit row it would be invisible.
+ *
+ * Audit writes are non-blocking (auditLog swallows its own errors), so a
+ * failing audit trail can never break quoting.
+ */
+async function resolveFxRate(
+  fromCurrency: string,
+  toCurrency: string,
+  opts?: FxRateOptions,
+): Promise<ResolvedFxRate> {
+  const userId = opts?.userId ?? null;
+
+  if (fromCurrency === toCurrency) {
+    const resolved: ResolvedFxRate = { rate: 1.0, provider: 'identity', source: 'live' };
+    await auditLog(userId, 'fx_rate_resolved', {
+      from_currency: fromCurrency,
+      to_currency: toCurrency,
+      rate: resolved.rate,
+      provider: resolved.provider,
+      source: resolved.source,
+    });
+    return resolved;
+  }
 
   const sql = getSql();
 
   // Check DB cache first
   const cached = await sql`
-    SELECT rate, fetched_at FROM fx_rates
+    SELECT rate, provider, fetched_at FROM fx_rates
     WHERE from_currency = ${fromCurrency} AND to_currency = ${toCurrency}
   `;
 
@@ -42,7 +88,29 @@ export async function getFxRate(fromCurrency: string, toCurrency: string): Promi
     const fetchedAt = new Date(cached[0].fetched_at as string);
     const age = Date.now() - fetchedAt.getTime();
     if (age < RATE_CACHE_TTL_MS) {
-      return parseFloat(cached[0].rate as string);
+      const resolved: ResolvedFxRate = {
+        rate: parseFloat(cached[0].rate as string),
+        provider: (cached[0].provider as string) || 'wise',
+        source: 'cache',
+      };
+      await auditLog(userId, 'fx_rate_resolved', {
+        from_currency: fromCurrency,
+        to_currency: toCurrency,
+        rate: resolved.rate,
+        provider: resolved.provider,
+        source: resolved.source,
+        cache_age_ms: age,
+      });
+      if (resolved.provider === 'fallback') {
+        await auditLog(userId, 'fx_rate_fallback_used', {
+          from_currency: fromCurrency,
+          to_currency: toCurrency,
+          rate: resolved.rate,
+          source: resolved.source,
+          note: 'Served rate originated from the hardcoded fallback table',
+        });
+      }
+      return resolved;
     }
   }
 
@@ -84,16 +152,43 @@ export async function getFxRate(fromCurrency: string, toCurrency: string): Promi
     DO UPDATE SET rate = ${rate}, provider = ${provider}, fetched_at = NOW()
   `;
 
-  return rate;
+  await auditLog(userId, 'fx_rate_resolved', {
+    from_currency: fromCurrency,
+    to_currency: toCurrency,
+    rate,
+    provider,
+    source: 'live' as FxRateSource,
+  });
+  if (provider === 'fallback') {
+    await auditLog(userId, 'fx_rate_fallback_used', {
+      from_currency: fromCurrency,
+      to_currency: toCurrency,
+      rate,
+      source: 'live',
+      note: 'Wise unavailable; hardcoded fallback rate applied to a live quote',
+    });
+  }
+
+  return { rate, provider, source: 'live' };
+}
+
+export async function getFxRate(
+  fromCurrency: string,
+  toCurrency: string,
+  opts?: FxRateOptions,
+): Promise<number> {
+  return (await resolveFxRate(fromCurrency, toCurrency, opts)).rate;
 }
 
 export async function buildFxQuote(
   senderAmount: number,
   fromCurrency: string,
-  toCurrency: string
+  toCurrency: string,
+  opts?: FxRateOptions,
 ): Promise<FxQuote> {
+  const userId = opts?.userId ?? null;
   const isCrossBorder = fromCurrency !== toCurrency;
-  const rate = await getFxRate(fromCurrency, toCurrency);
+  const { rate, provider } = await resolveFxRate(fromCurrency, toCurrency, opts);
   const feePercent = FX_FEES[`${fromCurrency}_${toCurrency}`] || 0;
   const feeAmount = isCrossBorder ? parseFloat((senderAmount * feePercent).toFixed(2)) : 0;
   const receiverAmount = parseFloat(((senderAmount - feeAmount) * rate).toFixed(2));
@@ -101,7 +196,7 @@ export async function buildFxQuote(
   // Settlement time: instant for all transfers
   const estimatedSettlement = new Date();
 
-  return {
+  const quote: FxQuote = {
     fromCurrency,
     toCurrency,
     rate,
@@ -111,6 +206,22 @@ export async function buildFxQuote(
     senderAmount,
     isCrossBorder,
     estimatedSettlement,
-    provider: 'wise',
+    provider,
   };
+
+  // C1.2: record the exact economics the user was shown, so any later dispute
+  // about "what rate did I get" has a durable answer.
+  await auditLog(userId, 'fx_quote_issued', {
+    from_currency: fromCurrency,
+    to_currency: toCurrency,
+    sender_amount: senderAmount,
+    rate,
+    fee_percent: feePercent,
+    fee_amount: feeAmount,
+    receiver_amount: receiverAmount,
+    provider,
+    is_cross_border: isCrossBorder,
+  });
+
+  return quote;
 }

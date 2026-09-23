@@ -5,6 +5,17 @@
 --   REAL/FLOAT to NUMERIC(14,2), without silently rounding values that materially
 --   differ from a cent value.
 --
+-- STATUS: current, corrected script. The superseded original draft is kept at
+-- sql/archive/20260907_money_real_to_numeric__superseded.sql and must not be
+-- run — it uses a fixed 0.00001 tolerance that aborts on ordinary balances.
+-- See the note on the safety test below for the measurements.
+--
+-- AUTHORIZATION: running this is a financial schema conversion. sql/README.md
+-- requires a separately reviewed maintenance procedure, a verified backup and
+-- recovery plan, an application write drain, preflight reconciliation, and
+-- explicit authorization. Stage 1 audits without converting and is safe to run
+-- on its own; Stage 2 is the part that needs all of the above.
+--
 -- IMPORTANT OPERATING PROCEDURE
 --   1. Take and verify a point-in-time restore / backup before running.
 --   2. Put the application in maintenance mode or drain writes. Stage 2 takes

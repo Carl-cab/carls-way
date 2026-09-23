@@ -204,7 +204,7 @@ async function handleTransferEventStatusUpdate(
   webhookId: string,
   correlationId: string
 ) {
-  // Phase B3.1/B3.2a/B3.2b: Handle transfer settlement events
+  // Phase B3.1/B3.2a/B3.2b/B3.3: Handle transfer settlement events
   // Extract transfer_id from payload data
   const transferId = (payload.data as Record<string, unknown>)?.transfer_id as
     | string
@@ -244,6 +244,12 @@ async function handleTransferEventStatusUpdate(
     // B3.2b: Execute balance update
     const balanceResult = await executor.executeBalanceUpdate(plan);
 
+    // B3.3: Execute notification (non-blocking)
+    const notificationResult = await executor.executeNotification(plan);
+
+    // B3.3: Execute velocity reversal (non-blocking)
+    const velocityResult = await executor.executeVelocityReversal(plan);
+
     // Log execution results
     console.log(
       `[plaid-webhook] Transfer settlement executed: ${transferId} → ${statusResult.newStatus}`,
@@ -251,6 +257,8 @@ async function handleTransferEventStatusUpdate(
         status: statusResult,
         ledger: ledgerResult,
         balance: balanceResult,
+        notification: notificationResult,
+        velocity: velocityResult,
       }
     );
 
@@ -265,6 +273,8 @@ async function handleTransferEventStatusUpdate(
         balance_updated: balanceResult.balanceUpdated,
         balance_currency: balanceResult.currency,
         balance_amount: balanceResult.amountApplied,
+        notification_sent: notificationResult.notificationSent,
+        velocity_reversed: velocityResult.velocityReversed,
       }
     );
   } catch (err) {
