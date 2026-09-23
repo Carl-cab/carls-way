@@ -211,6 +211,25 @@ export async function initializeSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  // C1.3: stuck-transfer recovery flags. One open flag per intent (partial
+  // unique index), so concurrent sweeps cannot double-flag. Flagging never
+  // mutates the intent row itself.
+  await sql`
+    CREATE TABLE IF NOT EXISTS transfer_recovery_flags (
+      id SERIAL PRIMARY KEY,
+      transfer_intent_id INTEGER NOT NULL REFERENCES transfer_intents(id),
+      status TEXT NOT NULL,
+      recovery_action TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      flagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      resolved_by TEXT
+    )
+  `;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_open_recovery_flag
+      ON transfer_recovery_flags (transfer_intent_id) WHERE resolved_at IS NULL
+  `;
   await sql`
     CREATE TABLE IF NOT EXISTS ledger_entries (
       id SERIAL PRIMARY KEY,
@@ -521,7 +540,11 @@ export interface MoneyColumnUpgrade {
  * migrations/20260907_money_real_to_numeric.sql for the measurements.
  *
  * For a large production table, prefer that migration script: it takes explicit
- * locks and is meant to run during a maintenance window. This function exists
+ * locks and is meant to run during a maintenance window — and per sql/README.md
+ * that run needs a reviewed procedure, a verified backup, a write drain and
+ * explicit authorization, not a developer deciding on the spot. Note the
+ * archived copy under sql/archive/ is the superseded draft and must not be run;
+ * the corrected script is the one named above. This function exists
  * so fresh and small deployments are correct without one.
  *
  * @returns the columns it converted, empty when there was nothing to do
@@ -568,7 +591,9 @@ export async function upgradeLegacyMoneyColumns(
       console.error(
         `Money precision upgrade skipped for ${table}.${column}: ` +
           `${unsafeRows[0].count} value(s) are not exact cent amounts. ` +
-          `Run migrations/20260907_money_real_to_numeric.sql to audit and reconcile them.`,
+          `Run migrations/20260907_money_real_to_numeric.sql (Stage 1 audits without ` +
+          `converting) under the maintenance procedure in sql/README.md. Do not run ` +
+          `the superseded draft in sql/archive/.`,
       );
       continue;
     }

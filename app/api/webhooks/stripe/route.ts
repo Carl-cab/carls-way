@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getStripe } from '@/lib/stripe';
 import { auditLog } from '@/lib/auth';
-import { recordProviderEvent, markProviderEventProcessed, markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
+import { getProviderEvent, markProviderEventFailed } from '@/lib/provider-events';
+import {
+  handleStripeSettlementEvent,
+} from '@/lib/settlement/handle-stripe-settlement';
+import type { StripeEventLike } from '@/lib/settlement/stripe-event-adapter';
+import { isSettlementEvent } from '@/lib/settlement/stripe-event-adapter';
 
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -69,34 +74,57 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Handle financial events (Phase B1: record only, no execution)
+    // Financial events now run through the settlement pipeline. Previously this
+    // branch recorded an event and marked it processed without ever calling the
+    // orchestrator or executor, so a successful ACSS debit was stored, marked
+    // done, and never moved its transfer intent, wrote a ledger entry, or
+    // credited a wallet.
+    //
+    // handleStripeSettlementEvent records first and marks processed last, so a
+    // crash anywhere in between leaves the event retryable rather than
+    // silently complete. It records unmapped financial events too, so nothing
+    // that used to be captured stops being captured.
     if (isFinancialEvent(event.type)) {
-      // Record event for future processing (Phase B2)
-      // No settlement logic yet, just store the event
-      const providerEventId = event.id || `stripe-${event.type}-${Date.now()}`;
-      const dataObject = event.data.object as unknown;
-      const relatedRef = (dataObject as Record<string, unknown> | null)?.id as string | undefined;
-
-      const isNew = await recordProviderEvent('stripe', providerEventId, event.type, {
-        relatedProviderReference: relatedRef,
-        rawPayload: event as unknown as Record<string, unknown>,
-      });
-
-      // C1.4: a redelivered dead-lettered event is acknowledged without
-      // reprocessing; a redelivered failed event is reprocessed below so
-      // retries actually retry.
-      if (!isNew) {
-        const existing = (await getProviderEvent('stripe', providerEventId)) as {
-          processing_status: string;
-        } | null;
-        if (existing?.processing_status === 'dead_letter') {
-          return NextResponse.json({ received: true, duplicate: true });
-        }
+      // C1.4: a redelivered event that has already been dead-lettered is
+      // acknowledged without reprocessing.
+      //
+      // This check moved ahead of the handler during the merge. C1.4 was
+      // written against the old webhook, which recorded the event here and
+      // then marked it processed inline. handleStripeSettlementEvent now owns
+      // recordProviderEvent / markProviderEventProcessed / markProviderEventFailed,
+      // and dead-lettering happens inside markProviderEventFailed once retries
+      // are exhausted — so asking afterwards would be asking too late. The
+      // Plaid route reads the same way.
+      const recorded = (await getProviderEvent('stripe', event.id)) as {
+        processing_status: string;
+      } | null;
+      if (recorded?.processing_status === 'dead_letter') {
+        return NextResponse.json({ received: true, duplicate: true });
       }
 
-      // Phase B2: Will call SettlementProcessor and apply side effects
-      // For now, just mark as processed (structure ready)
-      await markProviderEventProcessed('stripe', providerEventId);
+      const result = await handleStripeSettlementEvent(
+        event as unknown as StripeEventLike,
+        req.headers.get('x-correlation-id') ?? '',
+      );
+
+      if (result.outcome === 'failed') {
+        console.error('Stripe settlement failed for event', event.id, result.reason);
+      }
+
+      // A retryable failure must not be acknowledged. Answering 200 tells
+      // Stripe the event is handled and it will never redeliver; there is no
+      // worker draining failed provider_webhook_events rows, so the event
+      // would be lost. 500 puts it back on Stripe's retry schedule.
+      //
+      // Terminal outcomes are acknowledged: an intent that does not exist, or
+      // a transition the state machine rejects, produces the same answer on
+      // every redelivery, so retrying only repeats the failure.
+      if (result.retryable) {
+        return NextResponse.json(
+          { error: 'Settlement failed; event will be retried' },
+          { status: 500 },
+        );
+      }
     }
 
     return NextResponse.json({ received: true });
@@ -143,19 +171,26 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * Check if event is a financial event (not KYC).
- * Phase B1: Record for future processing, Phase B2 will execute settlement logic.
+ * Financial events worth durably recording.
+ *
+ * Wider than the set the settlement adapter acts on: `charge.*` and
+ * `payout.created` are kept because they are evidence during an investigation,
+ * but they are deliberately not settled. A successful ACSS debit emits both
+ * `charge.succeeded` and `payment_intent.succeeded`, and settling both would
+ * apply one movement of money twice. See lib/settlement/stripe-event-adapter.ts.
  */
 function isFinancialEvent(eventType: string): boolean {
-  // Add financial event types that Phase B2 will handle
-  const financialEventTypes = [
+  const recordOnly = [
     'charge.updated',
     'charge.succeeded',
     'charge.failed',
     'payout.created',
+    // Recorded, never settled: the cash-out rail pays the platform's own
+    // external account rather than the customer's. See the adapter.
     'payout.paid',
     'payout.failed',
+    'payout.canceled',
   ];
 
-  return financialEventTypes.includes(eventType);
+  return isSettlementEvent(eventType) || recordOnly.includes(eventType);
 }

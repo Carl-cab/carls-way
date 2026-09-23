@@ -42,10 +42,27 @@ export async function recordProviderEvent(
     `;
     return true;
   } catch (err) {
-    // If UNIQUE constraint violation, event already exists
-    const error = err as Record<string, unknown>;
-    if (error.code === '23505' && error.constraint === 'provider_webhook_events_provider_provider_event_id_key') {
-      return false;
+    // A unique violation means we have seen this event before, which is normal:
+    // Stripe and Plaid both deliver at least once.
+    //
+    // This previously read `error.constraint`, which postgres.js does not set —
+    // it exposes `constraint_name`. The comparison was therefore always false,
+    // so the duplicate was rethrown, the webhook returned 500, and the provider
+    // retried the same event indefinitely. Every redelivery, of which there are
+    // many by design, became an infinite retry loop.
+    //
+    // Both spellings are accepted so a driver change cannot silently reopen it,
+    // and the code alone is enough to identify the violation on this table: the
+    // insert touches one table with one unique constraint.
+    const error = err as { code?: string; constraint_name?: string; constraint?: string };
+    if (error.code === '23505') {
+      const constraint = error.constraint_name ?? error.constraint;
+      if (
+        constraint === undefined ||
+        constraint === 'provider_webhook_events_provider_provider_event_id_key'
+      ) {
+        return false;
+      }
     }
     throw err;
   }

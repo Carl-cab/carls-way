@@ -107,7 +107,7 @@ export async function PATCH(
     let estimatedSettlement: Date | null = null;
 
     if (transaction.is_cross_border) {
-      const quote = await buildFxQuote(numAmount, payerCurrency, receiverCurrency);
+      const quote = await buildFxQuote(numAmount, payerCurrency, receiverCurrency, { userId: user.userId });
       receiverAmount = quote.receiverAmount;
       fxRate = quote.rate;
       fxFee = quote.feeAmount;

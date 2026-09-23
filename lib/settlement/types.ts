@@ -11,18 +11,39 @@ export type SettlementEventType =
   | 'returned'
   | 'cancelled';
 
+/**
+ * Statuses a transfer intent can hold.
+ *
+ * Two vocabularies had drifted apart here. The skeleton state machine was
+ * written around `confirmed → submitted → authorized → pending → posted`, while
+ * `transfer_intents` in the running application only ever takes
+ * `draft → reviewed → ready → submitting → processing → settled|failed|returned`.
+ * They overlapped at the ends and nowhere in the middle, so an intent sitting in
+ * `processing` — where every live transfer sits after the provider accepts it —
+ * had no transition into `settled` at all. Wiring a webhook to the pipeline
+ * would have rejected every real settlement event as an invalid transition.
+ *
+ * Both sets are kept. The `ready`/`submitting`/`processing` path is what the
+ * providers actually write and is what settlement now runs on; the older names
+ * remain valid so nothing that already referenced them breaks.
+ */
 export type SettlementStatus =
+  // The lifecycle the application actually uses.
   | 'draft'
   | 'reviewed'
+  | 'ready'
+  | 'submitting'
+  | 'processing'
+  | 'settled'
+  | 'failed'
+  | 'returned'
+  | 'cancelled'
+  // Retained from the original skeleton; no provider writes these today.
   | 'confirmed'
   | 'submitted'
   | 'authorized'
   | 'pending'
-  | 'posted'
-  | 'settled'
-  | 'failed'
-  | 'returned'
-  | 'cancelled';
+  | 'posted';
 
 export interface ProviderEvent {
   provider: string; // 'plaid' | 'stripe' | 'vopay' etc.
