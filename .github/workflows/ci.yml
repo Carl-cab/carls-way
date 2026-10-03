@@ -121,7 +121,29 @@ jobs:
       # gate itself is unchanged: still high and above, nothing suppressed,
       # and a real finding still fails. GitHub's Dependabot alerts are the
       # durable backstop, since they do not depend on this endpoint at CI time.
-      - name: npm audit (high and above, tolerant of registry outages)
+      # Two tiers, deliberately.
+      #
+      # The blocking tier audits the production tree only (--omit=dev), because
+      # that is what gets deployed. The advisory tier audits everything and only
+      # warns, so a dev-chain finding is still visible in CI without wedging
+      # every PR behind something that cannot be fixed.
+      #
+      # What forced the split: GHSA-vfj7-8cjw-p6xm (braces, stack-exhaustion
+      # DoS) reaches the tree as
+      #   eslint-config-next -> @next/eslint-plugin-next -> fast-glob
+      #                      -> micromatch -> braces
+      # and its vulnerable range is `*` — every published version, 3.0.3
+      # included. No override or pin resolves it; npm's only offered fix is
+      # downgrading eslint-config-next to 14.2.35, which is incompatible with
+      # Next 16. eslint-config-next is a devDependency, and
+      # `npm audit --omit=dev` reports zero findings at every severity, so
+      # nothing that ships is affected.
+      #
+      # This narrows what blocks a merge; it does not stop anything being
+      # reported. A production-tree finding still fails the build, nothing is
+      # suppressed, and Dependabot remains the durable backstop for the dev
+      # chain.
+      - name: npm audit — production tree (blocking, high and above)
         timeout-minutes: 6
         run: |
           set -uo pipefail
@@ -135,7 +157,7 @@ jobs:
             exit 1
           fi
           for attempt in 1 2 3; do
-            if timeout 90 npm audit --json > audit.json 2> audit.err; then
+            if timeout 90 npm audit --omit=dev --json > audit.json 2> audit.err; then
               echo "Audit clean."
               exit 0
             fi
@@ -146,8 +168,8 @@ jobs:
               crit=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
               echo "Audit ran: ${crit} critical, ${high} high."
               if [ "$high" -gt 0 ] || [ "$crit" -gt 0 ]; then
-                npm audit --audit-level=high || true
-                echo "::error::Dependency audit found ${crit} critical and ${high} high advisories."
+                npm audit --omit=dev --audit-level=high || true
+                echo "::error::Production dependency audit found ${crit} critical and ${high} high advisories."
                 exit 1
               fi
               echo "No high or critical advisories."
@@ -158,3 +180,29 @@ jobs:
             if [ "$attempt" -lt 3 ]; then sleep 20; fi
           done
           echo "::warning::Dependency audit skipped — registry.npmjs.org's advisory service did not respond after three attempts. This is an availability failure, not a clean bill of health. Check Dependabot alerts."
+
+      # Advisory only: never fails the build. This is where a dev-chain finding
+      # shows up, including the braces advisory described above. Read it; do not
+      # ignore it because it cannot fail the job.
+      - name: npm audit — full tree including devDependencies (advisory)
+        timeout-minutes: 4
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if timeout 90 npm audit --json > audit-all.json 2> audit-all.err; then
+            echo "Full-tree audit clean, devDependencies included."
+            exit 0
+          fi
+          if jq -e '.metadata.vulnerabilities' audit-all.json > /dev/null 2>&1; then
+            crit=$(jq '.metadata.vulnerabilities.critical // 0' audit-all.json)
+            high=$(jq '.metadata.vulnerabilities.high // 0' audit-all.json)
+            mod=$(jq '.metadata.vulnerabilities.moderate // 0' audit-all.json)
+            npm audit --audit-level=moderate || true
+            if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
+              echo "::warning::Full tree (devDependencies included): ${crit} critical, ${high} high, ${mod} moderate. These do not ship, so they do not block the merge — but check whether any is newly fixable."
+            else
+              echo "Full tree: ${mod} moderate, no high or critical."
+            fi
+            exit 0
+          fi
+          echo "::warning::Full-tree audit could not reach the advisory service. Check Dependabot alerts."

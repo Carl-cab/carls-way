@@ -38,7 +38,12 @@ export default function AdminLoginPage() {
       }
       // Full navigation rather than a client push: the session cookie must be
       // attached to the document request for the server-side guard in the
-      // console layout to see it.
+      // console layout to see it. router.push() is a client-side transition —
+      // no document request, so the guard never sees the cookie and admin login
+      // fails. eslint-config-next 16.3.8 added a rule against this; the rule is
+      // right in general and wrong for this one navigation, so it is disabled
+      // here rather than repo-wide.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.href = '/admin/dashboard';
     } catch {
       setError('Network error — please try again.');
