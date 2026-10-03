@@ -114,14 +114,32 @@ export class AdminTransferService {
     if (filters.endDate) countQ = sql`${countQ} AND created_at <= ${filters.endDate}`;
     if (filters.correlationId) countQ = sql`${countQ} AND correlation_id = ${filters.correlationId}`;
 
-    const [rows, countResult] = await Promise.all([
-      query.then((r: unknown[]) => r.slice(0, limit + 1)),
-      countQ,
-    ]);
+    // Paginate in SQL, not in JavaScript.
+    //
+    // This used to run the filter query with no LIMIT or OFFSET and then slice
+    // the first `limit` rows client-side, discarding the `offset` it had just
+    // computed. Two consequences: every page returned page 1, because slicing
+    // always started at index 0 while `page` and `total_count` came back
+    // looking correct; and the whole matching result set crossed the wire on
+    // every call before most of it was thrown away.
+    //
+    // ORDER BY is required for OFFSET to mean anything — without it PostgreSQL
+    // gives no row-order guarantee, so consecutive pages could repeat or skip
+    // rows. id breaks ties so the order is total.
+    const pagedQuery = sql`
+      ${query}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+
+    const [rows, countResult] = await Promise.all([pagedQuery, countQ]);
 
     return {
-      transfers: (rows as unknown as AdminTransferRow[]).slice(0, limit).map((t) => this.toDTO(t)),
-      total_count: countResult[0]?.count || 0,
+      transfers: (rows as unknown as AdminTransferRow[]).map((t) => this.toDTO(t)),
+      // COUNT(*) is int8, which postgres.js hands back as a string. total_count
+      // is declared number, so without this the API answers with a quoted
+      // string that happens to survive most arithmetic by coercion.
+      total_count: Number(countResult[0]?.count ?? 0),
       page,
       page_size: limit,
     };
