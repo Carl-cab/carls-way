@@ -9,5 +9,6 @@ These files are small, local-only engineering probes retained to document the ev
 | `float4_money_precision_probe.sql` | Illustrates REAL/float4 representation loss in stored currency values and repeated arithmetic. | Creates and removes a temporary/local probe table. |
 | `float4_numeric_cast_probe.sql` | Compares REAL text and numeric casts to show why conversion guards must use float4 round-trip semantics. | Read-only expression query. |
 | `nonfinite_float_probe.sql` | Demonstrates PostgreSQL `isfinite` behavior for finite, infinite, and NaN floating values. | Read-only expression query. |
+| `validate_cross_border_amount_widening_migration.sh` | Creates and destroys a deliberately named local test database to verify default read-only behavior, exact-value preservation, idempotence, and fail-closed behavior of `migrations/20261003_widen_transactions_cross_border_amounts.sql`. | Rejects non-local database URLs and database names without `test`; never use it against production. |
 
 Run probes only against a disposable local database. Do not use them as migrations or run them against production.

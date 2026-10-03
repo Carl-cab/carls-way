@@ -5,6 +5,7 @@ This directory contains database artifacts that must be handled according to the
 | File | Status | Purpose |
 | --- | --- | --- |
 | `reconcile_internal_transactions.sql` | **Approved read-only diagnostic** | Reconciles completed internal `pay` and `payment` transactions against their wallet-ledger postings and user wallet balances. It contains `SELECT` statements only. |
+| `../migrations/20261003_widen_transactions_cross_border_amounts.sql` | **Operator-gated maintenance migration** | Aligns `transactions.sender_amount` and `transactions.receiver_amount` from `NUMERIC(12,2)` to `NUMERIC(14,2)`. It is read-only by default and requires `psql -v apply=true` after the production maintenance controls below are complete. |
 | `archive/20260907_money_real_to_numeric__superseded.sql` | **Historical; do not execute** | The **original draft** of the REAL-to-NUMERIC conversion, with the fixed `0.00001` tolerance described below. Retained for auditability only. |
 
 > **The conversion itself is not superseded — only this draft is.**
