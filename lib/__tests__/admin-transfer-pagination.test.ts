@@ -14,6 +14,13 @@ import { getSql, initializeSchema } from '@/lib/db';
  *
  * Runs against real PostgreSQL: the bug is in SQL that was never issued, which
  * a mocked driver cannot show.
+ *
+ * No bank account is seeded. transfer_intents.bank_account_id is nullable, and
+ * inserting one through the SERIAL sequence collides on a fresh database:
+ * test-schema.sql leaves the bank_accounts sequence at 9001, and
+ * canadian-eft-safety.test.ts seeds id 9002 explicitly without advancing it, so
+ * the next SERIAL value is already taken. This passed locally only because the
+ * sequence had been advanced by earlier runs.
  */
 
 // checkPermission reads admin context from a request-scoped store that does not
@@ -28,7 +35,6 @@ const sql = getSql();
 const TOTAL = 12;
 const PAGE_SIZE = 5;
 let userId: number;
-let bankId: number;
 
 beforeAll(async () => {
   await initializeSchema();
@@ -40,19 +46,12 @@ beforeAll(async () => {
   `;
   userId = users[0].id;
 
-  const accounts = await sql<{ id: number }[]>`
-    INSERT INTO bank_accounts (user_id, institution_name, account_name)
-    VALUES (${userId}, 'Test Bank', 'Checking')
-    RETURNING id
-  `;
-  bankId = accounts[0].id;
-
   // Distinct created_at per row so the ordering is unambiguous and a page
   // boundary is a real boundary rather than a tie.
   for (let i = 0; i < TOTAL; i++) {
     await sql`
-      INSERT INTO transfer_intents (user_id, bank_account_id, type, amount, currency, status, created_at)
-      VALUES (${userId}, ${bankId}, 'add_money', ${100 + i}, 'CAD', 'draft',
+      INSERT INTO transfer_intents (user_id, type, amount, currency, status, created_at)
+      VALUES (${userId}, 'add_money', ${100 + i}, 'CAD', 'draft',
               NOW() - (${TOTAL - i} || ' minutes')::interval)
     `;
   }
@@ -60,7 +59,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sql`DELETE FROM transfer_intents WHERE user_id = ${userId}`;
-  await sql`DELETE FROM bank_accounts WHERE user_id = ${userId}`;
   await sql`DELETE FROM users WHERE id = ${userId}`;
 }, 60000);
 
