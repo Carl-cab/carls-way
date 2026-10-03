@@ -6,11 +6,7 @@ import { auditLog } from '@/lib/auth';
 import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
 import type { SettlementEventType } from '@/lib/settlement';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
-import {
-  markProviderEventFailed,
-  getProviderEvent,
-  MAX_WEBHOOK_RETRIES,
-} from '@/lib/provider-events';
+import { markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
 
 // ─── JWK cache ────────────────────────────────────────────────────────────────
 // Plaid rotates keys infrequently; cache the JWKS for the lifetime of the

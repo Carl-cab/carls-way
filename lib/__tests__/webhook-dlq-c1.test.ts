@@ -30,11 +30,6 @@ async function seedEvent(id: string): Promise<void> {
   });
 }
 
-async function cleanEvent(id: string): Promise<void> {
-  await sql`DELETE FROM webhook_dead_letters WHERE provider = ${PROVIDER} AND provider_event_id = ${id}`;
-  await sql`DELETE FROM provider_webhook_events WHERE provider = ${PROVIDER} AND provider_event_id = ${id}`;
-}
-
 beforeAll(async () => {
   await initializeSchema();
 });
