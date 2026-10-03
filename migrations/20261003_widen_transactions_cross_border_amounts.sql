@@ -83,29 +83,46 @@ LOCK TABLE public.transactions IN ACCESS EXCLUSIVE MODE;
 
 DO $validate_and_widen$
 DECLARE
+  sender_type TEXT;
   sender_precision INTEGER;
   sender_scale INTEGER;
+  receiver_type TEXT;
   receiver_precision INTEGER;
   receiver_scale INTEGER;
 BEGIN
-  SELECT numeric_precision, numeric_scale
-    INTO sender_precision, sender_scale
+  SELECT data_type, numeric_precision, numeric_scale
+    INTO sender_type, sender_precision, sender_scale
   FROM information_schema.columns
   WHERE table_schema = 'public'
     AND table_name = 'transactions'
     AND column_name = 'sender_amount';
 
-  SELECT numeric_precision, numeric_scale
-    INTO receiver_precision, receiver_scale
+  SELECT data_type, numeric_precision, numeric_scale
+    INTO receiver_type, receiver_precision, receiver_scale
   FROM information_schema.columns
   WHERE table_schema = 'public'
     AND table_name = 'transactions'
     AND column_name = 'receiver_amount';
 
-  IF sender_precision IS NULL OR sender_scale IS NULL
-     OR receiver_precision IS NULL OR receiver_scale IS NULL THEN
+  -- A missing column and a present column of the wrong type are different
+  -- problems, and the operator needs to know which. data_type is what
+  -- distinguishes them: it is NULL only when the column does not exist.
+  -- numeric_scale cannot make that distinction, because information_schema
+  -- reports it as NULL for any non-NUMERIC type — so a REAL column used to
+  -- abort with "must both exist" while both columns were sitting right there.
+  IF sender_type IS NULL OR receiver_type IS NULL THEN
+    -- concat_ws drops NULL arguments, so this names exactly the missing ones.
     RAISE EXCEPTION
-      'Aborting capacity alignment: transactions.sender_amount and receiver_amount must both exist';
+      'Aborting capacity alignment: absent from public.transactions: %',
+      concat_ws(', ',
+        CASE WHEN sender_type IS NULL THEN 'sender_amount' END,
+        CASE WHEN receiver_type IS NULL THEN 'receiver_amount' END);
+  END IF;
+
+  IF sender_type <> 'numeric' OR receiver_type <> 'numeric' THEN
+    RAISE EXCEPTION
+      'Aborting capacity alignment: both columns must already be NUMERIC; found sender_amount % and receiver_amount %. A float column is a decimal-correctness problem rather than a capacity one — convert it with migrations/20260907_money_real_to_numeric.sql first.',
+      upper(sender_type), upper(receiver_type);
   END IF;
 
   IF sender_scale <> 2 OR receiver_scale <> 2
