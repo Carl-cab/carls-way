@@ -85,7 +85,7 @@ function TransfersPageInner() {
     fetch('/api/transfers')
       .then(r => r.json())
       .then(data => setTransfers(Array.isArray(data) ? data : []))
-      .catch((_err) => console.error('Failed to load transfers'));
+      .catch(() => console.error('Failed to load transfers'));
   }, []);
 
   useEffect(() => { loadTransfers(); }, [loadTransfers]);
