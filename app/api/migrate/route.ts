@@ -378,6 +378,44 @@ export async function GET(req: NextRequest) {
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processed_at TIMESTAMPTZ`;
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS balance_processing_error TEXT`;
 
+    // ── C1.4 webhook dead-letter queue ──────────────────────────────────────
+    // These three statements existed only in lib/db.ts, so the live database —
+    // which came up before C1.4 and is migrated from here — has none of them,
+    // while markProviderEventFailed() in lib/provider-events.ts writes
+    // retry_count and dead_letter_at on every webhook processing failure and
+    // inserts into webhook_dead_letters once the retries are exhausted.
+    //
+    // The consequence is narrow but bad: the UPDATE raises 42703
+    // (column does not exist) inside the webhook *error* handler, so a webhook
+    // whose processing already failed now fails a second time while trying to
+    // record that failure. The event keeps processing_status = 'received',
+    // never reaches 'failed' or 'dead_letter', and the provider redelivers it
+    // indefinitely with nothing accumulating to stop it — the retry ceiling the
+    // column exists to enforce is simply absent. Same two-source drift class as
+    // users.token_version.
+    await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS dead_letter_at TIMESTAMPTZ`;
+    // Preserves the payload of events that exhausted their retries so an
+    // operator can review and requeue them. Read by lib/webhooks/dlq.ts and
+    // app/api/admin/webhooks/dead-letters/route.ts. The (provider,
+    // provider_event_id) uniqueness is load-bearing: markProviderEventFailed()
+    // upserts against it so a provider that keeps redelivering refreshes one
+    // entry rather than appending a row per delivery.
+    await sql`
+      CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+        id SERIAL PRIMARY KEY,
+        provider TEXT NOT NULL,
+        provider_event_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        raw_payload JSONB,
+        failure_count INTEGER NOT NULL,
+        last_error TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        requeued_at TIMESTAMPTZ,
+        UNIQUE(provider, provider_event_id)
+      )
+    `;
+
     // Phase C1: Live provider columns
     // bank_accounts: Plaid account_id (for Transfer API) and Stripe payment method (for ACSS)
     await sql`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS plaid_account_id TEXT`;
