@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 /**
  * Fixed-window rate limiting.
  *
@@ -86,16 +88,19 @@ function pruneMemory(): void {
 
 // ── Redis backend ────────────────────────────────────────────────────────────
 
-type RedisLike = {
+export type RateLimitRedisClient = {
   incr(key: string): Promise<number>;
   pexpire(key: string, ms: number): Promise<unknown>;
   pttl(key: string): Promise<number>;
+  set(key: string, value: string, ...args: string[]): Promise<string | null>;
+  get(key: string): Promise<string | null>;
+  del(key: string): Promise<number>;
 };
 
-let redisClient: RedisLike | null = null;
+let redisClient: RateLimitRedisClient | null = null;
 let redisUnavailable = false;
 
-async function getRedis(): Promise<RedisLike | null> {
+async function getRedis(): Promise<RateLimitRedisClient | null> {
   if (redisUnavailable) return null;
   if (redisClient) return redisClient;
   if (!process.env.REDIS_URL) return null;
@@ -103,16 +108,115 @@ async function getRedis(): Promise<RedisLike | null> {
   try {
     // Optional dependency: only required when REDIS_URL is configured.
     const mod = (await import('ioredis')) as unknown as {
-      default: new (url: string) => RedisLike;
+      default: new (url: string) => RateLimitRedisClient;
     };
     redisClient = new mod.default(process.env.REDIS_URL);
     return redisClient;
-  } catch (err) {
+  } catch {
     // A missing package or unreachable server must not take the app down; fall
-    // back to in-process counting and say so once.
-    console.error('Rate limiter: Redis unavailable, falling back to in-process counters.', err);
+    // back to in-process counting. Do not log the connection error: it can
+    // contain a Redis URL with credentials.
+    console.error('Rate limiter: Redis unavailable, falling back to in-process counters.');
     redisUnavailable = true;
     return null;
+  }
+}
+
+const REDIS_VERIFICATION_TTL_MS = 5_000;
+
+export interface RateLimitBackendVerification {
+  /** Whether REDIS_URL was present. The URL itself is never returned. */
+  configured: boolean;
+  /** Whether Redis completed the isolated write/read/delete check. */
+  reachable: boolean;
+  /** The backend that rate limiting must currently rely on. */
+  activeBackend: 'redis' | 'in_memory_fallback';
+  /** A terse, non-secret result for an authorized operational caller. */
+  verification: 'set_get_delete' | 'not_run' | 'failed';
+  /** Cleanup state of the isolated key; TTL bounds any failed cleanup. */
+  cleanup: 'confirmed' | 'not_required' | 'ttl_fallback';
+}
+
+function inMemoryVerification(
+  configured: boolean,
+  verification: RateLimitBackendVerification['verification'],
+  cleanup: RateLimitBackendVerification['cleanup'],
+): RateLimitBackendVerification {
+  return {
+    configured,
+    reachable: false,
+    activeBackend: 'in_memory_fallback',
+    verification,
+    cleanup,
+  };
+}
+
+/**
+ * Verify the shared Redis backend without reading or disclosing its URL.
+ *
+ * This function is deliberately intended for a protected operations endpoint,
+ * not a liveness probe. When configured, it writes a random, namespaced key
+ * with NX and a five-second TTL, reads back only the random marker it wrote,
+ * then deletes the key. The TTL is a bounded cleanup backstop if the process or
+ * Redis connection fails between write and delete. It never touches rate-limit
+ * counters and never returns an error, host, username, password, or URL.
+ */
+export async function verifyRateLimitBackend(): Promise<RateLimitBackendVerification> {
+  const configured = Boolean(process.env.REDIS_URL);
+  if (!configured) {
+    return inMemoryVerification(false, 'not_run', 'not_required');
+  }
+
+  const redis = await getRedis();
+  if (!redis) {
+    return inMemoryVerification(true, 'not_run', 'not_required');
+  }
+
+  const key = `ratelimit:verification:${randomUUID()}`;
+  const marker = randomUUID();
+  let keyMayExist = false;
+
+  try {
+    const wrote = await redis.set(key, marker, 'PX', String(REDIS_VERIFICATION_TTL_MS), 'NX');
+    if (wrote !== 'OK') {
+      // A random UUID collision is not expected, but do not overwrite any key
+      // if it somehow occurs. The key was not created by this check.
+      return inMemoryVerification(true, 'failed', 'not_required');
+    }
+    keyMayExist = true;
+
+    const observed = await redis.get(key);
+    if (observed !== marker) {
+      return inMemoryVerification(true, 'failed', 'ttl_fallback');
+    }
+
+    const deleted = await redis.del(key);
+    keyMayExist = false;
+    if (deleted !== 1) {
+      return inMemoryVerification(true, 'failed', 'ttl_fallback');
+    }
+
+    return {
+      configured: true,
+      reachable: true,
+      activeBackend: 'redis',
+      verification: 'set_get_delete',
+      cleanup: 'confirmed',
+    };
+  } catch {
+    // Do not log the connection error. Client errors often embed a URL and
+    // credentials. The running limiter will use its documented memory fallback.
+    redisUnavailable = true;
+    return inMemoryVerification(true, 'failed', keyMayExist ? 'ttl_fallback' : 'not_required');
+  } finally {
+    if (keyMayExist) {
+      try {
+        await redis.del(key);
+      } catch {
+        // The short TTL is the final cleanup guard. There is intentionally no
+        // error detail here because Redis client errors can contain credentials.
+      }
+    }
   }
 }
 
@@ -150,8 +254,11 @@ export async function checkRateLimit(
       limit: rule.limit,
       resetAt: Date.now() + (ttl > 0 ? ttl : rule.windowSeconds * 1000),
     };
-  } catch (err) {
-    console.error('Rate limiter: Redis command failed, using in-process counter.', err);
+  } catch {
+    // Do not log `err`: a Redis client error can include its credential-bearing
+    // connection URL. Preserve availability with the documented local fallback.
+    console.error('Rate limiter: Redis command failed, using in-process counter.');
+    redisUnavailable = true;
     pruneMemory();
     return checkInMemory(key, rule);
   }
@@ -214,5 +321,18 @@ export function clientIdentifier(req: { headers: { get(name: string): string | n
 
 /** Test-only: clear in-process counters between cases. */
 export function __resetInMemoryCounters(): void {
+  memoryCounters.clear();
+}
+
+/** Test-only: inject a Redis double without creating any network connection. */
+export function __setRedisClientForTests(client: RateLimitRedisClient | null): void {
+  redisClient = client;
+  redisUnavailable = false;
+}
+
+/** Test-only: restore Redis module state between isolated tests. */
+export function __resetRateLimitBackendForTests(): void {
+  redisClient = null;
+  redisUnavailable = false;
   memoryCounters.clear();
 }
