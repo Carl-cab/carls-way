@@ -73,8 +73,17 @@ export function getSql() {
   return _sql;
 }
 
-export async function initializeSchema() {
-  const db = getSql();
+/**
+ * Build the schema on `executor`, defaulting to the process-wide pool.
+ *
+ * The parameter exists so a test can assert what this function produces on a
+ * genuinely empty database rather than on the shared one, which the fixture
+ * has already populated — the same `executor` convention lib/ledger.ts uses.
+ * It takes the pool type rather than ISql because the body opens its own
+ * transaction, which a TransactionSql cannot nest.
+ */
+export async function initializeSchema(executor: ReturnType<typeof getSql> = getSql()) {
+  const db = executor;
 
   // PostgreSQL's CREATE TABLE IF NOT EXISTS is not race-safe when multiple
   // workers attempt the first catalog write at the same instant. Keep every
@@ -290,6 +299,28 @@ export async function initializeSchema() {
       UNIQUE(provider, provider_event_id)
     )
   `;
+  // ── Correlation ids (Milestone 2) ────────────────────────────────────────
+  // One id threaded through a financial event's whole lifecycle, so an
+  // operator can trace an intent to its webhooks to its ledger rows.
+  //
+  // These lived only in app/api/migrate/route.ts, the mirror image of the
+  // C1.4 drift: a fresh environment comes up through initializeSchema() and
+  // got none of them, while four admin services filter on the column —
+  // AdminTransferService, AdminProviderEventService, AdminWebhookService and
+  // AdminSettlementService all issue `WHERE correlation_id = ...`.
+  //
+  // transactions.correlation_id was in NO schema source at all, while
+  // AdminSettlementService queries it against `transactions`, so
+  // GET /api/admin/settlements/trace?correlation_id=... and
+  // GET /api/admin/settlements?correlation_id=... raise 42703 on every
+  // database including production. Declared here and in the migrate route.
+  //
+  // ADD COLUMN IF NOT EXISTS, not a column in the CREATE TABLE above: an
+  // existing database already has the table, so only an ALTER reaches it.
+  await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+  await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+  await sql`ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
   await sql`
     CREATE TABLE IF NOT EXISTS splits (
       id SERIAL PRIMARY KEY,

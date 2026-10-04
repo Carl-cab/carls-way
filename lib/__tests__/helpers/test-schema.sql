@@ -203,6 +203,10 @@ CREATE TABLE IF NOT EXISTS transactions (
   is_cross_border BOOLEAN DEFAULT false,
   payment_rail TEXT,
   external_ref TEXT,
+  -- AdminSettlementService filters this table on correlation_id. The column
+  -- was in no schema source at all, so the settlement trace endpoints raised
+  -- 42703 everywhere; see the Milestone 2 block in lib/db.ts.
+  correlation_id VARCHAR(255),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -263,6 +267,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   provider_reference TEXT,
   provider_event_id TEXT,
   description TEXT,
+  correlation_id VARCHAR(255),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(transfer_intent_id, provider_event_id, entry_type)
 );
