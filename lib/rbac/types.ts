@@ -47,6 +47,9 @@ export type Permission =
   | 'admins:read'
   | 'admins:update'
   | 'admins:delete'
+  // Administrators may rotate only their own password; the route never accepts
+  // a target administrator id, so this cannot authorize a cross-account reset.
+  | 'admins:rotate_own_password'
   | 'roles:manage'
   | 'permissions:manage'
 
@@ -216,6 +219,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, Permission[]> = {
     'admins:read',
     'admins:update',
     'admins:delete',
+    'admins:rotate_own_password',
     'roles:manage',
     'permissions:manage',
     'transfers:retry',
@@ -244,6 +248,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, Permission[]> = {
     'events:replay',
     'settlements:view',
     'exceptions:manage',
+    'admins:rotate_own_password',
     'users:search',
     'users:view_details',
     'transfers:view',
@@ -262,6 +267,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, Permission[]> = {
     'ledger:view',
     'provider_events:view',
     'investigations:create_notes',
+    'admins:rotate_own_password',
     'audit_logs:read',
   ],
 
@@ -274,6 +280,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, Permission[]> = {
     'users:search',
     'transfers:view',
     'provider_events:view',
+    'admins:rotate_own_password',
   ],
 
   ReadOnlyAuditor: [
@@ -282,6 +289,8 @@ export const ROLE_PERMISSIONS: Record<AdminRole, Permission[]> = {
     'data:read_masked',
     'transfers:view',
     'settlements:view',
+    // Rotating one's own credential does not grant authority to mutate data.
+    'admins:rotate_own_password',
   ],
 };
 
