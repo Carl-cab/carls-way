@@ -266,3 +266,117 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(transfer_intent_id, provider_event_id, entry_type)
 );
+
+
+-- ── Tables that application code reads unguarded ────────────────────────────
+-- These were absent here while present in both lib/db.ts and
+-- app/api/migrate/route.ts. A test that touched one passed on any database an
+-- earlier initializeSchema() had already built and failed on a clean one — the
+-- same gap that turned CI red on ledger_entries above. Mirrors lib/db.ts.
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  related_entity_type TEXT,
+  related_entity_id INTEGER,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Rolling per-user transaction volume: read by checkVelocityLimit() and
+-- written by recordVelocity() / reverseVelocity() in lib/auth.ts.
+CREATE TABLE IF NOT EXISTS velocity_checks (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  window_type TEXT NOT NULL,
+  window_start TIMESTAMPTZ NOT NULL,
+  transaction_count INTEGER NOT NULL DEFAULT 0,
+  total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'CAD',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Partial uniqueness, not a plain UNIQUE constraint: exactly one accumulating
+-- row per window, while the compensating rows reverseVelocity() appends
+-- (transaction_count < 0) stay append-only. recordVelocity()'s upsert names
+-- this index explicitly, so a test database without it fails the upsert
+-- outright rather than merely losing the constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
+  ON velocity_checks (user_id, window_type, window_start, currency)
+  WHERE transaction_count >= 0;
+
+CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
+  ON velocity_checks (user_id, window_type, currency, window_start);
+
+-- Customer-facing audit trail written by auditLog() in lib/auth.ts. That
+-- helper swallows its own errors, so a missing table makes every audit write
+-- across the app silently do nothing — visible in no test assertion.
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id),
+  action TEXT NOT NULL,
+  metadata JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action_time ON audit_logs(action, created_at);
+
+-- FX rate cache read and written by getFxRate() in lib/fx.ts. That read is
+-- unguarded, so a missing table fails every cross-border quote.
+-- getFxRate() upserts with ON CONFLICT (from_currency, to_currency), so the
+-- pair uniqueness is load-bearing rather than hygiene.
+CREATE TABLE IF NOT EXISTS fx_rates (
+  id SERIAL PRIMARY KEY,
+  from_currency TEXT NOT NULL,
+  to_currency TEXT NOT NULL,
+  rate NUMERIC(18,8) NOT NULL,
+  provider TEXT NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (from_currency, to_currency)
+);
+
+-- Webhook deduplication. The (provider, provider_event_id) uniqueness is what
+-- stops a replayed provider event being processed twice, so a test database
+-- lacking it would let a duplicate-webhook test pass while production rejects
+-- the second insert. retry_count / dead_letter_at carry C1.4 retry tracking.
+-- correlation_id is in app/api/migrate/route.ts but not lib/db.ts; it is
+-- included here so the test schema matches the live column set.
+CREATE TABLE IF NOT EXISTS provider_webhook_events (
+  id SERIAL PRIMARY KEY,
+  provider TEXT NOT NULL,
+  provider_event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  related_provider_reference TEXT,
+  raw_payload JSONB,
+  processing_status TEXT NOT NULL DEFAULT 'received',
+  processing_error TEXT,
+  processed_at TIMESTAMPTZ,
+  balance_processed_at TIMESTAMPTZ,
+  balance_processing_error TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  dead_letter_at TIMESTAMPTZ,
+  correlation_id VARCHAR(255),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(provider, provider_event_id)
+);
+
+-- Dead-letter queue for events that exhausted their retries; preserves the
+-- payload so it can be requeued. Declared in lib/db.ts only — it is absent
+-- from app/api/migrate/route.ts, so the live database has never been given it.
+CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+  id SERIAL PRIMARY KEY,
+  provider TEXT NOT NULL,
+  provider_event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  raw_payload JSONB,
+  failure_count INTEGER NOT NULL,
+  last_error TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  requeued_at TIMESTAMPTZ,
+  UNIQUE(provider, provider_event_id)
+);
