@@ -13,6 +13,7 @@ const adminLinks = [
   { href: '/admin/webhooks', label: 'Webhooks', icon: '🔗' },
   { href: '/admin/audit', label: 'Audit Logs', icon: '🔍' },
   { href: '/admin/search', label: 'Global Search', icon: '🔎' },
+  { href: '/admin/security/password', label: 'Security', icon: '🔐' },
 ];
 
 export function AdminShell({ children }: { children: React.ReactNode }) {
