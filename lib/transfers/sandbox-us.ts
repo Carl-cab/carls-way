@@ -5,6 +5,11 @@
 
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import {
+  MoneyValidationError, minorUnitsToMajorNumber, parseDatabaseMoney,
+  toDatabaseDecimal, toNarrowDatabaseDecimal,
+} from '@/lib/money';
+import type { MinorUnits } from '@/lib/money';
 import type {
   TransferProvider, TransferType, CreateIntentResult,
   ReviewResult, ConfirmResult, WebhookResult,
@@ -19,9 +24,12 @@ export class SandboxUSProvider implements TransferProvider {
     userId: number,
     bankAccountId: number,
     type: TransferType,
-    amount: number,
+    amount: MinorUnits,
     currency: string,
   ): Promise<CreateIntentResult> {
+    if (currency !== 'USD') throw new Error('US sandbox transfers require USD.');
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Amount must be positive integer cents.');
+    const amountDecimal = toNarrowDatabaseDecimal(amount);
     const sql = getSql();
     const idempotencyKey = `us_${userId}_${Date.now()}`;
 
@@ -30,7 +38,7 @@ export class SandboxUSProvider implements TransferProvider {
         user_id, bank_account_id, type, amount, currency, status,
         provider_region, provider_name, execution_mode, idempotency_key
       ) VALUES (
-        ${userId}, ${bankAccountId}, ${type}, ${amount}, ${currency}, 'draft',
+        ${userId}, ${bankAccountId}, ${type}, ${amountDecimal}, ${currency}, 'draft',
         'US', 'sandbox_us', 'sandbox', ${idempotencyKey}
       )
       RETURNING id
@@ -38,7 +46,7 @@ export class SandboxUSProvider implements TransferProvider {
 
     const intentId = result[0].id as number;
     await auditLog(userId, 'transfer_intent_created', {
-      intent_id: intentId, type, amount, currency,
+      intent_id: intentId, type, amount: amountDecimal, currency,
       provider: 'sandbox_us', mode: 'sandbox',
     });
 
@@ -57,16 +65,18 @@ export class SandboxUSProvider implements TransferProvider {
 
     if (!rows[0]) throw new Error('Transfer intent not found');
     const row = rows[0];
+    const amountMinor = parseDatabaseMoney(row.amount as string, row.currency);
+    const amountDecimal = toDatabaseDecimal(amountMinor);
 
     const consentLanguage = row.type === 'add_money'
-      ? `By confirming, you authorize Manna to debit your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. This is a sandbox simulation — no money will move.`
-      : `By confirming, you authorize Manna to deposit ${row.currency} ${Number(row.amount).toFixed(2)} to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'}. This is a sandbox simulation — no money will move.`;
+      ? `By confirming, you authorize Manna to debit your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${amountDecimal}. This is a sandbox simulation — no money will move.`
+      : `By confirming, you authorize Manna to deposit ${row.currency} ${amountDecimal} to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'}. This is a sandbox simulation — no money will move.`;
 
     return {
       intent_id: intentId,
       status: row.status as 'draft',
       review: {
-        amount: Number(row.amount),
+        amount: minorUnitsToMajorNumber(amountMinor), // Legacy public display only.
         currency: row.currency,
         type: row.type,
         bank_account: {

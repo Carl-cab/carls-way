@@ -17,6 +17,11 @@ interface Me {
   balance_usd: number;
 }
 
+function isPositiveMoneyInput(value: string): boolean {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value)) return false;
+  return !/^0(?:\.0{1,2})?$/.test(value);
+}
+
 function SendForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -36,7 +41,9 @@ function SendForm() {
   const balance = me ? (currency === 'USD' ? (me.balance_usd || 0) : (me.balance_cad || 0)) : 0;
 
   const fetchFxQuote = useCallback(async (amount: string, username: string) => {
-    if (!amount || !username || parseFloat(amount) <= 0) { setFxQuote(null); return; }
+    // Keep user input as a decimal string. This is deliberately only a UX
+    // filter; the API independently validates and converts it to cents.
+    if (!isPositiveMoneyInput(amount) || !username) { setFxQuote(null); return; }
     setFxLoading(true);
     try {
       const userRes = await fetch(`/api/users?search=${encodeURIComponent(username)}`);
@@ -48,7 +55,7 @@ function SendForm() {
       const res = await fetch('/api/fx/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: parseFloat(amount), fromCurrency: currency, toCurrency }),
+        body: JSON.stringify({ amount, fromCurrency: currency, toCurrency }),
       });
       if (res.ok) setFxQuote(await res.json() as FxQuote);
     } catch { setFxQuote(null); }
@@ -69,7 +76,7 @@ function SendForm() {
       const res = await fetch('/api/transactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiverUsername: form.receiverUsername, amount: parseFloat(form.amount), note: form.note, type: form.type, privacy: form.privacy }),
+        body: JSON.stringify({ receiverUsername: form.receiverUsername, amount: form.amount, note: form.note, type: form.type, privacy: form.privacy }),
       });
       const data = await res.json() as { error?: string; isCrossBorder?: boolean; receiverAmount?: number; receiverCurrency?: string };
       if (!res.ok) { setError(data.error || 'Transaction failed'); }
@@ -83,8 +90,10 @@ function SendForm() {
     finally { setLoading(false); }
   }
 
-  const numAmount = parseFloat(form.amount) || 0;
-  const insufficient = form.type === 'pay' && numAmount > balance;
+  // The server is the balance authority. Avoid a client-side comparison against
+  // a deserialized number, which could otherwise introduce a float decision on
+  // a money path.
+  const insufficient = false;
 
   return (
     <div>

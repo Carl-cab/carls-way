@@ -1,5 +1,12 @@
 import type postgres from 'postgres';
 import { getSql } from '@/lib/db';
+import {
+  type MinorUnits,
+  isMoneyCurrency,
+  parseDatabaseMoney,
+  subtractMinorUnits,
+  toNarrowDatabaseDecimal,
+} from '@/lib/money';
 
 /**
  * Something that can run a query: the connection pool, or a transaction handle
@@ -25,8 +32,8 @@ export interface LedgerEntry {
   currency: string;
   account_type: string;
   entry_type: string;
-  debit: number;
-  credit: number;
+  debit: string;
+  credit: string;
   provider: string | null;
   provider_reference: string | null;
   description: string | null;
@@ -42,20 +49,25 @@ export function validateLedgerPair(debitEntry: Omit<LedgerEntry, 'id' | 'created
     return false;
   }
 
-  // Debit entry must have debit > 0 and credit = 0
-  if (debitEntry.debit <= 0 || debitEntry.credit !== 0) {
+  const debit = parseDatabaseMoney(debitEntry.debit, debitEntry.currency);
+  const debitCredit = parseDatabaseMoney(debitEntry.credit, debitEntry.currency);
+  const creditDebit = parseDatabaseMoney(creditEntry.debit, creditEntry.currency);
+  const credit = parseDatabaseMoney(creditEntry.credit, creditEntry.currency);
+
+  // Debit entry must have debit > 0 and credit = 0.
+  if (debit <= 0 || debitCredit !== 0) {
     console.error('Ledger pair validation failed: debit entry malformed', debitEntry);
     return false;
   }
 
   // Credit entry must have credit > 0 and debit = 0
-  if (creditEntry.credit <= 0 || creditEntry.debit !== 0) {
+  if (credit <= 0 || creditDebit !== 0) {
     console.error('Ledger pair validation failed: credit entry malformed', creditEntry);
     return false;
   }
 
   // Amounts should match
-  if (debitEntry.debit !== creditEntry.credit) {
+  if (debit !== credit) {
     console.error('Ledger pair validation failed: amounts do not match', { debit: debitEntry.debit, credit: creditEntry.credit });
     return false;
   }
@@ -69,8 +81,8 @@ export async function createLedgerEntry(
   currency: string,
   accountType: string,
   entryType: string,
-  debit: number,
-  credit: number,
+  debit: MinorUnits,
+  credit: MinorUnits,
   options?: {
     transactionId?: number | null;
     transferIntentId?: number | null;
@@ -80,7 +92,7 @@ export async function createLedgerEntry(
   }
 ): Promise<number> {
   // Validation
-  if (currency !== 'CAD' && currency !== 'USD') {
+  if (!isMoneyCurrency(currency)) {
     throw new Error(`Invalid currency: ${currency}. Must be CAD or USD.`);
   }
 
@@ -109,8 +121,8 @@ export async function createLedgerEntry(
       ${currency},
       ${accountType},
       ${entryType},
-      ${debit},
-      ${credit},
+      ${toNarrowDatabaseDecimal(debit)},
+      ${toNarrowDatabaseDecimal(credit)},
       ${options?.provider ?? null},
       ${options?.providerReference ?? null},
       ${options?.description ?? null}
@@ -127,7 +139,7 @@ export async function createLedgerPair(
   senderUserId: number,
   receiverUserId: number,
   currency: string,
-  amount: number,
+  amount: MinorUnits,
   transactionId: number,
   options?: {
     /**
@@ -161,7 +173,7 @@ export async function createLedgerPair(
     throw new Error('Amount must be greater than zero.');
   }
 
-  if (currency !== 'CAD' && currency !== 'USD') {
+  if (!isMoneyCurrency(currency)) {
     throw new Error(`Invalid currency: ${currency}. Must be CAD or USD.`);
   }
 
@@ -184,7 +196,7 @@ export async function createLedgerPair(
         debit, credit, provider, description
       ) VALUES (
         ${senderUserId}, ${transactionId}, ${currency}, 'wallet', ${senderEntryType},
-        ${amount}, 0, ${options?.provider ?? null}, ${options?.senderDescription ?? null}
+        ${toNarrowDatabaseDecimal(amount)}, '0.00', ${options?.provider ?? null}, ${options?.senderDescription ?? null}
       )
       RETURNING id
     ),
@@ -194,7 +206,7 @@ export async function createLedgerPair(
         debit, credit, provider, description
       ) VALUES (
         ${receiverUserId}, ${transactionId}, ${currency}, 'wallet', ${receiverEntryType},
-        0, ${amount}, ${options?.provider ?? null}, ${options?.receiverDescription ?? null}
+        '0.00', ${toNarrowDatabaseDecimal(amount)}, ${options?.provider ?? null}, ${options?.receiverDescription ?? null}
       )
       RETURNING id
     )
@@ -215,10 +227,10 @@ export async function createLedgerPair(
 export async function createCrossBorderLedgerPair(
   senderUserId: number,
   senderCurrency: string,
-  senderAmount: number,
+  senderAmount: MinorUnits,
   receiverUserId: number,
   receiverCurrency: string,
-  receiverAmount: number,
+  receiverAmount: MinorUnits,
   transactionId: number,
   options?: {
     senderDescription?: string;
@@ -236,8 +248,7 @@ export async function createCrossBorderLedgerPair(
     throw new Error('Both sender and receiver amounts must be greater than zero.');
   }
 
-  if ((senderCurrency !== 'CAD' && senderCurrency !== 'USD') ||
-      (receiverCurrency !== 'CAD' && receiverCurrency !== 'USD')) {
+  if (!isMoneyCurrency(senderCurrency) || !isMoneyCurrency(receiverCurrency)) {
     throw new Error('Both currencies must be CAD or USD.');
   }
 
@@ -251,7 +262,7 @@ export async function createCrossBorderLedgerPair(
         debit, credit, description, provider
       ) VALUES (
         ${senderUserId}, ${transactionId}, ${senderCurrency}, 'wallet', 'payment_sent',
-        ${senderAmount}, 0, ${options?.senderDescription ?? null}, ${options?.provider ?? null}
+        ${toNarrowDatabaseDecimal(senderAmount)}, '0.00', ${options?.senderDescription ?? null}, ${options?.provider ?? null}
       )
       RETURNING id
     ),
@@ -261,7 +272,7 @@ export async function createCrossBorderLedgerPair(
         debit, credit, description, provider
       ) VALUES (
         ${receiverUserId}, ${transactionId}, ${receiverCurrency}, 'wallet', 'payment_received',
-        0, ${receiverAmount}, ${options?.receiverDescription ?? null}, ${options?.provider ?? null}
+        '0.00', ${toNarrowDatabaseDecimal(receiverAmount)}, ${options?.receiverDescription ?? null}, ${options?.provider ?? null}
       )
       RETURNING id
     )
@@ -278,8 +289,8 @@ export async function createCrossBorderLedgerPair(
 
 // Get the computed ledger balance for a user in a specific currency.
 // This sums all debits and credits across all ledger entries for the user.
-export async function getLedgerBalance(userId: number, currency: string): Promise<number> {
-  if (currency !== 'CAD' && currency !== 'USD') {
+export async function getLedgerBalance(userId: number, currency: string): Promise<MinorUnits> {
+  if (!isMoneyCurrency(currency)) {
     throw new Error(`Invalid currency: ${currency}. Must be CAD or USD.`);
   }
 
@@ -292,11 +303,11 @@ export async function getLedgerBalance(userId: number, currency: string): Promis
     WHERE user_id = ${userId} AND currency = ${currency}
   `;
 
-  const totalDebits = parseFloat(String(result[0].total_debits));
-  const totalCredits = parseFloat(String(result[0].total_credits));
+  const totalDebits = parseDatabaseMoney(String(result[0].total_debits), currency);
+  const totalCredits = parseDatabaseMoney(String(result[0].total_credits), currency);
 
   // Balance = credits - debits (money in minus money out)
-  return totalCredits - totalDebits;
+  return subtractMinorUnits(totalCredits, totalDebits);
 }
 
 // Get all ledger entries for a user.

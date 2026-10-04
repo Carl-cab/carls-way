@@ -12,10 +12,15 @@
 
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import {
+  minorUnitsToMajorNumber, parseDatabaseMoney, toDatabaseDecimal,
+  toNarrowDatabaseDecimal,
+} from '@/lib/money';
 
 export interface SandboxSettlementResult {
   intent_id: number;
   status: 'settled';
+  /** Legacy public display only: never feed this number back into accounting. */
   new_balance: number;
   message: string;
 }
@@ -46,7 +51,7 @@ export async function settleSandboxTransfer(
     if (!intentRows[0]) throw new Error('Transfer intent not found');
 
     const intent = intentRows[0] as {
-      type: string; amount: number; currency: string; status: string;
+      type: string; amount: string; currency: string; status: string;
     };
 
     // Only a confirmed ('ready') intent may settle. Anything else is a no-op
@@ -55,8 +60,13 @@ export async function settleSandboxTransfer(
       throw new Error(`Cannot settle intent in status: ${intent.status}`);
     }
 
-    const amount = Number(intent.amount);
+    const amountMinor = parseDatabaseMoney(intent.amount, intent.currency);
+    if (amountMinor <= 0) throw new Error('Transfer amount must be positive.');
+    const amount = toNarrowDatabaseDecimal(amountMinor); // Ledger NUMERIC(12,2).
     const currency = intent.currency;
+    if (providerName === 'sandbox_us' ? currency !== 'USD' : currency !== 'CAD') {
+      throw new Error('Sandbox provider currency does not match the transfer.');
+    }
     const isUsd = currency === 'USD';
 
     let balanceRows;
@@ -66,7 +76,7 @@ export async function settleSandboxTransfer(
                    WHERE id = ${userId} RETURNING balance_usd AS bal`
         : await tx`UPDATE users SET balance_cad = balance_cad + ${amount}
                    WHERE id = ${userId} RETURNING balance_cad AS bal`;
-    } else {
+    } else if (intent.type === 'cash_out') {
       // cash_out — guard against overdraw
       balanceRows = isUsd
         ? await tx`UPDATE users SET balance_usd = balance_usd - ${amount}
@@ -76,13 +86,15 @@ export async function settleSandboxTransfer(
       if (balanceRows.length === 0) {
         throw new Error('INSUFFICIENT_BALANCE');
       }
+    } else {
+      throw new Error(`Invalid sandbox transfer type: ${intent.type}`);
     }
 
-    const debit = intent.type === 'cash_out' ? amount : 0;
-    const credit = intent.type === 'add_money' ? amount : 0;
+    const debit = intent.type === 'cash_out' ? amount : toDatabaseDecimal(0);
+    const credit = intent.type === 'add_money' ? amount : toDatabaseDecimal(0);
     const description = intent.type === 'add_money'
-      ? `Added ${amount.toFixed(2)} ${currency} from linked bank (sandbox)`
-      : `Cashed out ${amount.toFixed(2)} ${currency} to linked bank (sandbox)`;
+      ? `Added ${amount} ${currency} from linked bank (sandbox)`
+      : `Cashed out ${amount} ${currency} to linked bank (sandbox)`;
 
     // Ledger entry — UNIQUE(transfer_intent_id, provider_event_id, entry_type)
     // makes this insert idempotent for a given intent.
@@ -103,7 +115,7 @@ export async function settleSandboxTransfer(
       WHERE id = ${intentId} AND user_id = ${userId}
     `;
 
-    return Number(balanceRows[0].bal);
+    return parseDatabaseMoney(balanceRows[0].bal as string, currency);
   }) as unknown as number;
 
   await auditLog(userId, 'transfer_settled', {
@@ -114,7 +126,7 @@ export async function settleSandboxTransfer(
   return {
     intent_id: intentId,
     status: 'settled',
-    new_balance: newBalance,
+    new_balance: minorUnitsToMajorNumber(newBalance), // Public display boundary only.
     message: 'Transfer settled (sandbox). Your Manna balance has been updated.',
   };
 }

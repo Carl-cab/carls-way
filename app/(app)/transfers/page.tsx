@@ -99,7 +99,10 @@ function TransfersPageInner() {
       const res = await fetch('/api/transfers/intent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: transferType, amount: parseFloat(amount), currency }),
+        // Preserve the user-entered decimal through the HTTP boundary. The
+        // server parses it into integer cents; a browser float must never be
+        // the authority for a transfer amount.
+        body: JSON.stringify({ type: transferType, amount, currency }),
       });
       const data = await res.json();
       if (!res.ok) {

@@ -1,5 +1,6 @@
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import { minorUnitsToMajorNumber, parseDatabaseMoney } from '@/lib/money';
 
 export type RecoveryAction = 'retry_execute' | 'manual_review';
 
@@ -46,6 +47,7 @@ export interface StuckTransfer {
   intentId: number;
   userId: number;
   type: string;
+  /** Legacy public display major units only; not an accounting input. */
   amount: number;
   currency: string;
   status: string;
@@ -104,7 +106,7 @@ export async function findStuckTransfers(): Promise<StuckTransfer[]> {
         intentId: r.id as number,
         userId: r.user_id as number,
         type: r.type as string,
-        amount: Number(r.amount),
+        amount: minorUnitsToMajorNumber(parseDatabaseMoney(r.amount as string, r.currency)),
         currency: r.currency as string,
         status: r.status as string,
         providerName: r.provider_name as string,
@@ -183,7 +185,7 @@ export async function runTransferRecoverySweep(
   };
 }
 
-/** Open (unresolved) recovery flags with their intent details, for operators. */
+/** Open recovery flags with public display amounts; never use these numbers for accounting. */
 export async function listOpenRecoveryFlags(): Promise<
   Array<{
     flagId: number;
@@ -213,7 +215,7 @@ export async function listOpenRecoveryFlags(): Promise<
     intentId: r.transfer_intent_id as number,
     userId: r.user_id as number,
     type: r.type as string,
-    amount: Number(r.amount),
+    amount: minorUnitsToMajorNumber(parseDatabaseMoney(r.amount as string, r.currency)),
     currency: r.currency as string,
     status: r.status as string,
     recoveryAction: r.recovery_action as string,

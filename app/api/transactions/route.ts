@@ -5,6 +5,14 @@ import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
 import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
+import {
+  MoneyValidationError,
+  formatMoneyDisplay,
+  minorUnitsToMajorNumber,
+  parseDatabaseMoney,
+  parsePositiveMoney,
+  toDatabaseDecimal,
+} from '@/lib/money';
 
 export async function GET(req: NextRequest) {
   try {
@@ -57,12 +65,8 @@ export async function POST(req: NextRequest) {
     const { receiverUsername, amount, note, type, privacy } = body;
 
     // Input validation
-    if (!receiverUsername || !amount || !type) {
+    if (!receiverUsername || amount === undefined || amount === null || !type) {
       return NextResponse.json({ error: 'receiverUsername, amount, and type are required' }, { status: 400 });
-    }
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount <= 0 || numAmount > 10000) {
-      return NextResponse.json({ error: 'Amount must be between $0.01 and $10,000' }, { status: 400 });
     }
     if (!['pay', 'request'].includes(type)) {
       return NextResponse.json({ error: 'type must be pay or request' }, { status: 400 });
@@ -81,14 +85,14 @@ export async function POST(req: NextRequest) {
     // Get sender and receiver
     const senderRows = await sql`SELECT * FROM users WHERE id = ${user.userId}`;
     const sender = senderRows[0] as {
-      id: number; username: string; balance: number; balance_cad: number; balance_usd: number;
+      id: number; username: string; balance: string; balance_cad: string; balance_usd: string;
       country: string; kyc_status: string;
     } | undefined;
     if (!sender) return NextResponse.json({ error: 'Sender not found' }, { status: 404 });
 
     const receiverRows = await sql`SELECT * FROM users WHERE username = ${receiverUsername}`;
     const receiver = receiverRows[0] as {
-      id: number; username: string; balance: number; balance_cad: number; balance_usd: number;
+      id: number; username: string; balance: string; balance_cad: string; balance_usd: string;
       country: string;
     } | undefined;
     if (!receiver) return NextResponse.json({ error: 'User not found' }, { status: 404 });
@@ -98,34 +102,40 @@ export async function POST(req: NextRequest) {
     const senderCurrency = sender.country === 'US' ? 'USD' : 'CAD';
     const receiverCurrency = receiver.country === 'US' ? 'USD' : 'CAD';
     const isCrossBorder = senderCurrency !== receiverCurrency;
+    const inputCurrency = type === 'pay' ? senderCurrency : receiverCurrency;
+    const amountMinor = parsePositiveMoney(amount, inputCurrency, { maxMinorUnits: 1_000_000 });
+    const amountDecimal = toDatabaseDecimal(amountMinor);
 
     if (type === 'pay') {
       // Velocity check
-      const velocityCheck = await checkVelocityLimit(user.userId, numAmount, senderCurrency);
+      const velocityCheck = await checkVelocityLimit(user.userId, amountMinor, senderCurrency);
       if (!velocityCheck.allowed) {
         return NextResponse.json({ error: velocityCheck.reason }, { status: 429 });
       }
 
       // Balance check
-      const senderBalance = senderCurrency === 'USD'
-        ? parseFloat(String(sender.balance_usd))
-        : parseFloat(String(sender.balance_cad));
+      const senderBalance = parseDatabaseMoney(
+        String(senderCurrency === 'USD' ? sender.balance_usd : sender.balance_cad),
+        senderCurrency,
+      );
 
-      if (senderBalance < numAmount) {
+      if (senderBalance < amountMinor) {
         return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
       }
 
       // Build FX quote if cross-border
-      let receiverAmount = numAmount;
+      let receiverAmountMinor = amountMinor;
       let fxRate = 1.0;
-      let fxFee = 0;
+      let fxRateDecimal = '1.00000000';
+      let fxFeeMinor = 0;
       let estimatedSettlement: Date | null = null;
 
       if (isCrossBorder) {
-        const quote = await buildFxQuote(numAmount, senderCurrency, receiverCurrency, { userId: user.userId });
-        receiverAmount = quote.receiverAmount;
+        const quote = await buildFxQuote(amountMinor, senderCurrency, receiverCurrency, { userId: user.userId });
+        receiverAmountMinor = quote.receiverMinorUnits;
         fxRate = quote.rate;
-        fxFee = quote.feeAmount;
+        fxRateDecimal = quote.rateDecimal;
+        fxFeeMinor = quote.feeMinorUnits;
         estimatedSettlement = quote.estimatedSettlement;
       }
 
@@ -136,18 +146,18 @@ export async function POST(req: NextRequest) {
       try {
         txId = await sql.begin(async (tx) => {
           const debited = senderCurrency === 'USD'
-            ? await tx`UPDATE users SET balance_usd = balance_usd - ${numAmount}
-                       WHERE id = ${user.userId} AND balance_usd >= ${numAmount} RETURNING id`
-            : await tx`UPDATE users SET balance_cad = balance_cad - ${numAmount}
-                       WHERE id = ${user.userId} AND balance_cad >= ${numAmount} RETURNING id`;
+            ? await tx`UPDATE users SET balance_usd = balance_usd - ${amountDecimal}
+                       WHERE id = ${user.userId} AND balance_usd >= ${amountDecimal} RETURNING id`
+            : await tx`UPDATE users SET balance_cad = balance_cad - ${amountDecimal}
+                       WHERE id = ${user.userId} AND balance_cad >= ${amountDecimal} RETURNING id`;
           if (debited.length === 0) {
             throw new Error('INSUFFICIENT_BALANCE');
           }
 
           if (receiverCurrency === 'USD') {
-            await tx`UPDATE users SET balance_usd = balance_usd + ${receiverAmount} WHERE id = ${receiver.id}`;
+            await tx`UPDATE users SET balance_usd = balance_usd + ${toDatabaseDecimal(receiverAmountMinor)} WHERE id = ${receiver.id}`;
           } else {
-            await tx`UPDATE users SET balance_cad = balance_cad + ${receiverAmount} WHERE id = ${receiver.id}`;
+            await tx`UPDATE users SET balance_cad = balance_cad + ${toDatabaseDecimal(receiverAmountMinor)} WHERE id = ${receiver.id}`;
           }
 
           const result = await tx`
@@ -157,10 +167,10 @@ export async function POST(req: NextRequest) {
               sender_amount, receiver_amount, is_cross_border, payment_rail,
               estimated_settlement
             ) VALUES (
-              ${user.userId}, ${receiver.id}, ${numAmount}, ${senderCurrency}, ${cleanNote},
+              ${user.userId}, ${receiver.id}, ${amountDecimal}, ${senderCurrency}, ${cleanNote},
               ${type}, 'completed', ${txPrivacy},
-              ${senderCurrency}, ${receiverCurrency}, ${fxRate}, ${fxFee},
-              ${numAmount}, ${receiverAmount}, ${isCrossBorder},
+              ${senderCurrency}, ${receiverCurrency}, ${fxRateDecimal}, ${toDatabaseDecimal(fxFeeMinor)},
+              ${amountDecimal}, ${toDatabaseDecimal(receiverAmountMinor)}, ${isCrossBorder},
               ${isCrossBorder ? 'wire' : 'internal'},
               ${estimatedSettlement ? estimatedSettlement.toISOString() : null}
             )
@@ -181,28 +191,28 @@ export async function POST(req: NextRequest) {
           // Inside the transaction, a ledger failure now rolls the money back
           // with it. Either both happened or neither did.
           if (isCrossBorder) {
-            const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${senderCurrency})`;
+            const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${toDatabaseDecimal(fxFeeMinor)} ${senderCurrency})`;
             await createCrossBorderLedgerPair(
               user.userId,
               senderCurrency,
-              numAmount,
+              amountMinor,
               receiver.id,
               receiverCurrency,
-              receiverAmount,
+              receiverAmountMinor,
               newTxId,
               {
                 executor: tx,
-                senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}; converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
-                receiverDescription: `Received ${receiverAmount} ${receiverCurrency} from @${user.username} (converted from ${numAmount} ${senderCurrency} ${fxDescription})`,
+                senderDescription: `Sent ${amountDecimal} ${senderCurrency} to @${receiver.username}; converted to ${toDatabaseDecimal(receiverAmountMinor)} ${receiverCurrency} ${fxDescription}`,
+                receiverDescription: `Received ${toDatabaseDecimal(receiverAmountMinor)} ${receiverCurrency} from @${user.username} (converted from ${amountDecimal} ${senderCurrency} ${fxDescription})`,
               },
             );
           } else {
-            await createLedgerPair(user.userId, receiver.id, senderCurrency, numAmount, newTxId, {
+            await createLedgerPair(user.userId, receiver.id, senderCurrency, amountMinor, newTxId, {
               executor: tx,
               senderEntryType: 'payment_sent',
               receiverEntryType: 'payment_received',
-              senderDescription: `Sent ${numAmount} ${senderCurrency} to @${receiver.username}`,
-              receiverDescription: `Received ${numAmount} ${senderCurrency} from @${user.username}`,
+              senderDescription: `Sent ${amountDecimal} ${senderCurrency} to @${receiver.username}`,
+              receiverDescription: `Received ${amountDecimal} ${senderCurrency} from @${user.username}`,
             });
           }
 
@@ -215,14 +225,14 @@ export async function POST(req: NextRequest) {
         throw txErr;
       }
 
-      await recordVelocity(user.userId, numAmount, senderCurrency);
+      await recordVelocity(user.userId, amountMinor, senderCurrency);
       await auditLog(user.userId, 'payment_sent', {
         receiverId: receiver.id,
-        amount: numAmount,
+        amount: minorUnitsToMajorNumber(amountMinor),
         currency: senderCurrency,
         isCrossBorder,
       });
-      const displayAmount = new Intl.NumberFormat('en-CA', { style: 'currency', currency: senderCurrency }).format(numAmount);
+      const displayAmount = formatMoneyDisplay(amountMinor, senderCurrency);
       await createNotification({
         userId: receiver.id,
         type: 'payment_received',
@@ -232,7 +242,7 @@ export async function POST(req: NextRequest) {
         relatedEntityId: txId,
       });
 
-      return NextResponse.json({ success: true, transactionId: txId, isCrossBorder, receiverAmount, receiverCurrency }, { status: 201 });
+      return NextResponse.json({ success: true, transactionId: txId, isCrossBorder, receiverAmount: minorUnitsToMajorNumber(receiverAmountMinor), receiverCurrency }, { status: 201 });
 
     } else {
       // Request money
@@ -241,7 +251,7 @@ export async function POST(req: NextRequest) {
           sender_id, receiver_id, amount, currency, note, type, status, privacy,
           sender_currency, receiver_currency, is_cross_border
         ) VALUES (
-          ${receiver.id}, ${user.userId}, ${numAmount}, ${receiverCurrency}, ${cleanNote},
+          ${receiver.id}, ${user.userId}, ${amountDecimal}, ${receiverCurrency}, ${cleanNote},
           'request', 'pending', ${txPrivacy},
           ${receiverCurrency}, ${senderCurrency}, ${isCrossBorder}
         )
@@ -250,12 +260,12 @@ export async function POST(req: NextRequest) {
 
       await auditLog(user.userId, 'payment_requested', {
         fromId: receiver.id,
-        amount: numAmount,
+        amount: minorUnitsToMajorNumber(amountMinor),
         currency: receiverCurrency,
       });
 
       const reqTxId = result[0].id as number;
-      const reqDisplayAmount = new Intl.NumberFormat('en-CA', { style: 'currency', currency: receiverCurrency }).format(numAmount);
+      const reqDisplayAmount = formatMoneyDisplay(amountMinor, receiverCurrency);
       await createNotification({
         userId: receiver.id,
         type: 'payment_request',
@@ -268,6 +278,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, transactionId: reqTxId }, { status: 201 });
     }
   } catch (err) {
+    if (err instanceof MoneyValidationError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     console.error('Transaction POST error:', err);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

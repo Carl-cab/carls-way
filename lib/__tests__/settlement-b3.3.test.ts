@@ -9,6 +9,7 @@ import { SettlementExecutor } from '../settlement/SettlementExecutor';
 import type { SettlementPlan } from '../settlement/SettlementOrchestrator';
 import { recordVelocity } from '../auth';
 import { getSql, initializeSchema } from '../db';
+import { minorUnitsToMajorNumber, parseSignedDatabaseMoney } from '../money';
 
 const USER_ID = 9302;
 const sql = getSql();
@@ -48,7 +49,7 @@ async function dailyVelocityTotal(): Promise<number> {
     SELECT COALESCE(SUM(total_amount), 0) AS total FROM velocity_checks
     WHERE user_id = ${USER_ID} AND window_type = 'daily' AND currency = 'CAD'
   `;
-  return Number(rows[0].total);
+  return minorUnitsToMajorNumber(parseSignedDatabaseMoney(String(rows[0].total), 'CAD'));
 }
 
 beforeAll(async () => {
@@ -136,7 +137,7 @@ describe('executeNotification', () => {
 
 describe('executeVelocityReversal', () => {
   it('does nothing when the plan does not require reversal', async () => {
-    await recordVelocity(USER_ID, 100, 'CAD');
+    await recordVelocity(USER_ID, 10_000, 'CAD');
     const before = await dailyVelocityTotal();
 
     const result = await executor.executeVelocityReversal(makePlan({ reverseVelocity: false }));
@@ -147,7 +148,7 @@ describe('executeVelocityReversal', () => {
   });
 
   it('reverses recorded velocity for a returned transfer', async () => {
-    await recordVelocity(USER_ID, 100, 'CAD');
+    await recordVelocity(USER_ID, 10_000, 'CAD');
     expect(await dailyVelocityTotal()).toBe(100);
 
     const result = await executor.executeVelocityReversal(

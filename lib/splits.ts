@@ -1,5 +1,14 @@
 import { getSql } from '@/lib/db';
 import { createLedgerPair } from '@/lib/ledger';
+import {
+  type MinorUnits,
+  addMinorUnits,
+  divideMinorUnitsEvenly,
+  isMoneyCurrency,
+  minorUnitsToMajorNumber,
+  parsePositiveMoney,
+  toNarrowDatabaseDecimal,
+} from '@/lib/money';
 
 /**
  * Bill splitting.
@@ -21,7 +30,7 @@ export type ParticipantStatus = 'pending' | 'paid';
 
 export interface SplitParticipantInput {
   userId: number;
-  amountOwed: number;
+  amountOwed: MinorUnits;
 }
 
 export interface SplitRecord {
@@ -44,9 +53,6 @@ export interface SplitParticipantRecord {
   paid_at: string | null;
 }
 
-/** Rounding tolerance when checking that portions sum to the total (cents). */
-const SUM_TOLERANCE = 0.01;
-
 export class SplitValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -63,14 +69,15 @@ export class SplitValidationError extends Error {
  */
 export async function createSplit(
   creatorId: number,
-  totalAmount: number,
+  totalAmount: MinorUnits,
   currency: string,
   description: string | null,
   participants: SplitParticipantInput[],
 ): Promise<{ split: SplitRecord; participants: SplitParticipantRecord[] }> {
-  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+  if (!Number.isSafeInteger(totalAmount) || totalAmount <= 0) {
     throw new SplitValidationError('Total amount must be greater than zero.');
   }
+  if (!isMoneyCurrency(currency)) throw new SplitValidationError('Currency must be CAD or USD.');
   if (participants.length === 0) {
     throw new SplitValidationError('A split needs at least one participant.');
   }
@@ -83,14 +90,14 @@ export async function createSplit(
     throw new SplitValidationError('A participant may only appear once in a split.');
   }
 
-  if (participants.some((p) => !Number.isFinite(p.amountOwed) || p.amountOwed <= 0)) {
+  if (participants.some((p) => !Number.isSafeInteger(p.amountOwed) || p.amountOwed <= 0)) {
     throw new SplitValidationError('Every portion must be greater than zero.');
   }
 
-  const portionSum = participants.reduce((acc, p) => acc + p.amountOwed, 0);
-  if (Math.abs(portionSum - totalAmount) > SUM_TOLERANCE) {
+  const portionSum = participants.reduce((acc, p) => addMinorUnits(acc, p.amountOwed), 0 as MinorUnits);
+  if (portionSum !== totalAmount) {
     throw new SplitValidationError(
-      `Portions total ${portionSum.toFixed(2)} but the split total is ${totalAmount.toFixed(2)}.`,
+      `Portions total ${toNarrowDatabaseDecimal(portionSum)} but the split total is ${toNarrowDatabaseDecimal(totalAmount)}.`,
     );
   }
 
@@ -99,7 +106,7 @@ export async function createSplit(
   return (await sql.begin(async (tx) => {
     const splitRows = await tx`
       INSERT INTO splits (creator_id, total_amount, currency, description, status)
-      VALUES (${creatorId}, ${totalAmount}, ${currency}, ${description}, 'open')
+      VALUES (${creatorId}, ${toNarrowDatabaseDecimal(totalAmount)}, ${currency}, ${description}, 'open')
       RETURNING *
     `;
     const split = splitRows[0] as unknown as SplitRecord;
@@ -108,7 +115,7 @@ export async function createSplit(
     for (const p of participants) {
       const rows = await tx`
         INSERT INTO split_participants (split_id, user_id, amount_owed, status)
-        VALUES (${split.id}, ${p.userId}, ${p.amountOwed}, 'pending')
+        VALUES (${split.id}, ${p.userId}, ${toNarrowDatabaseDecimal(p.amountOwed)}, 'pending')
         RETURNING *
       `;
       inserted.push(rows[0] as unknown as SplitParticipantRecord);
@@ -119,18 +126,12 @@ export async function createSplit(
 }
 
 /** Even division that distributes remainder cents deterministically. */
-export function divideEvenly(totalAmount: number, count: number): number[] {
-  if (count <= 0) throw new SplitValidationError('Participant count must be positive.');
-
-  const totalCents = Math.round(totalAmount * 100);
-  const base = Math.floor(totalCents / count);
-  const remainder = totalCents - base * count;
-
-  // The first `remainder` participants absorb one extra cent each, so the
-  // portions always sum exactly to the total with no rounding drift.
-  return Array.from({ length: count }, (_, i) =>
-    (base + (i < remainder ? 1 : 0)) / 100,
-  );
+export function divideEvenly(totalAmount: MinorUnits, count: number): MinorUnits[] {
+  try {
+    return divideMinorUnitsEvenly(totalAmount, count);
+  } catch (err) {
+    throw new SplitValidationError(err instanceof Error ? err.message : 'Participant count must be positive.');
+  }
 }
 
 export class SplitPaymentError extends Error {
@@ -198,25 +199,26 @@ export async function paySplitPortion(
       throw new SplitPaymentError('SPLIT_CLOSED', `This split is ${participant.split_status}.`);
     }
 
-    const amount = Number(participant.amount_owed);
+    const amount = parsePositiveMoney(participant.amount_owed, participant.currency);
+    const amountDecimal = toNarrowDatabaseDecimal(amount);
     const isUsd = participant.currency === 'USD';
 
     // Balance guard lives in the UPDATE itself: two simultaneous debits cannot
     // both pass a separate check-then-write.
     const debited = isUsd
-      ? await tx`UPDATE users SET balance_usd = balance_usd - ${amount}
-                 WHERE id = ${payerId} AND balance_usd >= ${amount} RETURNING id`
-      : await tx`UPDATE users SET balance_cad = balance_cad - ${amount}
-                 WHERE id = ${payerId} AND balance_cad >= ${amount} RETURNING id`;
+      ? await tx`UPDATE users SET balance_usd = balance_usd - ${amountDecimal}
+                 WHERE id = ${payerId} AND balance_usd >= ${amountDecimal} RETURNING id`
+      : await tx`UPDATE users SET balance_cad = balance_cad - ${amountDecimal}
+                 WHERE id = ${payerId} AND balance_cad >= ${amountDecimal} RETURNING id`;
 
     if (debited.length === 0) {
       throw new SplitPaymentError('INSUFFICIENT_BALANCE', 'Insufficient balance to pay this portion.');
     }
 
     if (isUsd) {
-      await tx`UPDATE users SET balance_usd = balance_usd + ${amount} WHERE id = ${participant.creator_id}`;
+      await tx`UPDATE users SET balance_usd = balance_usd + ${amountDecimal} WHERE id = ${participant.creator_id}`;
     } else {
-      await tx`UPDATE users SET balance_cad = balance_cad + ${amount} WHERE id = ${participant.creator_id}`;
+      await tx`UPDATE users SET balance_cad = balance_cad + ${amountDecimal} WHERE id = ${participant.creator_id}`;
     }
 
     const txRows = await tx`
@@ -225,10 +227,10 @@ export async function paySplitPortion(
         sender_currency, receiver_currency, sender_amount, receiver_amount,
         is_cross_border, payment_rail, split_id
       ) VALUES (
-        ${payerId}, ${participant.creator_id}, ${amount}, ${participant.currency},
+        ${payerId}, ${participant.creator_id}, ${amountDecimal}, ${participant.currency},
         ${participant.description ? `Split: ${participant.description}` : 'Split payment'},
         'payment', 'completed', 'private',
-        ${participant.currency}, ${participant.currency}, ${amount}, ${amount},
+        ${participant.currency}, ${participant.currency}, ${amountDecimal}, ${amountDecimal},
         false, 'internal', ${splitId}
       )
       RETURNING id
@@ -284,7 +286,7 @@ export async function paySplitPortion(
       splitStatus = 'settled';
     }
 
-    return { transactionId, amountPaid: amount, splitStatus, remainingParticipants };
+    return { transactionId, amountPaid: minorUnitsToMajorNumber(amount), splitStatus, remainingParticipants };
   })) as unknown as {
     transactionId: number;
     amountPaid: number;
