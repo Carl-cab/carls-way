@@ -170,6 +170,17 @@ export async function applySettlementAtomically(
       } else {
         await tx`UPDATE users SET balance_cad = balance_cad + ${delta} WHERE id = ${intent.user_id}`;
       }
+      // This existing event-level marker is the durable evidence that the
+      // balance mutation above committed. Keep it in the same transaction as
+      // the intent claim, ledger entry, and balance update so reconciliation
+      // never has to infer a balance change from logs or mutate anything to
+      // repair a partial settlement.
+      await tx`
+        UPDATE provider_webhook_events
+        SET balance_processed_at = NOW(), balance_processing_error = NULL
+        WHERE provider = ${plan.provider}
+          AND provider_event_id = ${plan.provider_event_id}
+      `;
       balanceChanged = true;
     }
 
