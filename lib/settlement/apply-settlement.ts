@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { parseNonNegativeMoney, parsePositiveMoney, toDatabaseDecimal, toNarrowDatabaseDecimal } from '@/lib/money';
 import type { SettlementPlan } from './SettlementOrchestrator';
 
 /**
@@ -133,6 +134,11 @@ export async function applySettlementAtomically(
     let ledgerEntriesCreated = 0;
     if (plan.createLedgerEntries.shouldCreate && plan.createLedgerEntries.entries?.length) {
       for (const entry of plan.createLedgerEntries.entries) {
+        const debit = toNarrowDatabaseDecimal(parseNonNegativeMoney(entry.debit, entry.currency));
+        const credit = toNarrowDatabaseDecimal(parseNonNegativeMoney(entry.credit, entry.currency));
+        if ((debit === '0.00') === (credit === '0.00')) {
+          throw new Error('Settlement ledger entry must have exactly one positive side.');
+        }
         // The event-scoped constraint is kept as a second line of defence
         // against a same-event redelivery that somehow reaches here; the claim
         // above is what stops distinct events double-writing.
@@ -144,7 +150,7 @@ export async function applySettlementAtomically(
           ) VALUES (
             ${intent.user_id}, ${intent.id}, ${entry.currency}, 'wallet',
             ${mapEntryType(entry.entryType, plan.nextStatus)},
-            ${entry.debit}, ${entry.credit}, ${plan.provider},
+            ${debit}, ${credit}, ${plan.provider},
             ${intent.provider_reference_id}, ${plan.provider_event_id},
             ${intent.correlation_id}, ${entry.description}
           )
@@ -158,17 +164,26 @@ export async function applySettlementAtomically(
     let balanceChanged = false;
     if (plan.updateBalance.shouldUpdate && plan.updateBalance.amount && plan.updateBalance.currency) {
       const column = plan.updateBalance.currency === 'USD' ? 'balance_usd' : 'balance_cad';
-      const delta =
-        plan.updateBalance.operation === 'subtract'
-          ? -Math.abs(plan.updateBalance.amount)
-          : Math.abs(plan.updateBalance.amount);
+      const amount = toDatabaseDecimal(
+        parsePositiveMoney(plan.updateBalance.amount, plan.updateBalance.currency),
+      );
 
       // Column name cannot be parameterised, so it is chosen from a closed set
       // above rather than interpolated from input.
-      if (column === 'balance_usd') {
-        await tx`UPDATE users SET balance_usd = balance_usd + ${delta} WHERE id = ${intent.user_id}`;
-      } else {
-        await tx`UPDATE users SET balance_cad = balance_cad + ${delta} WHERE id = ${intent.user_id}`;
+      const updateResult = column === 'balance_usd'
+        ? plan.updateBalance.operation === 'subtract'
+          ? await tx`UPDATE users SET balance_usd = balance_usd - ${amount}
+                     WHERE id = ${intent.user_id} AND balance_usd >= ${amount} RETURNING id`
+          : await tx`UPDATE users SET balance_usd = balance_usd + ${amount}
+                     WHERE id = ${intent.user_id} RETURNING id`
+        : plan.updateBalance.operation === 'subtract'
+          ? await tx`UPDATE users SET balance_cad = balance_cad - ${amount}
+                     WHERE id = ${intent.user_id} AND balance_cad >= ${amount} RETURNING id`
+          : await tx`UPDATE users SET balance_cad = balance_cad + ${amount}
+                     WHERE id = ${intent.user_id} RETURNING id`;
+
+      if (!updateResult[0]) {
+        throw new Error('Settlement balance update could not be applied.');
       }
       // This existing event-level marker is the durable evidence that the
       // balance mutation above committed. Keep it in the same transaction as

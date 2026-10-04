@@ -30,15 +30,15 @@ export interface SettlementPlan {
   updateBalance: {
     shouldUpdate: boolean;
     currency?: string;
-    amount?: number;
+    amount?: string;
     operation?: 'add' | 'subtract';
   };
   createLedgerEntries: {
     shouldCreate: boolean;
     entries?: Array<{
       currency: string;
-      debit: number;
-      credit: number;
+      debit: string;
+      credit: string;
       entryType: string;
       description: string;
     }>;
@@ -241,7 +241,7 @@ export class SettlementOrchestrator {
       id: string;
       user_id: number;
       type: string;
-      amount: number;
+      amount: string;
       currency: string;
       status: SettlementStatus;
     },
@@ -293,7 +293,7 @@ export class SettlementOrchestrator {
   private planBalanceUpdate(
     intent: {
       type: string;
-      amount: number;
+      amount: string;
       currency: string;
     },
     nextStatus: SettlementStatus
@@ -325,7 +325,7 @@ export class SettlementOrchestrator {
     intent: {
       id: string;
       type: string;
-      amount: number;
+      amount: string;
       currency: string;
     },
     nextStatus: SettlementStatus
@@ -336,8 +336,8 @@ export class SettlementOrchestrator {
         entries: [
           {
             currency: intent.currency,
-            debit: intent.type === 'add_money' ? intent.amount : 0,
-            credit: intent.type === 'cash_out' ? intent.amount : 0,
+            debit: intent.type === 'add_money' ? intent.amount : '0.00',
+            credit: intent.type === 'cash_out' ? intent.amount : '0.00',
             entryType: 'transfer_settlement',
             description: `${intent.type === 'add_money' ? 'Add Money' : 'Cash Out'} settled - Intent ${intent.id}`,
           },
@@ -351,8 +351,8 @@ export class SettlementOrchestrator {
         entries: [
           {
             currency: intent.currency,
-            debit: intent.type === 'cash_out' ? intent.amount : 0,
-            credit: intent.type === 'add_money' ? intent.amount : 0,
+            debit: intent.type === 'cash_out' ? intent.amount : '0.00',
+            credit: intent.type === 'add_money' ? intent.amount : '0.00',
             entryType: 'transfer_reversal',
             description: `${intent.type === 'add_money' ? 'Add Money' : 'Cash Out'} returned - Intent ${intent.id}`,
           },
@@ -377,7 +377,7 @@ interface TransferIntentRow {
   id: string;
   user_id: number;
   type: string;
-  amount: number;
+  amount: string;
   currency: string;
   status: SettlementStatus;
   provider_reference_id: string | null;

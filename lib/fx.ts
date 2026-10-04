@@ -1,5 +1,9 @@
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import {
+  type MinorUnits, MoneyValidationError, assertMoneyCurrency, minorUnitsToMajorNumber,
+  multiplyMinorUnitsByDecimal, toDatabaseDecimal,
+} from '@/lib/money';
 
 const WISE_API_KEY = process.env.WISE_API_KEY || '';
 const WISE_API_BASE = process.env.WISE_ENV === 'production'
@@ -11,6 +15,7 @@ const FX_FEES: Record<string, number> = {
   'USD_CAD': 0.005, // 0.5%
   'CAD_USD': 0.005, // 0.5%
 };
+const FX_FEE_DECIMAL = '0.005';
 
 // Cache TTL: 5 minutes
 const RATE_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -26,6 +31,12 @@ export interface FxQuote {
   isCrossBorder: boolean;
   estimatedSettlement: Date;
   provider: string;
+  /** Internal accounting values; never recompute these from display numbers. */
+  feeMinorUnits: MinorUnits;
+  receiverMinorUnits: MinorUnits;
+  senderMinorUnits: MinorUnits;
+  /** Exact NUMERIC(18,8) rate for DB writes; rate number is display-only. */
+  rateDecimal: string;
 }
 
 export interface FxRateOptions {
@@ -39,7 +50,8 @@ export interface FxRateOptions {
 type FxRateSource = 'cache' | 'live';
 
 interface ResolvedFxRate {
-  rate: number;
+  /** NUMERIC(18,8) from Postgres, never decoded through float for conversion. */
+  rate: string;
   /** 'wise' when the live API answered, 'fallback' when the hardcoded table did, 'identity' for same-currency. */
   provider: string;
   source: FxRateSource;
@@ -65,7 +77,7 @@ async function resolveFxRate(
   const userId = opts?.userId ?? null;
 
   if (fromCurrency === toCurrency) {
-    const resolved: ResolvedFxRate = { rate: 1.0, provider: 'identity', source: 'live' };
+    const resolved: ResolvedFxRate = { rate: '1.00000000', provider: 'identity', source: 'live' };
     await auditLog(userId, 'fx_rate_resolved', {
       from_currency: fromCurrency,
       to_currency: toCurrency,
@@ -89,7 +101,7 @@ async function resolveFxRate(
     const age = Date.now() - fetchedAt.getTime();
     if (age < RATE_CACHE_TTL_MS) {
       const resolved: ResolvedFxRate = {
-        rate: parseFloat(cached[0].rate as string),
+        rate: String(cached[0].rate),
         provider: (cached[0].provider as string) || 'wise',
         source: 'cache',
       };
@@ -115,7 +127,7 @@ async function resolveFxRate(
   }
 
   // Fetch from Wise API
-  let rate: number;
+  let rate: string;
   let provider = 'wise';
 
   try {
@@ -125,8 +137,9 @@ async function resolveFxRate(
         { headers: { Authorization: `Bearer ${WISE_API_KEY}` } }
       );
       if (response.ok) {
-        const data = await response.json() as Array<{ rate: number }>;
-        rate = data[0]?.rate;
+        const data = await response.json() as Array<{ rate: string | number }>;
+        rate = String(data[0]?.rate);
+        multiplyMinorUnitsByDecimal(1, rate); // validate before persisting NUMERIC(18,8)
       } else {
         throw new Error(`Wise API error: ${response.status}`);
       }
@@ -136,11 +149,11 @@ async function resolveFxRate(
   } catch (err) {
     console.warn('Wise API unavailable, using fallback rates:', err);
     // Fallback rates (updated periodically in production via cron)
-    const fallbackRates: Record<string, number> = {
-      'USD_CAD': 1.365,
-      'CAD_USD': 0.7326,
+    const fallbackRates: Record<string, string> = {
+      'USD_CAD': '1.365',
+      'CAD_USD': '0.7326',
     };
-    rate = fallbackRates[`${fromCurrency}_${toCurrency}`] || 1.0;
+    rate = fallbackRates[`${fromCurrency}_${toCurrency}`] || '1.0';
     provider = 'fallback';
   }
 
@@ -172,26 +185,38 @@ async function resolveFxRate(
   return { rate, provider, source: 'live' };
 }
 
+/** Exact decimal rate; JS float must never be the FX accounting authority. */
 export async function getFxRate(
   fromCurrency: string,
   toCurrency: string,
   opts?: FxRateOptions,
-): Promise<number> {
+): Promise<string> {
   return (await resolveFxRate(fromCurrency, toCurrency, opts)).rate;
 }
 
+/** senderAmount is a positive integer count of cents; return major numbers only for display. */
 export async function buildFxQuote(
-  senderAmount: number,
+  senderAmount: MinorUnits,
   fromCurrency: string,
   toCurrency: string,
   opts?: FxRateOptions,
 ): Promise<FxQuote> {
+  assertMoneyCurrency(fromCurrency);
+  assertMoneyCurrency(toCurrency);
+  if (!Number.isSafeInteger(senderAmount) || senderAmount <= 0) {
+    throw new MoneyValidationError('FX sender amount must be positive integer minor units.');
+  }
   const userId = opts?.userId ?? null;
   const isCrossBorder = fromCurrency !== toCurrency;
-  const { rate, provider } = await resolveFxRate(fromCurrency, toCurrency, opts);
+  const { rate: rateDecimal, provider } = await resolveFxRate(fromCurrency, toCurrency, opts);
   const feePercent = FX_FEES[`${fromCurrency}_${toCurrency}`] || 0;
-  const feeAmount = isCrossBorder ? parseFloat((senderAmount * feePercent).toFixed(2)) : 0;
-  const receiverAmount = parseFloat(((senderAmount - feeAmount) * rate).toFixed(2));
+  const feeMinorUnits = isCrossBorder ? multiplyMinorUnitsByDecimal(senderAmount, FX_FEE_DECIMAL, 3) : 0;
+  const receiverMinorUnits = multiplyMinorUnitsByDecimal(senderAmount - feeMinorUnits, rateDecimal);
+  if (receiverMinorUnits === 0) throw new MoneyValidationError('Converted amount is less than one cent.');
+  const feeAmount = minorUnitsToMajorNumber(feeMinorUnits);
+  const receiverAmount = minorUnitsToMajorNumber(receiverMinorUnits);
+  const senderMajorAmount = minorUnitsToMajorNumber(senderAmount);
+  const rate = Number(rateDecimal); // display/public API only; NOT conversion
 
   // Settlement time: instant for all transfers
   const estimatedSettlement = new Date();
@@ -203,10 +228,14 @@ export async function buildFxQuote(
     fee: feePercent,
     feeAmount,
     receiverAmount,
-    senderAmount,
+    senderAmount: senderMajorAmount,
     isCrossBorder,
     estimatedSettlement,
     provider,
+    senderMinorUnits: senderAmount,
+    feeMinorUnits,
+    receiverMinorUnits,
+    rateDecimal,
   };
 
   // C1.2: record the exact economics the user was shown, so any later dispute
@@ -214,11 +243,11 @@ export async function buildFxQuote(
   await auditLog(userId, 'fx_quote_issued', {
     from_currency: fromCurrency,
     to_currency: toCurrency,
-    sender_amount: senderAmount,
-    rate,
+    sender_amount: toDatabaseDecimal(senderAmount),
+    rate: rateDecimal,
     fee_percent: feePercent,
-    fee_amount: feeAmount,
-    receiver_amount: receiverAmount,
+    fee_amount: toDatabaseDecimal(feeMinorUnits),
+    receiver_amount: toDatabaseDecimal(receiverMinorUnits),
     provider,
     is_cross_border: isCrossBorder,
   });

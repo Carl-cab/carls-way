@@ -36,7 +36,8 @@ export default function RequestPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           receiverUsername: form.receiverUsername.replace('@', ''),
-          amount: parseFloat(form.amount),
+          // Preserve the exact input decimal; the API owns strict cent parsing.
+          amount: form.amount,
           note: form.note,
           privacy: form.privacy,
           type: 'request',

@@ -12,12 +12,13 @@
 
 import { getSql } from '../db';
 import {
-  createSplit,
-  divideEvenly,
+  createSplit as createSplitMinor,
+  divideEvenly as divideEvenlyMinor,
   paySplitPortion,
   listSplitsForUser,
   SplitValidationError,
 } from '../splits';
+import { minorUnitsToMajorNumber, parseDatabaseMoney, parsePositiveMoney, toNarrowDatabaseDecimal } from '../money';
 
 const CREATOR = 9101;
 const PAYER_A = 9102;
@@ -26,13 +27,35 @@ const BROKE = 9104;
 
 const sql = getSql();
 
+// Convenience adapters keep this legacy scenario suite readable while all
+// production functions receive canonical integer cents.
+const cents = (amount: number) => parsePositiveMoney(String(amount), 'CAD');
+const createSplit = (
+  creatorId: number,
+  total: number,
+  currency: string,
+  description: string | null,
+  participants: Array<{ userId: number; amountOwed: number }>,
+) => createSplitMinor(
+  creatorId,
+  parseDatabaseMoney(String(total), 'CAD'),
+  currency,
+  description,
+  participants.map((participant) => ({
+    ...participant,
+    amountOwed: parseDatabaseMoney(String(participant.amountOwed), 'CAD'),
+  })),
+);
+const divideEvenly = (total: number, count: number) =>
+  divideEvenlyMinor(cents(total), count).map(minorUnitsToMajorNumber);
+
 async function balance(userId: number): Promise<number> {
   const rows = await sql`SELECT balance_cad FROM users WHERE id = ${userId}`;
-  return Number(rows[0].balance_cad);
+  return minorUnitsToMajorNumber(parseDatabaseMoney(String(rows[0].balance_cad), 'CAD'));
 }
 
 async function setBalance(userId: number, amount: number) {
-  await sql`UPDATE users SET balance_cad = ${amount} WHERE id = ${userId}`;
+  await sql`UPDATE users SET balance_cad = ${toNarrowDatabaseDecimal(parseDatabaseMoney(String(amount), 'CAD'))} WHERE id = ${userId}`;
 }
 
 async function cleanup() {
@@ -75,6 +98,10 @@ describe('Bill splitting', () => {
       // The property that matters: portions sum EXACTLY to the total.
       const sum = portions.reduce((a, b) => a + b, 0);
       expect(Math.round(sum * 100)).toBe(Math.round(total * 100));
+    });
+
+    it('divides three cents exactly without a floating remainder', () => {
+      expect(divideEvenlyMinor(3, 2)).toEqual([2, 1]);
     });
   });
 

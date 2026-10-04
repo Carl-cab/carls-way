@@ -16,10 +16,10 @@ import { getSql, initializeSchema } from '../db';
 const USER_ID = 9402;
 const sql = getSql();
 
-async function createIntent(status: string, updatedAgo: string): Promise<number> {
+async function createIntent(status: string, updatedAgo: string, amount = '50.00'): Promise<number> {
   const rows = await sql`
     INSERT INTO transfer_intents (user_id, type, amount, currency, status, provider_reference_id)
-    VALUES (${USER_ID}, 'add_money', 50.00, 'CAD', ${status}, ${`trf_c13_${status}_${Date.now()}`})
+    VALUES (${USER_ID}, 'add_money', ${amount}, 'CAD', ${status}, ${`trf_c13_${status}_${Date.now()}`})
     RETURNING id
   `;
   const id = Number(rows[0].id);
@@ -55,6 +55,18 @@ afterAll(async () => {
 });
 
 describe('findStuckTransfers', () => {
+  it.each([
+    { decimal: '0.01', display: 0.01 },
+    { decimal: '100.10', display: 100.1 },
+  ])('displays an exact persisted $decimal as a public major-unit number', async ({ decimal, display }) => {
+    const id = await createIntent('submitting', '45 minutes', decimal);
+    const stuck = (await findStuckTransfers()).find((t) => t.intentId === id);
+    expect(stuck?.amount).toBe(display);
+    await runTransferRecoverySweep();
+    const open = (await listOpenRecoveryFlags()).find((f) => f.intentId === id);
+    expect(open?.amount).toBe(display);
+  });
+
   it('flags a submitting intent stuck past 30 minutes as retryable', async () => {
     await createIntent('submitting', '45 minutes');
     const stuck = await findStuckTransfers();

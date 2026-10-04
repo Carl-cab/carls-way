@@ -27,6 +27,11 @@ import {
   createStripeTransferCorrelationId,
   STRIPE_TRANSFER_CORRELATION_METADATA_KEY,
 } from '@/lib/settlement/stripe-transfer-correlation';
+import {
+  MAX_NARROW_MINOR_UNITS, MoneyValidationError, minorUnitsToMajorNumber,
+  parseDatabaseMoney, toDatabaseDecimal, toNarrowDatabaseDecimal,
+} from '@/lib/money';
+import type { MinorUnits } from '@/lib/money';
 import type {
   TransferProvider,
   TransferType,
@@ -100,9 +105,12 @@ export class CanadianEFTProvider implements TransferProvider {
     userId: number,
     bankAccountId: number,
     type: TransferType,
-    amount: number,
+    amount: MinorUnits,
     currency: string,
   ): Promise<CreateIntentResult> {
+    if (currency !== 'CAD') throw new Error('Canadian EFT transfers require CAD.');
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Amount must be positive integer cents.');
+    const amountDecimal = toNarrowDatabaseDecimal(amount);
     const sql = getSql();
     const idempotencyKey = `ca_eft_${userId}_${Date.now()}`;
     // Persisted before confirmation/submission so a verified PaymentIntent
@@ -116,7 +124,7 @@ export class CanadianEFTProvider implements TransferProvider {
         provider_region, provider_name, execution_mode, idempotency_key,
         correlation_id
       ) VALUES (
-        ${userId}, ${bankAccountId}, ${type}, ${amount}, ${currency}, 'draft',
+        ${userId}, ${bankAccountId}, ${type}, ${amountDecimal}, ${currency}, 'draft',
         'CA', 'canadian_eft', 'live', ${idempotencyKey}, ${correlationId}
       )
       RETURNING id
@@ -124,7 +132,7 @@ export class CanadianEFTProvider implements TransferProvider {
     const intentId = result[0].id as number;
 
     await auditLog(userId, 'transfer_intent_created', {
-      intent_id: intentId, type, amount, currency,
+      intent_id: intentId, type, amount: amountDecimal, currency,
       provider: 'canadian_eft', mode: 'live',
     });
 
@@ -148,18 +156,20 @@ export class CanadianEFTProvider implements TransferProvider {
     `;
     if (!rows[0]) throw new Error('Transfer intent not found');
     const row = rows[0];
+    const amountMinor = parseDatabaseMoney(row.amount as string, row.currency);
+    const amountDecimal = toDatabaseDecimal(amountMinor);
 
     // PAD (Pre-Authorized Debit) mandate language required by Payments Canada
     const consentLanguage =
       row.type === 'add_money'
-        ? `By confirming, you authorize Manna to initiate a Canadian Pre-Authorized Debit (PAD) from your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. This authorization is for a one-time personal PAD. You have certain recourse rights if any debit does not comply with this agreement. Funds are typically available in 2–5 business days.`
-        : `By confirming, you authorize Manna to initiate a Canadian EFT credit to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. Funds are typically available in 2–5 business days.`;
+        ? `By confirming, you authorize Manna to initiate a Canadian Pre-Authorized Debit (PAD) from your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${amountDecimal}. This authorization is for a one-time personal PAD. You have certain recourse rights if any debit does not comply with this agreement. Funds are typically available in 2–5 business days.`
+        : `By confirming, you authorize Manna to initiate a Canadian EFT credit to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${amountDecimal}. Funds are typically available in 2–5 business days.`;
 
     return {
       intent_id: intentId,
       status: row.status as 'draft',
       review: {
-        amount: Number(row.amount),
+        amount: minorUnitsToMajorNumber(amountMinor), // Legacy public display only.
         currency: row.currency,
         type: row.type,
         bank_account: {
@@ -267,6 +277,9 @@ export class CanadianEFTProvider implements TransferProvider {
       `;
       if (!rows[0]) throw new Error('Transfer intent not found');
       const intent = rows[0];
+      if (intent.currency !== 'CAD') throw new Error('Canadian EFT transfers require CAD.');
+      const amountMinor = parseDatabaseMoney(intent.amount as string, intent.currency);
+      if (amountMinor <= 0 || amountMinor > MAX_NARROW_MINOR_UNITS) throw new Error('Invalid transfer amount.');
 
       const alreadySubmitted =
         intent.status === 'processing' && intent.provider_reference_id !== null;
@@ -302,7 +315,8 @@ export class CanadianEFTProvider implements TransferProvider {
 
       return {
         type: intent.type as TransferType,
-        amount: Number(intent.amount),
+        amountMinor,
+        currency: intent.currency as string,
         bankAccountId: intent.bank_account_id as number,
         baseKey,
         correlationId,
@@ -310,7 +324,8 @@ export class CanadianEFTProvider implements TransferProvider {
       };
     }) as unknown as {
       type: TransferType;
-      amount: number;
+      amountMinor: number;
+      currency: string;
       bankAccountId: number;
       baseKey: string;
       correlationId: string | null;
@@ -328,8 +343,9 @@ export class CanadianEFTProvider implements TransferProvider {
       });
     }
 
+    const amountCents = claim.amountMinor;
+    const amountDecimal = toDatabaseDecimal(amountCents);
     const stripe = getStripe();
-    const amountCents = Math.round(claim.amount * 100);
     let stripeReferenceId: string;
 
     if (claim.type === 'add_money') {
@@ -420,7 +436,7 @@ export class CanadianEFTProvider implements TransferProvider {
       provider: 'canadian_eft',
       stripe_reference_id: stripeReferenceId,
       idempotency_key: claim.baseKey,
-      amount: claim.amount,
+      amount: amountDecimal,
       type: claim.type,
     });
 
@@ -461,7 +477,7 @@ export class CanadianEFTProvider implements TransferProvider {
 
     const rows = await sql`
       SELECT id, type, status, amount, bank_account_id, idempotency_key,
-             provider_reference_id, correlation_id
+             currency, provider_reference_id, correlation_id
       FROM transfer_intents
       WHERE id = ${intentId} AND user_id = ${userId}
     `;
@@ -539,10 +555,13 @@ export class CanadianEFTProvider implements TransferProvider {
 
     // cash_out: no payouts.search exists, so replay the create with the same
     // idempotency key. Stripe returns the original payout if one was made.
+    if (intent.currency !== 'CAD') throw new Error('Canadian EFT transfers require CAD.');
+    const amountCents = parseDatabaseMoney(intent.amount as string, intent.currency);
+    if (amountCents <= 0 || amountCents > MAX_NARROW_MINOR_UNITS) throw new Error('Invalid transfer amount.');
     const idempotencyKey = this.stableIdempotencyKey(intentId, baseKey, 'po');
     const payout = await stripe.payouts.create(
       {
-        amount: Math.round(Number(intent.amount) * 100),
+        amount: amountCents,
         currency: 'cad',
         method: 'standard',
           metadata: {

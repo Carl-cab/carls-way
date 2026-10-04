@@ -7,6 +7,13 @@
 import { getSql } from '@/lib/db';
 import { createNotification } from '@/lib/notifications';
 import { reverseVelocity } from '@/lib/auth';
+import {
+  minorUnitsToMajorNumber,
+  parseNonNegativeMoney,
+  parsePositiveMoney,
+  toDatabaseDecimal,
+  toNarrowDatabaseDecimal,
+} from '@/lib/money';
 import type { SettlementStatus } from './types';
 import type { SettlementPlan } from './SettlementOrchestrator';
 
@@ -218,6 +225,9 @@ export class SettlementExecutor {
       // Duplicate entry_type from same provider_event_id is rejected
       const insertPromises = plan.createLedgerEntries.entries.map((entry) => {
         const dbEntryType = mapEntryType(entry.entryType, plan.nextStatus);
+        const debit = toNarrowDatabaseDecimal(parseNonNegativeMoney(entry.debit, entry.currency));
+        const credit = toNarrowDatabaseDecimal(parseNonNegativeMoney(entry.credit, entry.currency));
+        if ((debit === '0.00') === (credit === '0.00')) throw new Error('Settlement ledger entry must have exactly one positive side.');
         return sql`
           INSERT INTO ledger_entries (
             user_id,
@@ -238,8 +248,8 @@ export class SettlementExecutor {
             ${entry.currency},
             'wallet',
             ${dbEntryType},
-            ${entry.debit},
-            ${entry.credit},
+            ${debit},
+            ${credit},
             ${plan.provider},
             ${intent.provider_reference_id},
             ${plan.provider_event_id},
@@ -314,7 +324,7 @@ export class SettlementExecutor {
     }
 
     // Validate amount is positive
-    if (amount <= 0) {
+    if (!amount) {
       return {
         success: false,
         intentId: plan.intentId,
@@ -332,6 +342,8 @@ export class SettlementExecutor {
     }> = [];
 
     try {
+      const amountMinor = parsePositiveMoney(amount, currency);
+      const amountDecimal = toDatabaseDecimal(amountMinor);
       // Query transfer intent to get details
       const intentRows = await sql`
         SELECT id, user_id, type, status
@@ -378,7 +390,7 @@ export class SettlementExecutor {
             intentId: plan.intentId,
             balanceUpdated: false,
             currency,
-            amountApplied: amount,
+            amountApplied: minorUnitsToMajorNumber(amountMinor),
             operation,
             reason: `Idempotent: balance already updated for this event`,
           };
@@ -449,14 +461,11 @@ export class SettlementExecutor {
 
       // Atomic balance update using arithmetic
       // For add_money, operation is 'add'; for returned on add_money, operation is 'subtract'
-      const updateAmount = operation === 'add' ? amount : -amount;
-
-      const updateResult = await sql`
-        UPDATE users
-        SET ${sql(balanceColumn)} = ${sql(balanceColumn)} + ${updateAmount}
-        WHERE id = ${intent.user_id}
-        RETURNING id
-      `;
+      const updateResult = operation === 'add'
+        ? await sql`UPDATE users SET ${sql(balanceColumn)} = ${sql(balanceColumn)} + ${amountDecimal}
+                    WHERE id = ${intent.user_id} RETURNING id`
+        : await sql`UPDATE users SET ${sql(balanceColumn)} = ${sql(balanceColumn)} - ${amountDecimal}
+                    WHERE id = ${intent.user_id} AND ${sql(balanceColumn)} >= ${amountDecimal} RETURNING id`;
 
       if (!updateResult[0]) {
         return {
@@ -482,7 +491,7 @@ export class SettlementExecutor {
         intentId: plan.intentId,
         balanceUpdated: true,
         currency,
-        amountApplied: amount,
+        amountApplied: minorUnitsToMajorNumber(amountMinor),
         operation,
         reason: `Balance updated: ${operation} ${amount} ${currency}`,
       };
@@ -556,7 +565,7 @@ export class SettlementExecutor {
       };
 
       const typeLabel = intent.type === 'add_money' ? 'Add Money' : 'Cash Out';
-      const amountStr = `${Number(intent.amount).toFixed(2)} ${intent.currency}`;
+      const amountStr = `${toDatabaseDecimal(parsePositiveMoney(intent.amount, intent.currency))} ${intent.currency}`;
 
       let type: string;
       let title: string;
@@ -655,8 +664,10 @@ export class SettlementExecutor {
         currency: string;
       };
 
-      const amount = Number(intent.amount);
-      if (!Number.isFinite(amount) || amount <= 0) {
+      let amountMinor: number;
+      try {
+        amountMinor = parsePositiveMoney(intent.amount, intent.currency);
+      } catch {
         return {
           success: false,
           intentId: plan.intentId,
@@ -668,13 +679,13 @@ export class SettlementExecutor {
 
       // reverseVelocity() is itself non-blocking (catches internally), but we
       // still guard so this method can never throw into the settlement chain.
-      await reverseVelocity(intent.user_id, amount, intent.currency, 'transfer_returned', intent.id);
+      await reverseVelocity(intent.user_id, amountMinor, intent.currency, 'transfer_returned', intent.id);
 
       return {
         success: true,
         intentId: plan.intentId,
         velocityReversed: true,
-        reason: `Velocity reversed: ${amount} ${intent.currency}`,
+        reason: `Velocity reversed: ${toDatabaseDecimal(amountMinor)} ${intent.currency}`,
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';

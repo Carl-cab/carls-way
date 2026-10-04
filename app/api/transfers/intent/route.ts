@@ -3,6 +3,7 @@ import { getSql } from '@/lib/db';
 import { getAuthUser, checkVelocityLimit, auditLog } from '@/lib/auth';
 import { getTransferProvider, regionFromCountry, resolveExecutionMode } from '@/lib/transfers/router';
 import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
+import { MoneyValidationError, isMoneyCurrency, parsePositiveMoney, toDatabaseDecimal } from '@/lib/money';
 
 export async function POST(req: Request) {
   try {
@@ -48,26 +49,32 @@ export async function POST(req: Request) {
     }
     const bankAccountId = bankRows[0].id as number;
 
-    const body = await req.json() as { type?: string; amount?: number; currency?: string };
+    const body = await req.json() as { type?: string; amount?: unknown; currency?: string };
     const { type, amount, currency } = body;
 
-    if (!type || !amount || !currency) {
+    if (!type || amount === undefined || amount === null || !currency) {
       return NextResponse.json({ error: 'Missing required fields: type, amount, currency' }, { status: 400 });
     }
     if (!['add_money', 'cash_out'].includes(type)) {
       return NextResponse.json({ error: 'type must be add_money or cash_out' }, { status: 400 });
     }
-    if (typeof amount !== 'number' || amount <= 0) {
-      return NextResponse.json({ error: 'amount must be a positive number' }, { status: 400 });
+    if (typeof amount !== 'string' && typeof amount !== 'number') {
+      return NextResponse.json({ error: 'amount must be a decimal string or number' }, { status: 400 });
     }
-    if (!['CAD', 'USD'].includes(currency)) {
+    if (!isMoneyCurrency(currency)) {
       return NextResponse.json({ error: 'currency must be CAD or USD' }, { status: 400 });
     }
+    // The browser supplies a string. Parse it once, at the public boundary,
+    // into canonical cents. No JS float is admitted to provider or velocity
+    // logic below.
+    const amountMinor = parsePositiveMoney(amount, currency);
 
     // Velocity check — not recorded here; recorded only at confirm step
-    const velocityResult = await checkVelocityLimit(user.userId, amount, currency);
+    const velocityResult = await checkVelocityLimit(user.userId, amountMinor, currency);
     if (!velocityResult.allowed) {
-      await auditLog(user.userId, 'transfer_intent_blocked', { type, amount, currency, reason: velocityResult.reason });
+      await auditLog(user.userId, 'transfer_intent_blocked', {
+        type, amount: toDatabaseDecimal(amountMinor), currency, reason: velocityResult.reason,
+      });
       return NextResponse.json({ error: velocityResult.reason || 'Transfer limit exceeded' }, { status: 429 });
     }
 
@@ -76,10 +83,15 @@ export async function POST(req: Request) {
     // the lifecycle (review/confirm) stays consistent even if flags change.
     const mode = resolveExecutionMode(region);
     const provider = getTransferProvider(region, mode);
-    const result = await provider.createIntent(user.userId, bankAccountId, type as 'add_money' | 'cash_out', amount, currency);
+    const result = await provider.createIntent(
+      user.userId, bankAccountId, type as 'add_money' | 'cash_out', amountMinor, currency,
+    );
 
     return NextResponse.json({ success: true, ...result }, { status: 201 });
   } catch (err) {
+    if (err instanceof MoneyValidationError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     console.error('Transfer intent error:', err);
     return NextResponse.json({ error: 'Failed to create transfer intent' }, { status: 500 });
   }

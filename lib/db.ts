@@ -45,29 +45,9 @@ export function getSql() {
       idle_timeout: 30,
       connect_timeout: 10,
       prepare: false, // Required for Supabase transaction/session pooler
-      types: {
-        // Money columns are NUMERIC, and postgres.js returns NUMERIC as a
-        // *string* by default. Without this parser every balance arriving from
-        // the database would be a string, and `balance + amount` would silently
-        // concatenate instead of add: "100.50" + 5 === "100.505". The rest of
-        // the codebase — arithmetic, comparisons, toFixed, JSON response shapes
-        // — is written against numbers, so the driver hands back numbers.
-        //
-        // Safe for money: NUMERIC(14,2) tops out at 999999999999.99, and a JS
-        // double represents every cent value exactly up to 2^53 cents (~$90
-        // trillion). The conversion is exact across the entire column domain.
-        //
-        // This does not make float arithmetic safe in the application — it is
-        // the *storage* that had to stop being float. Values still round-trip
-        // through NUMERIC on every write, so the database remains the authority
-        // on cent exactness.
-        numeric: {
-          to: 1700,
-          from: [1700],
-          serialize: (x: number | string) => x.toString(),
-          parse: (x: string) => parseFloat(x),
-        },
-      },
+      // Keep NUMERIC as postgres.js' default decimal string. fx_rates.rate is
+      // NUMERIC(18,8), not money; a global binary-float parser loses precision.
+      // Money-moving callers parse their own two-decimal columns to cents.
     });
   }
   return _sql;

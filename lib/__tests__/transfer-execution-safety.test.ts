@@ -182,6 +182,31 @@ afterAll(async () => {
 
 describe('Transfer execution safety', () => {
   describe('normal success', () => {
+    it.each([
+      { minor: 1, decimal: '0.01' },
+      { minor: 10010, decimal: '100.10' },
+    ])('passes $decimal to Plaid without floating-point conversion', async ({ minor, decimal }) => {
+      const created = await provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'add_money', minor, 'USD');
+      const rows = await sql`SELECT amount::text AS amount FROM transfer_intents WHERE id = ${created.intent_id}`;
+      expect(rows[0].amount).toBe(decimal);
+      const review = await provider.reviewTransfer(created.intent_id, USER_ID);
+      expect(review.review.consent_language).toContain(`USD ${decimal}`);
+      expect(review.review.amount).toBe(minor / 100); // Public display only.
+      await sql`UPDATE transfer_intents SET status = 'ready' WHERE id = ${created.intent_id}`;
+
+      expect((await execute(created.intent_id)).submitted).toBe(true);
+      expect(plaidCalls.authorizations).toHaveLength(1);
+      expect(plaidCalls.authorizations[0].amount).toBe(decimal);
+    });
+
+    it('rejects invalid minor units before writing an intent', async () => {
+      await expect(provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'add_money', 1.5, 'USD')).rejects.toThrow();
+      await expect(provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'add_money', 0, 'USD')).rejects.toThrow();
+      await expect(provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'add_money', 1, 'CAD')).rejects.toThrow();
+      const rows = await sql`SELECT id FROM transfer_intents WHERE user_id = ${USER_ID}`;
+      expect(rows).toHaveLength(0);
+    });
+
     it('persists a stable key, sends the authorization to Plaid, and records the reference', async () => {
       const intentId = await createReadyIntent('plaid_9001_persisted');
 

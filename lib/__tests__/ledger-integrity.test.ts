@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { getSql, initializeSchema } from '@/lib/db';
-import { createSplit, paySplitPortion } from '@/lib/splits';
-import { createLedgerPair } from '@/lib/ledger';
+import { createSplit as createSplitMinor, paySplitPortion } from '@/lib/splits';
+import { createLedgerPair as createLedgerPairMinor } from '@/lib/ledger';
+import { minorUnitsToMajorNumber, parseDatabaseMoney, parsePositiveMoney, parseSignedDatabaseMoney, toNarrowDatabaseDecimal } from '@/lib/money';
 
 /**
  * The ledger must record every movement of money, and must not record one that
@@ -18,6 +19,29 @@ import { createLedgerPair } from '@/lib/ledger';
 
 const sql = getSql();
 
+const cents = (amount: number) => parsePositiveMoney(String(amount), 'CAD');
+const createSplit = (
+  creatorId: number,
+  total: number,
+  currency: string,
+  description: string | null,
+  participants: Array<{ userId: number; amountOwed: number }>,
+) => createSplitMinor(
+  creatorId,
+  cents(total),
+  currency,
+  description,
+  participants.map((participant) => ({ ...participant, amountOwed: cents(participant.amountOwed) })),
+);
+const createLedgerPair = (
+  senderId: number,
+  receiverId: number,
+  currency: string,
+  amount: number,
+  transactionId: number,
+  options?: Parameters<typeof createLedgerPairMinor>[5],
+) => createLedgerPairMinor(senderId, receiverId, currency, cents(amount), transactionId, options);
+
 let payer: number;
 let creator: number;
 
@@ -26,30 +50,30 @@ async function makeUser(balanceCad: number): Promise<number> {
   const rows = await sql<{ id: number }[]>`
     INSERT INTO users (name, username, email, password_hash, country, balance_cad, balance_usd)
     VALUES ('Ledger Probe', ${'ledg_' + suffix}, ${'ledg_' + suffix + '@example.com'},
-            'x', 'CA', ${balanceCad}, 0)
+            'x', 'CA', ${toNarrowDatabaseDecimal(parseDatabaseMoney(String(balanceCad), 'CAD'))}, '0.00')
     RETURNING id
   `;
   return rows[0].id;
 }
 
 async function walletOf(userId: number): Promise<number> {
-  const rows = await sql<{ balance_cad: number }[]>`
+  const rows = await sql<{ balance_cad: string }[]>`
     SELECT balance_cad FROM users WHERE id = ${userId}
   `;
-  return rows[0].balance_cad;
+  return minorUnitsToMajorNumber(parseDatabaseMoney(rows[0].balance_cad, 'CAD'));
 }
 
 /** Net ledger movement for a user: credits minus debits. */
 async function ledgerNet(userId: number): Promise<number> {
-  const rows = await sql<{ net: number }[]>`
+  const rows = await sql<{ net: string }[]>`
     SELECT COALESCE(SUM(credit) - SUM(debit), 0)::numeric AS net
     FROM ledger_entries WHERE user_id = ${userId} AND currency = 'CAD'
   `;
-  return Number(rows[0].net);
+  return minorUnitsToMajorNumber(parseSignedDatabaseMoney(rows[0].net, 'CAD'));
 }
 
 async function ledgerRowsFor(transactionId: number) {
-  return sql<{ user_id: number; debit: number; credit: number; entry_type: string }[]>`
+  return sql<{ user_id: number; debit: string; credit: string; entry_type: string }[]>`
     SELECT user_id, debit, credit, entry_type FROM ledger_entries
     WHERE transaction_id = ${transactionId} ORDER BY debit DESC
   `;

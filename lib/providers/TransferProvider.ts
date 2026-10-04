@@ -2,6 +2,7 @@
 // Sandbox providers implement all methods but make no real API calls.
 // Live providers implement all methods and call real payment rail APIs.
 // No provider may update balances directly — all balance changes happen via settlement webhooks.
+import type { MinorUnits } from '@/lib/money';
 
 export type TransferType = 'add_money' | 'cash_out';
 /**
@@ -60,6 +61,7 @@ export interface BankAccountSummary {
 }
 
 export interface ReviewDetails {
+  /** Legacy public major-unit display value; never use for accounting or a provider request. */
   amount: number;
   currency: string;
   type: TransferType;
@@ -124,11 +126,13 @@ export interface TransferProvider {
   readonly executionMode: ExecutionMode;
 
   // Step 1: Create a draft intent — no external call, no balance change.
+  // `amount` is integer minor units, parsed/validated at the public API boundary.
+  // Implementations revalidate it and persist toDatabaseDecimal(amount).
   createIntent(
     userId: number,
     bankAccountId: number,
     type: TransferType,
-    amount: number,
+    amount: MinorUnits,
     currency: string,
   ): Promise<CreateIntentResult>;
 

@@ -18,6 +18,11 @@ import { plaidClient, requireEncryptedBankToken } from '@/lib/plaid';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import {
+  MAX_NARROW_MINOR_UNITS, MoneyValidationError, minorUnitsToMajorNumber,
+  parseDatabaseMoney, toDatabaseDecimal, toNarrowDatabaseDecimal,
+} from '@/lib/money';
+import type { MinorUnits } from '@/lib/money';
+import {
   TransferType as PlaidTransferType,
   TransferNetwork,
   ACHClass,
@@ -96,9 +101,12 @@ export class PlaidTransferProvider implements TransferProvider {
     userId: number,
     bankAccountId: number,
     type: TransferType,
-    amount: number,
+    amount: MinorUnits,
     currency: string,
   ): Promise<CreateIntentResult> {
+    if (currency !== 'USD') throw new Error('US ACH transfers require USD.');
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Amount must be positive integer cents.');
+    const amountDecimal = toNarrowDatabaseDecimal(amount);
     const sql = getSql();
     const idempotencyKey = `plaid_${userId}_${Date.now()}`;
 
@@ -107,7 +115,7 @@ export class PlaidTransferProvider implements TransferProvider {
         user_id, bank_account_id, type, amount, currency, status,
         provider_region, provider_name, execution_mode, idempotency_key
       ) VALUES (
-        ${userId}, ${bankAccountId}, ${type}, ${amount}, ${currency}, 'draft',
+        ${userId}, ${bankAccountId}, ${type}, ${amountDecimal}, ${currency}, 'draft',
         'US', 'plaid_transfer', 'live', ${idempotencyKey}
       )
       RETURNING id
@@ -115,7 +123,7 @@ export class PlaidTransferProvider implements TransferProvider {
     const intentId = result[0].id as number;
 
     await auditLog(userId, 'transfer_intent_created', {
-      intent_id: intentId, type, amount, currency,
+      intent_id: intentId, type, amount: amountDecimal, currency,
       provider: 'plaid_transfer', mode: 'live',
     });
 
@@ -139,17 +147,19 @@ export class PlaidTransferProvider implements TransferProvider {
     `;
     if (!rows[0]) throw new Error('Transfer intent not found');
     const row = rows[0];
+    const amountMinor = parseDatabaseMoney(row.amount as string, row.currency);
+    const amountDecimal = toDatabaseDecimal(amountMinor);
 
     const consentLanguage =
       row.type === 'add_money'
-        ? `By confirming, you authorize Manna to initiate an ACH debit from your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. Funds are typically available in 1–3 business days. You may cancel before the transfer is submitted.`
-        : `By confirming, you authorize Manna to initiate an ACH credit to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${Number(row.amount).toFixed(2)}. Funds are typically available in 1–3 business days.`;
+        ? `By confirming, you authorize Manna to initiate an ACH debit from your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${amountDecimal}. Funds are typically available in 1–3 business days. You may cancel before the transfer is submitted.`
+        : `By confirming, you authorize Manna to initiate an ACH credit to your ${row.institution_name} account ending in ${row.account_mask || 'XXXX'} for ${row.currency} ${amountDecimal}. Funds are typically available in 1–3 business days.`;
 
     return {
       intent_id: intentId,
       status: row.status as 'draft',
       review: {
-        amount: Number(row.amount),
+        amount: minorUnitsToMajorNumber(amountMinor), // Legacy public display only.
         currency: row.currency,
         type: row.type,
         bank_account: {
@@ -255,6 +265,9 @@ export class PlaidTransferProvider implements TransferProvider {
       `;
       if (!rows[0]) throw new Error('Transfer intent not found');
       const intent = rows[0];
+      if (intent.currency !== 'USD') throw new Error('US ACH transfers require USD.');
+      const amountMinor = parseDatabaseMoney(intent.amount as string, intent.currency);
+      if (amountMinor <= 0 || amountMinor > MAX_NARROW_MINOR_UNITS) throw new Error('Invalid transfer amount.');
 
       // Resuming an interrupted execution is legitimate, and re-executing a
       // transfer already submitted to the provider is an idempotent no-op that
@@ -285,7 +298,7 @@ export class PlaidTransferProvider implements TransferProvider {
 
       return {
         type: intent.type as TransferType,
-        amount: Number(intent.amount),
+        amountMinor,
         bankAccountId: intent.bank_account_id as number,
         idempotencyKey,
         existingAuthorizationId: (intent.provider_authorization_id as string | null) ?? null,
@@ -293,7 +306,7 @@ export class PlaidTransferProvider implements TransferProvider {
       };
     }) as unknown as {
       type: TransferType;
-      amount: number;
+      amountMinor: number;
       bankAccountId: number;
       idempotencyKey: string;
       existingAuthorizationId: string | null;
@@ -314,7 +327,7 @@ export class PlaidTransferProvider implements TransferProvider {
 
     const accessToken = await requireEncryptedBankToken(userId, claim.bankAccountId);
     const plaidAccountId = await getPlaidAccountId(claim.bankAccountId, accessToken);
-    const amountStr = claim.amount.toFixed(2);
+    const amountStr = toDatabaseDecimal(claim.amountMinor);
     const description = claim.type === 'add_money' ? 'Manna Add' : 'Manna Pay';
 
     // ── Step 2: authorization, persisted before the transfer is created ─────

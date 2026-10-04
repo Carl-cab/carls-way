@@ -4,6 +4,10 @@ import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog } from '@/lib
 import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
+import {
+  MoneyValidationError, formatMoneyDisplay, minorUnitsToMajorNumber,
+  parsePositiveMoney, toDatabaseDecimal,
+} from '@/lib/money';
 
 export async function GET(
   _req: NextRequest,
@@ -80,7 +84,7 @@ export async function PATCH(
     SELECT * FROM transactions WHERE id = ${Number(id)} AND type = 'request' AND status = 'pending'
   `;
   const transaction = txRows[0] as {
-    id: number; sender_id: number; receiver_id: number; amount: number;
+    id: number; sender_id: number; receiver_id: number; amount: string;
     sender_currency: string; receiver_currency: string; is_cross_border: boolean;
   } | undefined;
   if (!transaction) {
@@ -90,27 +94,36 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
   if (action === 'accept') {
-    const numAmount = parseFloat(String(transaction.amount));
     const payerCurrency = transaction.sender_currency;
     const receiverCurrency = transaction.receiver_currency;
+    let amountMinor: number;
+    try {
+      amountMinor = parsePositiveMoney(String(transaction.amount), payerCurrency);
+    } catch (err) {
+      if (err instanceof MoneyValidationError) return NextResponse.json({ error: err.message }, { status: 400 });
+      throw err;
+    }
+    const amountDecimal = toDatabaseDecimal(amountMinor);
 
     // Velocity check (accepting a request is an outbound payment for the payer)
-    const velocityCheck = await checkVelocityLimit(user.userId, numAmount, payerCurrency);
+    const velocityCheck = await checkVelocityLimit(user.userId, amountMinor, payerCurrency);
     if (!velocityCheck.allowed) {
       return NextResponse.json({ error: velocityCheck.reason }, { status: 429 });
     }
 
     // Build FX quote if cross-border
-    let receiverAmount = numAmount;
+    let receiverAmountMinor = amountMinor;
     let fxRate = 1.0;
-    let fxFee = 0;
+    let fxRateDecimal = '1.00000000';
+    let fxFeeMinor = 0;
     let estimatedSettlement: Date | null = null;
 
     if (transaction.is_cross_border) {
-      const quote = await buildFxQuote(numAmount, payerCurrency, receiverCurrency, { userId: user.userId });
-      receiverAmount = quote.receiverAmount;
+      const quote = await buildFxQuote(amountMinor, payerCurrency, receiverCurrency, { userId: user.userId });
+      receiverAmountMinor = quote.receiverMinorUnits;
       fxRate = quote.rate;
-      fxFee = quote.feeAmount;
+      fxRateDecimal = quote.rateDecimal;
+      fxFeeMinor = quote.feeMinorUnits;
       estimatedSettlement = quote.estimatedSettlement;
     }
 
@@ -120,26 +133,26 @@ export async function PATCH(
     try {
       await sql.begin(async (tx) => {
         const debited = payerCurrency === 'USD'
-          ? await tx`UPDATE users SET balance_usd = balance_usd - ${numAmount}
-                     WHERE id = ${user.userId} AND balance_usd >= ${numAmount} RETURNING id`
-          : await tx`UPDATE users SET balance_cad = balance_cad - ${numAmount}
-                     WHERE id = ${user.userId} AND balance_cad >= ${numAmount} RETURNING id`;
+          ? await tx`UPDATE users SET balance_usd = balance_usd - ${amountDecimal}
+                     WHERE id = ${user.userId} AND balance_usd >= ${amountDecimal} RETURNING id`
+          : await tx`UPDATE users SET balance_cad = balance_cad - ${amountDecimal}
+                     WHERE id = ${user.userId} AND balance_cad >= ${amountDecimal} RETURNING id`;
         if (debited.length === 0) {
           throw new Error('INSUFFICIENT_BALANCE');
         }
 
         if (receiverCurrency === 'USD') {
-          await tx`UPDATE users SET balance_usd = balance_usd + ${receiverAmount} WHERE id = ${transaction.receiver_id}`;
+          await tx`UPDATE users SET balance_usd = balance_usd + ${toDatabaseDecimal(receiverAmountMinor)} WHERE id = ${transaction.receiver_id}`;
         } else {
-          await tx`UPDATE users SET balance_cad = balance_cad + ${receiverAmount} WHERE id = ${transaction.receiver_id}`;
+          await tx`UPDATE users SET balance_cad = balance_cad + ${toDatabaseDecimal(receiverAmountMinor)} WHERE id = ${transaction.receiver_id}`;
         }
 
         // Guard against double-accept: only transition if still pending
         const updated = await tx`
           UPDATE transactions SET
             status = 'completed', type = 'payment',
-            fx_rate = ${fxRate}, fx_fee = ${fxFee},
-            sender_amount = ${numAmount}, receiver_amount = ${receiverAmount},
+            fx_rate = ${fxRateDecimal}, fx_fee = ${toDatabaseDecimal(fxFeeMinor)},
+            sender_amount = ${amountDecimal}, receiver_amount = ${toDatabaseDecimal(receiverAmountMinor)},
             payment_rail = ${transaction.is_cross_border ? 'wire' : 'internal'},
             estimated_settlement = ${estimatedSettlement ? estimatedSettlement.toISOString() : null}
           WHERE id = ${transaction.id} AND status = 'pending'
@@ -153,24 +166,24 @@ export async function PATCH(
         const requesterUsername = (requesterRows[0]?.username as string) || 'user';
 
         if (transaction.is_cross_border) {
-          const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${fxFee} ${payerCurrency})`;
+          const fxDescription = `@ ${fxRate.toFixed(4)} (fee: ${toDatabaseDecimal(fxFeeMinor)} ${payerCurrency})`;
           await createCrossBorderLedgerPair(
-            user.userId, payerCurrency, numAmount,
-            transaction.receiver_id, receiverCurrency, receiverAmount,
+            user.userId, payerCurrency, amountMinor,
+            transaction.receiver_id, receiverCurrency, receiverAmountMinor,
             transaction.id,
             {
               executor: tx,
-              senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency} converted to ${receiverAmount} ${receiverCurrency} ${fxDescription}`,
-              receiverDescription: `Request fulfilled by @${user.username}: received ${receiverAmount} ${receiverCurrency} (from ${numAmount} ${payerCurrency} ${fxDescription})`,
+              senderDescription: `Paid request from @${requesterUsername}: ${amountDecimal} ${payerCurrency} converted to ${toDatabaseDecimal(receiverAmountMinor)} ${receiverCurrency} ${fxDescription}`,
+              receiverDescription: `Request fulfilled by @${user.username}: received ${toDatabaseDecimal(receiverAmountMinor)} ${receiverCurrency} (from ${amountDecimal} ${payerCurrency} ${fxDescription})`,
             }
           );
         } else {
-          await createLedgerPair(user.userId, transaction.receiver_id, payerCurrency, numAmount, transaction.id, {
+          await createLedgerPair(user.userId, transaction.receiver_id, payerCurrency, amountMinor, transaction.id, {
             executor: tx,
             senderEntryType: 'payment_sent',
             receiverEntryType: 'payment_received',
-            senderDescription: `Paid request from @${requesterUsername}: ${numAmount} ${payerCurrency}`,
-            receiverDescription: `Request fulfilled by @${user.username}: received ${numAmount} ${payerCurrency}`,
+            senderDescription: `Paid request from @${requesterUsername}: ${amountDecimal} ${payerCurrency}`,
+            receiverDescription: `Request fulfilled by @${user.username}: received ${amountDecimal} ${payerCurrency}`,
           });
         }
       });
@@ -184,18 +197,16 @@ export async function PATCH(
       throw txErr;
     }
 
-    await recordVelocity(user.userId, numAmount, payerCurrency);
+    await recordVelocity(user.userId, amountMinor, payerCurrency);
     await auditLog(user.userId, 'request_accepted', {
       receiverId: transaction.receiver_id,
-      amount: numAmount,
+      amount: minorUnitsToMajorNumber(amountMinor),
       currency: payerCurrency,
       isCrossBorder: transaction.is_cross_border,
     });
 
     // Notify the requester that their request was paid
-    const acceptDisplayAmount = new Intl.NumberFormat('en-CA', {
-      style: 'currency', currency: receiverCurrency,
-    }).format(receiverAmount);
+    const acceptDisplayAmount = formatMoneyDisplay(receiverAmountMinor, receiverCurrency === 'USD' ? 'USD' : 'CAD');
     await createNotification({
       userId: transaction.receiver_id,
       type: 'payment_received',

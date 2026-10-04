@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
 import { getLedgerBalance } from '@/lib/ledger';
+import { minorUnitsToMajorNumber, parseDatabaseMoney, subtractMinorUnits } from '@/lib/money';
 
 interface BalanceCheckResult {
   userId: number;
@@ -29,34 +30,33 @@ export async function GET() {
     }
 
     const userRow = userRows[0];
-    const actualBalanceCAD = parseFloat(String(userRow.balance_cad));
-    const actualBalanceUSD = parseFloat(String(userRow.balance_usd));
+    const actualBalanceCAD = parseDatabaseMoney(userRow.balance_cad as string, 'CAD');
+    const actualBalanceUSD = parseDatabaseMoney(userRow.balance_usd as string, 'USD');
 
     // Get computed ledger balances
     const ledgerBalanceCAD = await getLedgerBalance(user.userId, 'CAD');
     const ledgerBalanceUSD = await getLedgerBalance(user.userId, 'USD');
 
-    // Compare (allow for floating point rounding errors)
-    const tolerance = 0.01;
-    const cadMatches = Math.abs(actualBalanceCAD - ledgerBalanceCAD) < tolerance;
-    const usdMatches = Math.abs(actualBalanceUSD - ledgerBalanceUSD) < tolerance;
+    // Public fields remain display numbers; comparison and differences use cents.
+    const cadMatches = actualBalanceCAD === ledgerBalanceCAD;
+    const usdMatches = actualBalanceUSD === ledgerBalanceUSD;
 
     const results: BalanceCheckResult[] = [
       {
         userId: user.userId,
         currency: 'CAD',
-        userBalance: actualBalanceCAD,
-        ledgerBalance: ledgerBalanceCAD,
+        userBalance: minorUnitsToMajorNumber(actualBalanceCAD),
+        ledgerBalance: minorUnitsToMajorNumber(ledgerBalanceCAD),
         matches: cadMatches,
-        difference: actualBalanceCAD - ledgerBalanceCAD,
+        difference: minorUnitsToMajorNumber(subtractMinorUnits(actualBalanceCAD, ledgerBalanceCAD)),
       },
       {
         userId: user.userId,
         currency: 'USD',
-        userBalance: actualBalanceUSD,
-        ledgerBalance: ledgerBalanceUSD,
+        userBalance: minorUnitsToMajorNumber(actualBalanceUSD),
+        ledgerBalance: minorUnitsToMajorNumber(ledgerBalanceUSD),
         matches: usdMatches,
-        difference: actualBalanceUSD - ledgerBalanceUSD,
+        difference: minorUnitsToMajorNumber(subtractMinorUnits(actualBalanceUSD, ledgerBalanceUSD)),
       },
     ];
 

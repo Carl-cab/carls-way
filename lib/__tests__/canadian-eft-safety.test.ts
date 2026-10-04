@@ -22,6 +22,7 @@ import { STRIPE_TRANSFER_CORRELATION_METADATA_KEY } from '../settlement/stripe-t
 interface StripeCall {
   idempotencyKey?: string;
   metadata?: Record<string, string>;
+  amount: number;
 }
 
 const stripeCalls = {
@@ -46,10 +47,14 @@ vi.mock('@/lib/stripe', () => ({
     customers: { create: async () => ({ id: 'cus_test' }) },
     paymentIntents: {
       create: async (
-        params: { metadata: Record<string, string> },
+        params: { amount: number; metadata: Record<string, string> },
         opts?: { idempotencyKey?: string },
       ) => {
-        stripeCalls.paymentIntents.push({ idempotencyKey: opts?.idempotencyKey, metadata: params.metadata });
+        stripeCalls.paymentIntents.push({
+          idempotencyKey: opts?.idempotencyKey,
+          amount: params.amount,
+          metadata: params.metadata,
+        });
         if (behaviour === 'timeout') throw new Error('ETIMEDOUT: stripe did not respond');
         if (behaviour === 'card_error') {
           throw Object.assign(new Error('Your bank account could not be debited'), {
@@ -81,10 +86,10 @@ vi.mock('@/lib/stripe', () => ({
     },
     payouts: {
       create: async (
-        _params: unknown,
+        params: { amount: number },
         opts?: { idempotencyKey?: string },
       ) => {
-        stripeCalls.payouts.push({ idempotencyKey: opts?.idempotencyKey });
+        stripeCalls.payouts.push({ idempotencyKey: opts?.idempotencyKey, amount: params.amount });
         if (behaviour === 'timeout') throw new Error('ETIMEDOUT: stripe did not respond');
         const key = opts?.idempotencyKey ?? '';
         const existing = stripeObjects.get(key);
@@ -115,13 +120,14 @@ let sequenceProbeBankAccountId: number | undefined;
 async function createReadyIntent(
   type: 'add_money' | 'cash_out' = 'add_money',
   idempotencyKey: string | null = null,
+  amount = '40.00',
 ): Promise<number> {
   const rows = await sql`
     INSERT INTO transfer_intents (
       user_id, bank_account_id, type, amount, currency, status,
       provider_region, provider_name, execution_mode, idempotency_key
     ) VALUES (
-      ${USER_ID}, ${BANK_ACCOUNT_ID}, ${type}, 40.00, 'CAD', 'ready',
+      ${USER_ID}, ${BANK_ACCOUNT_ID}, ${type}, ${amount}, 'CAD', 'ready',
       'CA', 'canadian_eft', 'live', ${idempotencyKey}
     )
     RETURNING id
@@ -221,6 +227,40 @@ describe('Canadian ACSS transfer safety', () => {
   });
 
   describe('normal submission', () => {
+    it.each([
+      { cents: 1, decimal: '0.01' },
+      { cents: 10010, decimal: '100.10' },
+    ])('uses exact cents for Stripe debits and payout/replay: CAD $decimal', async ({ cents, decimal }) => {
+      const debit = await provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'add_money', cents, 'CAD');
+      const debitRow = await sql`SELECT amount::text AS amount FROM transfer_intents WHERE id = ${debit.intent_id}`;
+      expect(debitRow[0].amount).toBe(decimal);
+      const review = await provider.reviewTransfer(debit.intent_id, USER_ID);
+      expect(review.review.consent_language).toContain(`CAD ${decimal}`);
+      expect(review.review.amount).toBe(cents / 100); // Public display only.
+      await sql`UPDATE transfer_intents SET status = 'ready' WHERE id = ${debit.intent_id}`;
+      expect((await execute(debit.intent_id)).submitted).toBe(true);
+      expect(stripeCalls.paymentIntents.at(-1)?.amount).toBe(cents);
+
+      const payout = await provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'cash_out', cents, 'CAD');
+      await sql`UPDATE transfer_intents SET status = 'ready' WHERE id = ${payout.intent_id}`;
+      expect((await execute(payout.intent_id)).submitted).toBe(true);
+      expect(stripeCalls.payouts.at(-1)?.amount).toBe(cents);
+
+      // A lost local reference replays the same exact cent amount to Stripe.
+      await sql`UPDATE transfer_intents SET status = 'submitting', provider_reference_id = NULL WHERE id = ${payout.intent_id}`;
+      const recovered = await provider.reconcileTransfer(payout.intent_id, USER_ID);
+      expect(recovered.outcome).toBe('recovered_by_replay');
+      expect(stripeCalls.payouts.at(-1)?.amount).toBe(cents);
+    });
+
+    it('rejects invalid minor-unit and currency requests before any write', async () => {
+      await expect(provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'cash_out', 1.5, 'CAD')).rejects.toThrow();
+      await expect(provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'cash_out', 0, 'CAD')).rejects.toThrow();
+      await expect(provider.createIntent(USER_ID, BANK_ACCOUNT_ID, 'cash_out', 1, 'USD')).rejects.toThrow();
+      const rows = await sql`SELECT id FROM transfer_intents WHERE user_id = ${USER_ID}`;
+      expect(rows).toHaveLength(0);
+    });
+
     it('persists a stable key, sends it as a Stripe request option, and records the reference', async () => {
       const intentId = await createReadyIntent('add_money');
 
