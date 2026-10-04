@@ -55,6 +55,7 @@ LOCK TABLE public.transfer_intents IN SHARE ROW EXCLUSIVE MODE;
 DO $validate_correlation_index$
 DECLARE
   duplicate_count BIGINT;
+  existing_index_definition TEXT;
 BEGIN
   SELECT COUNT(*)
     INTO duplicate_count
@@ -70,6 +71,28 @@ BEGIN
     RAISE EXCEPTION
       'Aborting early-webhook correlation guard: % duplicate non-null correlation_id value(s) require manual review',
       duplicate_count;
+  END IF;
+
+  -- `CREATE ... IF NOT EXISTS` silently succeeds when an index with this name
+  -- already exists, even if it is non-unique or covers different columns.
+  -- A same-name index would leave the application assuming a uniqueness
+  -- invariant that PostgreSQL never enforced, so it is a blocking mismatch.
+  SELECT indexdef
+    INTO existing_index_definition
+  FROM pg_indexes
+  WHERE schemaname = 'public'
+    AND tablename = 'transfer_intents'
+    AND indexname = 'idx_transfer_intents_correlation_id';
+
+  IF existing_index_definition IS NOT NULL
+     AND (
+       existing_index_definition NOT LIKE '%UNIQUE INDEX%'
+       OR existing_index_definition NOT LIKE '%(correlation_id)%'
+       OR existing_index_definition NOT LIKE '%correlation_id IS NOT NULL%'
+     ) THEN
+    RAISE EXCEPTION
+      'Aborting early-webhook correlation guard: existing index idx_transfer_intents_correlation_id has an unexpected definition: %',
+      existing_index_definition;
   END IF;
 END
 $validate_correlation_index$;
