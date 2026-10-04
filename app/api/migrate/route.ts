@@ -427,6 +427,12 @@ export async function GET(req: NextRequest) {
     await sql`ALTER TABLE transfer_intents ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
     await sql`ALTER TABLE provider_webhook_events ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
     await sql`ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
+    // transactions was omitted from this set, and from lib/db.ts, so the column
+    // existed nowhere — while AdminSettlementService filters `transactions` on
+    // it. GET /api/admin/settlements/trace?correlation_id=... and
+    // GET /api/admin/settlements?correlation_id=... therefore raise 42703 on
+    // every database, production included.
+    await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(255)`;
 
     // Milestone 4: Create admin tables for RBAC
     // Admin users separate from customer users - different auth context
