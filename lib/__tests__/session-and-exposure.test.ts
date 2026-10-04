@@ -108,7 +108,7 @@ describe('session revocation', () => {
 
   it('is applied on password reset', async () => {
     const source = await (await import('node:fs/promises')).readFile(
-      'app/api/auth/reset-password/route.ts',
+      'lib/password-reset.ts',
       'utf8',
     );
     expect(source).toContain('revokeUserSessions');

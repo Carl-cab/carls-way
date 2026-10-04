@@ -1,14 +1,25 @@
 import { NextResponse } from 'next/server';
-import { getSql } from '@/lib/db';
-import { validatePasswordResetToken, markTokenAsUsed } from '@/lib/password-reset';
-import { validatePassword, revokeUserSessions } from '@/lib/auth';
+import { claimPasswordResetAndUpdatePassword } from '@/lib/password-reset';
+import { validatePassword } from '@/lib/auth';
 import bcrypt from 'bcryptjs';
+
+const INVALID_TOKEN_ERROR = 'Invalid or expired reset token';
 
 export async function POST(req: Request) {
   try {
     const { token, password } = await req.json();
 
     if (!token || !password) {
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+
+    // JSON values are untrusted. Keep malformed tokens on the same generic
+    // invalid-token path rather than allowing crypto's type error to create a
+    // different observable response.
+    if (typeof token !== 'string') {
+      return NextResponse.json({ error: INVALID_TOKEN_ERROR }, { status: 400 });
+    }
+    if (typeof password !== 'string') {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
@@ -25,38 +36,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: pwCheck.reason }, { status: 400 });
     }
 
-    // Validate token and get user ID
-    const tokenData = await validatePasswordResetToken(token);
-    if (!tokenData) {
-      return NextResponse.json({ error: 'Invalid or expired reset token' }, { status: 400 });
-    }
-
-    const sql = getSql();
-
-    // Hash the new password with the same algorithm and cost registration uses.
-    //
-    // This was unsalted SHA-256 while registration used bcrypt and login
-    // verifies with bcrypt.compare. It was unreachable only because the guard
-    // above rejected every request first — so fixing that guard alone would
-    // have started writing digests bcrypt can never match, locking users out
-    // permanently and storing passwords a rainbow table reverses instantly.
-    // The two changes belong together and must not be separated.
+    // Hash before opening the transaction so bcrypt's CPU work does not hold a
+    // database lock. The password is never logged or persisted outside the
+    // atomic claim below.
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Update password, revoke existing sessions, and mark the token as used.
-    //
-    // The revocation is the point of resetting after a compromise. Without it
-    // the attacker's cookie stays valid for the rest of its seven days, so the
-    // owner changes their password and nothing actually changes.
-    await sql.begin(async (tx) => {
-      await tx`UPDATE users SET password_hash = ${passwordHash} WHERE id = ${tokenData.userId}`;
-      await revokeUserSessions(tokenData.userId, tx);
-    });
-    await markTokenAsUsed(token);
+    // The helper's conditional UPDATE is the authorization decision. It claims
+    // an unused, unexpired matching hash and changes the password, revokes all
+    // prior sessions, and retires outstanding reset rows in one transaction.
+    // Unknown, used, expired, and concurrently claimed tokens deliberately have
+    // the same response so callers learn no token state.
+    const claim = await claimPasswordResetAndUpdatePassword(token, passwordHash);
+    if (!claim) {
+      return NextResponse.json({ error: INVALID_TOKEN_ERROR }, { status: 400 });
+    }
 
     return NextResponse.json({ success: true });
-  } catch (err) {
-    console.error('Reset password error:', err);
+  } catch {
+    // Keep the public failure deterministic and never log request data, tokens,
+    // or password-derived values from this credential-setting endpoint.
     return NextResponse.json({ error: 'Failed to reset password' }, { status: 500 });
   }
 }
