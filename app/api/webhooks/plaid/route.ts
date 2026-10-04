@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { createHash, timingSafeEqual } from 'crypto';
+import type postgres from 'postgres';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
@@ -382,7 +383,7 @@ export async function POST(req: NextRequest) {
         ${webhookId},
         ${eventType},
         ${payload.item_id ?? null},
-        ${JSON.stringify(payload)},
+        ${sql.json(payload as unknown as postgres.JSONValue)},
         'received',
         ${correlationId}
       )

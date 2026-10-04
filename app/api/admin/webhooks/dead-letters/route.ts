@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { withAdminAuth, withAuditLog, requirePermission } from '@/lib/rbac';
-import { listDeadLetters, requeueDeadLetter } from '@/lib/webhooks/dlq';
+import { withAdminAuth, withAuditLog, requirePermission, getCurrentAdmin } from '@/lib/rbac';
+import { listDeadLetters } from '@/lib/webhooks/dlq';
+import { replayDeadLetterForLocalSettlement } from '@/lib/webhooks/replay';
 
 /**
  * GET /api/admin/webhooks/dead-letters
@@ -12,22 +13,48 @@ import { listDeadLetters, requeueDeadLetter } from '@/lib/webhooks/dlq';
  *
  * POST /api/admin/webhooks/dead-letters
  *
- * Send a dead-lettered event back for processing. Resets the event to
- * 'received' with a zeroed retry count, so the next provider redelivery
- * (or a manual re-post of the preserved payload) reprocesses it.
- * Body: { "provider": "plaid", "providerEventId": "..." }
+ * Atomically claim an existing dead letter and replay it only through the local
+ * verified Stripe settlement handler. This does not POST a payload to a provider
+ * or webhook route, and it never creates an external rail request.
+ * Body: { "provider": "stripe", "providerEventId": "..." }
  */
 async function listHandler(req: NextRequest): Promise<NextResponse> {
-  requirePermission('provider_events:view');
+  try {
+    requirePermission('provider_events:view');
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('requires')) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+    throw error;
+  }
   const { searchParams } = new URL(req.url);
   const letters = await listDeadLetters({
     includeRequeued: searchParams.get('include_requeued') === '1',
   });
-  return NextResponse.json({ deadLetters: letters });
+  // DLQ payloads can contain provider and customer data. Listing is an
+  // operational status endpoint, not a payload export path.
+  return NextResponse.json({
+    deadLetters: letters.map((letter) => ({
+      id: letter.id,
+      provider: letter.provider,
+      providerEventId: letter.providerEventId,
+      eventType: letter.eventType,
+      failureCount: letter.failureCount,
+      createdAt: letter.createdAt,
+      requeuedAt: letter.requeuedAt,
+    })),
+  });
 }
 
 async function requeueHandler(req: NextRequest): Promise<NextResponse> {
-  requirePermission('events:replay');
+  try {
+    requirePermission('events:replay');
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('requires')) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+    throw error;
+  }
   const body = (await req.json().catch(() => ({}))) as {
     provider?: string;
     providerEventId?: string;
@@ -38,14 +65,43 @@ async function requeueHandler(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
-  const requeued = await requeueDeadLetter(body.provider, body.providerEventId);
-  if (!requeued) {
+  let result;
+  try {
+    result = await replayDeadLetterForLocalSettlement(body.provider, body.providerEventId, {
+      requeuedBy: String(getCurrentAdmin()?.id ?? 'admin'),
+    });
+  } catch {
+    // The audit wrapper persists thrown Error.message. Do not let an exception
+    // carrying a SQL connection string, payload or PII reach it or the client.
+    return NextResponse.json({ error: 'Local replay unavailable' }, { status: 500 });
+  }
+  if (result.outcome === 'not_found_or_already_replayed') {
     return NextResponse.json(
       { error: 'No open dead-letter entry for that event' },
       { status: 404 }
     );
   }
-  return NextResponse.json({ requeued: true });
+  if (result.outcome === 'not_replayable') {
+    return NextResponse.json(
+      { error: 'This event has no supported local verified settlement handler' },
+      { status: 422 },
+    );
+  }
+  if (result.outcome === 'stored_event_invalid') {
+    return NextResponse.json(
+      { error: 'Stored event cannot be safely replayed' },
+      { status: 422 },
+    );
+  }
+  if (result.outcome === 'replay_failed') {
+    return NextResponse.json({ error: 'Local replay did not complete' }, { status: 500 });
+  }
+  return NextResponse.json({
+    requeued: true,
+    localHandler: 'verified_stripe_settlement',
+    settlementOutcome: result.settlementOutcome,
+    markedProcessed: result.markedProcessed,
+  });
 }
 
 export const GET = (req: NextRequest) =>

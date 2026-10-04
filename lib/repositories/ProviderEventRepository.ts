@@ -19,6 +19,7 @@ import type {
   PaginatedResult,
 } from './types';
 import { DuplicateKeyError } from './types';
+import type postgres from 'postgres';
 
 export class ProviderEventRepository extends BaseRepository {
   /**
@@ -193,7 +194,7 @@ export class ProviderEventRepository extends BaseRepository {
             ${input.provider_event_id},
             ${input.event_type},
             ${input.related_provider_reference || null},
-            ${JSON.stringify(input.raw_payload)},
+            ${this.sql.json(input.raw_payload as postgres.JSONValue)},
             'received',
             ${input.correlation_id || null},
             NOW()

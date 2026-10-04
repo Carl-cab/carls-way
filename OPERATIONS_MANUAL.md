@@ -2824,3 +2824,49 @@ Contact the Operations Manager or escalate to the Engineering team.
 **Authorized By:** CTO
 
 ---
+
+
+---
+
+## 16. External Settlement Reconciliation and Dead-Letter Recovery
+
+### 16.1 Automated reconciliation
+
+The protected daily cron routes run **internal reconciliation at 15:00 UTC** and **external settlement reconciliation at 15:15 UTC**. The external run compares only persisted records; it **does not contact Plaid, Stripe, or any other rail**, and it never creates ledger entries or changes wallet balances.
+
+The external result contains aggregate counts for these controls:
+
+1. Settlement provider events in scope
+2. Provider settlement events with no matching transfer intent
+3. Live external transfer intents with no matched provider settlement event
+4. Settled live intents missing a settlement ledger entry
+5. Settled live intents missing the committed balance-processing marker
+6. Open webhook dead letters
+
+Every run writes `external_settlement_reconciliation_passed` or `external_settlement_reconciliation_failed` to `audit_logs`, with aggregate check counts only. A mismatch returns a non-2xx cron response so Vercel logs/monitoring surface it. There is no automatic correction and no email alert is sent unless a separately configured delivery integration is introduced.
+
+**Operator response to a failed run:**
+
+1. Record the run timestamp, failed check names, and aggregate counts from the authorized reconciliation endpoint or audit record.
+2. Use correlation IDs and authorized provider-event/ledger views to investigate; do not copy raw webhook payloads into tickets, logs, or chat.
+3. Confirm the provider outcome through approved provider-console access where necessary.
+4. Escalate missing ledger or balance evidence to Engineering. Do not edit a balance, ledger row, intent status, or database record.
+5. Re-run reconciliation only after the underlying condition is understood or a reviewed Engineering remediation has completed.
+
+### 16.2 Dead-letter queue alerting
+
+When a verified provider webhook reaches the retry ceiling, Manna atomically creates/updates its `webhook_dead_letters` record and writes a durable `webhook_dead_lettered` audit record. Alert records contain provider/event identifiers, event type, retry count, and failure message; they never contain raw webhook payloads. Open DLQ count is also a failed external reconciliation check.
+
+Review the authorized **dead-letter listing** at least daily and after any reconciliation alert. The listing exposes operational metadata only; raw payloads remain outside normal API responses.
+
+### 16.3 Safe replay procedure
+
+Only **SuperAdmin** and **OperationsAdmin** roles with `events:replay` may request replay. Replaying is not an instruction to a provider and must not be used to create a new transfer.
+
+1. Confirm the item is an open dead letter and record the provider event ID and investigation reference.
+2. Confirm the event type is an eligible Stripe settlement event. Unsupported providers/types return a safe refusal; do not manually repost payloads to webhook routes.
+3. Use the protected admin dead-letter replay action. It atomically claims the open DLQ row, records `webhook_dead_letter_replay_queued`, resets only the existing local event state, and invokes the **local verified Stripe settlement handler** with the already-persisted verified event.
+4. Verify the returned aggregate settlement outcome and audit trail. The local settlement transaction claims the intent transition and applies its effects exactly once; a second replay of the same DLQ row is rejected.
+5. If replay is refused, invalid, or leaves a mismatch, escalate to Engineering with identifiers and aggregate evidence. Never edit payloads, balances, ledger entries, or provider data.
+
+The procedure never replays raw payloads to an external provider, never calls an external rail, and never enables `PLAID_TRANSFER_LIVE` or `CA_EFT_LIVE`.

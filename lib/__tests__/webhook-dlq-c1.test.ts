@@ -10,7 +10,8 @@ import {
   getProviderEvent,
   MAX_WEBHOOK_RETRIES,
 } from '../provider-events';
-import { listDeadLetters, requeueDeadLetter } from '../webhooks/dlq';
+import * as deadLetterQueue from '../webhooks/dlq';
+import { listDeadLetters } from '../webhooks/dlq';
 import { getSql, initializeSchema } from '../db';
 
 const sql = getSql();
@@ -81,9 +82,17 @@ describe('markProviderEventFailed', () => {
       provider: PROVIDER,
       eventType: 'TRANSFER.STATUS_UPDATE',
       failureCount: MAX_WEBHOOK_RETRIES,
-      lastError: `boom ${MAX_WEBHOOK_RETRIES}`,
     });
-    expect(mine[0].rawPayload).toMatchObject({ webhook_id: 'evt-dl' });
+    expect(mine[0]).not.toHaveProperty('rawPayload');
+    expect(mine[0]).not.toHaveProperty('lastError');
+    const stored = await sql`
+      SELECT raw_payload, last_error FROM webhook_dead_letters
+      WHERE provider = ${PROVIDER} AND provider_event_id = 'evt-dl'
+    `;
+    const payload = typeof stored[0].raw_payload === 'string'
+      ? JSON.parse(stored[0].raw_payload as string) : stored[0].raw_payload;
+    expect(payload).toMatchObject({ webhook_id: 'evt-dl' });
+    expect(stored[0].last_error).toBe(`boom ${MAX_WEBHOOK_RETRIES}`);
 
     const audits = await sql`
       SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'webhook_dead_lettered'
@@ -100,7 +109,12 @@ describe('markProviderEventFailed', () => {
     const mine = letters.filter((l) => l.providerEventId === 'evt-repeat');
     expect(mine).toHaveLength(1);
     expect(mine[0].failureCount).toBe(MAX_WEBHOOK_RETRIES + 2);
-    expect(mine[0].lastError).toBe(`boom ${MAX_WEBHOOK_RETRIES + 1}`);
+    expect(mine[0]).not.toHaveProperty('lastError');
+    const stored = await sql`
+      SELECT last_error FROM webhook_dead_letters
+      WHERE provider = ${PROVIDER} AND provider_event_id = 'evt-repeat'
+    `;
+    expect(stored[0].last_error).toBe(`boom ${MAX_WEBHOOK_RETRIES + 1}`);
   });
 
   it('reports recorded=false for an unknown event instead of throwing', async () => {
@@ -109,57 +123,8 @@ describe('markProviderEventFailed', () => {
   });
 });
 
-describe('requeueDeadLetter', () => {
-  async function deadLetter(id: string): Promise<void> {
-    await seedEvent(id);
-    for (let i = 0; i < MAX_WEBHOOK_RETRIES; i++) {
-      await markProviderEventFailed(PROVIDER, id, 'boom');
-    }
-  }
-
-  it('resets the event for reprocessing and retires the DLQ entry', async () => {
-    await deadLetter('evt-requeue');
-
-    const ok = await requeueDeadLetter(PROVIDER, 'evt-requeue', { requeuedBy: 'test' });
-    expect(ok).toBe(true);
-
-    const row = await eventRow('evt-requeue');
-    expect(row?.processing_status).toBe('received');
-    expect(row?.retry_count).toBe(0);
-    expect(row?.dead_letter_at).toBeNull();
-
-    // Gone from the open queue, still in history.
-    expect((await listDeadLetters()).filter((l) => l.providerEventId === 'evt-requeue')).toHaveLength(0);
-    const history = (await listDeadLetters({ includeRequeued: true })).filter(
-      (l) => l.providerEventId === 'evt-requeue'
-    );
-    expect(history).toHaveLength(1);
-    expect(history[0].requeuedAt).not.toBeNull();
-
-    const audits = await sql`
-      SELECT metadata FROM audit_logs WHERE action = 'webhook_dead_letter_requeued'
-    `;
-    expect(audits.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it('counts failures from zero again after a requeue', async () => {
-    await deadLetter('evt-recount');
-    await requeueDeadLetter(PROVIDER, 'evt-recount');
-
-    const outcome = await markProviderEventFailed(PROVIDER, 'evt-recount', 'boom again');
-    expect(outcome).toMatchObject({ recorded: true, retryCount: 1, deadLettered: false });
-    expect((await eventRow('evt-recount'))?.processing_status).toBe('failed');
-  });
-
-  it('returns false when there is no open dead-letter entry', async () => {
-    await seedEvent('evt-never-dl');
-    expect(await requeueDeadLetter(PROVIDER, 'evt-never-dl')).toBe(false);
-    expect(await requeueDeadLetter(PROVIDER, 'evt-ghost')).toBe(false);
-  });
-
-  it('cannot requeue the same entry twice', async () => {
-    await deadLetter('evt-once');
-    expect(await requeueDeadLetter(PROVIDER, 'evt-once')).toBe(true);
-    expect(await requeueDeadLetter(PROVIDER, 'evt-once')).toBe(false);
+describe('dead-letter safety', () => {
+  it('does not export a generic requeue that bypasses verified local settlement', () => {
+    expect(deadLetterQueue).not.toHaveProperty('requeueDeadLetter');
   });
 });
