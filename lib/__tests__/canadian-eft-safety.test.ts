@@ -98,6 +98,7 @@ const BANK_ACCOUNT_ID = 9002;
 
 const sql = getSql();
 const provider = new CanadianEFTProvider();
+let sequenceProbeBankAccountId: number | undefined;
 
 async function createReadyIntent(
   type: 'add_money' | 'cash_out' = 'add_money',
@@ -161,6 +162,16 @@ beforeAll(async () => {
             'pm_test_acss', 'CAD', 'CA', true, true)
     ON CONFLICT (id) DO NOTHING
   `;
+  // Explicit primary-key fixtures do not advance a PostgreSQL SERIAL sequence.
+  // Keep the next implicit bank-account ID above this fixture for every test
+  // that shares the database after this file.
+  await sql`
+    SELECT setval(
+      pg_get_serial_sequence('bank_accounts', 'id'),
+      GREATEST((SELECT MAX(id) FROM bank_accounts), 1),
+      true
+    )
+  `;
   await sql`
     UPDATE users SET stripe_customer_id = 'cus_test' WHERE id = ${USER_ID}
   `;
@@ -178,9 +189,23 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await sql`DELETE FROM transfer_intents WHERE user_id = ${USER_ID}`;
+  if (sequenceProbeBankAccountId !== undefined) {
+    await sql`DELETE FROM bank_accounts WHERE id = ${sequenceProbeBankAccountId}`;
+  }
 });
 
 describe('Canadian ACSS transfer safety', () => {
+  it('advances the bank account SERIAL sequence past the explicit fixture id', async () => {
+    const rows = await sql<{ id: number }[]>`
+      INSERT INTO bank_accounts (user_id, institution_name, account_name)
+      VALUES (${USER_ID}, 'Sequence Probe Bank', 'Sequence Probe Checking')
+      RETURNING id
+    `;
+    sequenceProbeBankAccountId = rows[0].id;
+
+    expect(sequenceProbeBankAccountId).toBeGreaterThan(BANK_ACCOUNT_ID);
+  });
+
   describe('normal submission', () => {
     it('persists a stable key, sends it as a Stripe request option, and records the reference', async () => {
       const intentId = await createReadyIntent('add_money');
