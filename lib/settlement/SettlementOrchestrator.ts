@@ -18,6 +18,13 @@ export interface SettlementPlan {
   provider: string;
   provider_event_id: string;
   provider_reference_id: string;
+  /**
+   * True only when this plan located the intent through pre-persisted, verified
+   * Stripe metadata before the normal provider-reference write completed.
+   * applySettlementAtomically then binds the verified provider reference while
+   * holding the intent lock, before claiming the financial transition.
+   */
+  bind_provider_reference: boolean;
   // Milestone 2: Correlation ID for request tracing
   correlationId: string;
   updateBalance: {
@@ -55,17 +62,63 @@ export class SettlementOrchestrator {
     const sql = getSql();
 
     try {
-      // 1. Query transfer_intents by provider_reference_id
-      const rows = await sql`
+      // Provider reference remains the authoritative lookup whenever the local
+      // post-provider write has landed. The correlation is only a narrowly
+      // scoped early-webhook recovery key, never a replacement for the id.
+      const referenceRows = await sql`
         SELECT id, user_id, type, amount, currency, status,
-               provider_reference_id, bank_account_id
+               provider_reference_id, bank_account_id, correlation_id
         FROM transfer_intents
         WHERE provider_reference_id = ${event.provider_reference_id}
         LIMIT 1
       `;
 
-      if (!rows[0]) {
-        // No intent found for this provider reference
+      const referenceIntent = referenceRows[0] as TransferIntentRow | undefined;
+      let intent: TransferIntentRow | undefined = referenceIntent;
+      let matchedByCorrelation = false;
+
+      if (referenceIntent) {
+        // Metadata is an integrity assertion once supplied. A valid Stripe
+        // object that claims a different intent is retained for review rather
+        // than allowing either reference or metadata to silently win.
+        if (
+          event.provider_correlation_id &&
+          referenceIntent.correlation_id !== event.provider_correlation_id
+        ) {
+          return this.manualReviewPlan(
+            event,
+            correlationId,
+            'CORRELATION_MISMATCH',
+            `Stripe reference ${event.provider_reference_id} resolved an intent whose correlation does not match verified metadata`,
+            referenceIntent.id,
+          );
+        }
+      } else if (event.provider_correlation_id) {
+        // Early webhook window: provider_reference_id is not written yet. Only
+        // the opaque value persisted before submission may resolve the intent;
+        // customer, amount, and user identity are deliberately never queried.
+        const correlationRows = await sql`
+          SELECT id, user_id, type, amount, currency, status,
+                 provider_reference_id, bank_account_id, correlation_id
+          FROM transfer_intents
+          WHERE correlation_id = ${event.provider_correlation_id}
+          LIMIT 2
+        `;
+
+        if (correlationRows.length > 1) {
+          return this.manualReviewPlan(
+            event,
+            correlationId,
+            'CORRELATION_AMBIGUOUS',
+            'Verified Stripe metadata matched more than one transfer intent',
+          );
+        }
+
+        intent = correlationRows[0] as TransferIntentRow | undefined;
+        matchedByCorrelation = Boolean(intent);
+      }
+
+      if (!intent) {
         return {
           intentId: event.provider_reference_id,
           previousStatus: 'draft' as SettlementStatus,
@@ -74,6 +127,7 @@ export class SettlementOrchestrator {
           provider: event.provider,
           provider_event_id: event.provider_event_id,
           provider_reference_id: event.provider_reference_id,
+          bind_provider_reference: false,
           correlationId,
           updateBalance: { shouldUpdate: false },
           createLedgerEntries: { shouldCreate: false },
@@ -81,21 +135,27 @@ export class SettlementOrchestrator {
           reverseVelocity: false,
           requiresManualReview: true,
           idempotent: false,
-          reason: `No transfer intent found for provider reference: ${event.provider_reference_id}`,
+          reason: `No transfer intent found for Stripe reference or verified correlation: ${event.provider_reference_id}`,
           error: 'INTENT_NOT_FOUND',
         };
       }
 
-      const intent = rows[0] as {
-        id: string;
-        user_id: number;
-        type: string;
-        amount: number;
-        currency: string;
-        status: SettlementStatus;
-        provider_reference_id: string;
-        bank_account_id: string;
-      };
+      // A fallback match must not overwrite an already-bound reference. That
+      // would turn an unrelated event into a settlement merely because metadata
+      // was copied or stale.
+      if (
+        matchedByCorrelation &&
+        intent.provider_reference_id !== null &&
+        intent.provider_reference_id !== event.provider_reference_id
+      ) {
+        return this.manualReviewPlan(
+          event,
+          correlationId,
+          'CORRELATION_REFERENCE_CONFLICT',
+          'Verified Stripe metadata resolved an intent already bound to a different provider reference',
+          intent.id,
+        );
+      }
 
       // 2. Call SettlementProcessor to validate and plan transition
       const processor = new SettlementProcessor();
@@ -111,7 +171,8 @@ export class SettlementOrchestrator {
         intent,
         outcome.nextStatus,
         event,
-        intent.provider_reference_id,
+        event.provider_reference_id,
+        matchedByCorrelation,
         correlationId
       );
 
@@ -126,6 +187,7 @@ export class SettlementOrchestrator {
         provider: event.provider,
         provider_event_id: event.provider_event_id,
         provider_reference_id: event.provider_reference_id,
+        bind_provider_reference: false,
         correlationId,
         updateBalance: { shouldUpdate: false },
         createLedgerEntries: { shouldCreate: false },
@@ -137,6 +199,35 @@ export class SettlementOrchestrator {
         error: 'ORCHESTRATION_ERROR',
       };
     }
+  }
+
+  /** Construct a terminal, no-side-effect plan retained for operator review. */
+  private manualReviewPlan(
+    event: NormalizedEvent,
+    correlationId: string,
+    error: string,
+    reason: string,
+    intentId = event.provider_reference_id,
+  ): SettlementPlan {
+    return {
+      intentId,
+      previousStatus: 'draft' as SettlementStatus,
+      nextStatus: 'draft' as SettlementStatus,
+      transition: 'draft→draft (correlation rejected)',
+      provider: event.provider,
+      provider_event_id: event.provider_event_id,
+      provider_reference_id: event.provider_reference_id,
+      bind_provider_reference: false,
+      correlationId,
+      updateBalance: { shouldUpdate: false },
+      createLedgerEntries: { shouldCreate: false },
+      notifyUser: false,
+      reverseVelocity: false,
+      requiresManualReview: true,
+      idempotent: false,
+      reason,
+      error,
+    };
   }
 
   /**
@@ -157,6 +248,7 @@ export class SettlementOrchestrator {
     nextStatus: SettlementStatus,
     event: NormalizedEvent,
     providerReferenceId: string,
+    bindProviderReference: boolean,
     correlationId: string = ''
   ): SettlementPlan {
     // Determine balance update instructions based on transition
@@ -182,6 +274,7 @@ export class SettlementOrchestrator {
       provider: event.provider,
       provider_event_id: event.provider_event_id,
       provider_reference_id: providerReferenceId,
+      bind_provider_reference: bindProviderReference,
       correlationId,
       updateBalance,
       createLedgerEntries,
@@ -278,6 +371,18 @@ export class SettlementOrchestrator {
     const notifiableStates: SettlementStatus[] = ['settled', 'failed', 'returned'];
     return notifiableStates.includes(nextStatus);
   }
+}
+
+interface TransferIntentRow {
+  id: string;
+  user_id: number;
+  type: string;
+  amount: number;
+  currency: string;
+  status: SettlementStatus;
+  provider_reference_id: string | null;
+  bank_account_id: string | null;
+  correlation_id: string | null;
 }
 
 export default SettlementOrchestrator;

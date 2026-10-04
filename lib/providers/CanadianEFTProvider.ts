@@ -23,6 +23,10 @@
 import { getStripe } from '@/lib/stripe';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
+import {
+  createStripeTransferCorrelationId,
+  STRIPE_TRANSFER_CORRELATION_METADATA_KEY,
+} from '@/lib/settlement/stripe-transfer-correlation';
 import type {
   TransferProvider,
   TransferType,
@@ -101,14 +105,19 @@ export class CanadianEFTProvider implements TransferProvider {
   ): Promise<CreateIntentResult> {
     const sql = getSql();
     const idempotencyKey = `ca_eft_${userId}_${Date.now()}`;
+    // Persisted before confirmation/submission so a verified PaymentIntent
+    // webhook can resolve this intent even if Stripe responds before the local
+    // provider_reference_id write completes. Opaque and nonsecret by design.
+    const correlationId = createStripeTransferCorrelationId();
 
     const result = await sql`
       INSERT INTO transfer_intents (
         user_id, bank_account_id, type, amount, currency, status,
-        provider_region, provider_name, execution_mode, idempotency_key
+        provider_region, provider_name, execution_mode, idempotency_key,
+        correlation_id
       ) VALUES (
         ${userId}, ${bankAccountId}, ${type}, ${amount}, ${currency}, 'draft',
-        'CA', 'canadian_eft', 'live', ${idempotencyKey}
+        'CA', 'canadian_eft', 'live', ${idempotencyKey}, ${correlationId}
       )
       RETURNING id
     `;
@@ -234,7 +243,8 @@ export class CanadianEFTProvider implements TransferProvider {
    *   1. Claim the intent inside a transaction and move it to `submitting`,
    *      persisting the idempotency key. Concurrent executions serialise here.
    *   2. Call Stripe with that key.
-   *   3. Persist the provider reference and move to `processing`.
+   *   3. Persist the provider reference and move to `processing` unless a
+   *      verified early webhook has already advanced the intent further.
    *
    * A failure after step 2 leaves the row in `submitting` with the key intact.
    * Replaying the call with the same key returns Stripe's original object rather
@@ -250,7 +260,7 @@ export class CanadianEFTProvider implements TransferProvider {
     const claim = await sql.begin(async (tx) => {
       const rows = await tx`
         SELECT id, type, amount, currency, status, bank_account_id,
-               idempotency_key, provider_reference_id
+               idempotency_key, provider_reference_id, correlation_id
         FROM transfer_intents
         WHERE id = ${intentId} AND user_id = ${userId}
         FOR UPDATE
@@ -270,12 +280,21 @@ export class CanadianEFTProvider implements TransferProvider {
       // Persist the base key (without the operation suffix) so the value stored
       // locally is the intent's own identity.
       const baseKey = persisted ?? `manna_intent_${intentId}`;
+      const persistedCorrelation = (intent.correlation_id as string | null) ?? null;
+      // A legacy intent already in `submitting` may have an idempotent Stripe
+      // request recorded without this field. Do not add metadata on a replay:
+      // Stripe rejects an idempotency-key reuse with changed parameters. New
+      // submissions always create and persist the correlation before their
+      // first provider call.
+      const correlationId =
+        persistedCorrelation ?? (intent.status === 'ready' ? createStripeTransferCorrelationId() : null);
 
       if (!alreadySubmitted) {
         await tx`
           UPDATE transfer_intents
           SET status = 'submitting',
               idempotency_key = ${baseKey},
+              correlation_id = COALESCE(correlation_id, ${correlationId}),
               updated_at = NOW()
           WHERE id = ${intentId}
         `;
@@ -286,6 +305,7 @@ export class CanadianEFTProvider implements TransferProvider {
         amount: Number(intent.amount),
         bankAccountId: intent.bank_account_id as number,
         baseKey,
+        correlationId,
         existingReferenceId: (intent.provider_reference_id as string | null) ?? null,
       };
     }) as unknown as {
@@ -293,6 +313,7 @@ export class CanadianEFTProvider implements TransferProvider {
       amount: number;
       bankAccountId: number;
       baseKey: string;
+      correlationId: string | null;
       existingReferenceId: string | null;
     };
 
@@ -346,6 +367,9 @@ export class CanadianEFTProvider implements TransferProvider {
             manna_intent_id: String(intentId),
             manna_user_id: String(userId),
             transfer_type: 'add_money',
+            ...(claim.correlationId
+              ? { [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: claim.correlationId }
+              : {}),
           },
         },
         // Stripe idempotency is a request option, not a body field. Replaying
@@ -371,6 +395,9 @@ export class CanadianEFTProvider implements TransferProvider {
             manna_intent_id: String(intentId),
             manna_user_id: String(userId),
             transfer_type: 'cash_out',
+            ...(claim.correlationId
+              ? { [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: claim.correlationId }
+              : {}),
           },
         },
         { idempotencyKey },
@@ -381,10 +408,11 @@ export class CanadianEFTProvider implements TransferProvider {
 
     await sql`
       UPDATE transfer_intents
-      SET status = 'processing',
-          provider_reference_id = ${stripeReferenceId},
+      SET status = CASE WHEN status = 'submitting' THEN 'processing' ELSE status END,
+          provider_reference_id = COALESCE(provider_reference_id, ${stripeReferenceId}),
           updated_at = NOW()
       WHERE id = ${intentId}
+        AND (provider_reference_id IS NULL OR provider_reference_id = ${stripeReferenceId})
     `;
 
     await auditLog(userId, 'transfer_submitted', {
@@ -432,7 +460,8 @@ export class CanadianEFTProvider implements TransferProvider {
     const sql = getSql();
 
     const rows = await sql`
-      SELECT id, type, status, amount, bank_account_id, idempotency_key, provider_reference_id
+      SELECT id, type, status, amount, bank_account_id, idempotency_key,
+             provider_reference_id, correlation_id
       FROM transfer_intents
       WHERE id = ${intentId} AND user_id = ${userId}
     `;
@@ -459,11 +488,14 @@ export class CanadianEFTProvider implements TransferProvider {
 
     const stripe = getStripe();
     const baseKey = (intent.idempotency_key as string | null) ?? `manna_intent_${intentId}`;
+    const correlationId = (intent.correlation_id as string | null) ?? null;
 
     if (intent.type === 'add_money') {
       // Authoritative provider lookup by the metadata written at submission.
       const found = await stripe.paymentIntents.search({
-        query: `metadata['manna_intent_id']:'${intentId}'`,
+        query: correlationId
+          ? `metadata['${STRIPE_TRANSFER_CORRELATION_METADATA_KEY}']:'${correlationId}'`
+          : `metadata['manna_intent_id']:'${intentId}'`,
         limit: 1,
       });
 
@@ -513,11 +545,14 @@ export class CanadianEFTProvider implements TransferProvider {
         amount: Math.round(Number(intent.amount) * 100),
         currency: 'cad',
         method: 'standard',
-        metadata: {
-          manna_intent_id: String(intentId),
-          manna_user_id: String(userId),
-          transfer_type: 'cash_out',
-        },
+          metadata: {
+            manna_intent_id: String(intentId),
+            manna_user_id: String(userId),
+            transfer_type: 'cash_out',
+            ...(correlationId
+              ? { [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: correlationId }
+              : {}),
+          },
       },
       { idempotencyKey },
     );

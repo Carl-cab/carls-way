@@ -80,6 +80,11 @@ export interface NormalizedEvent {
   provider: string;
   provider_event_id: string;
   provider_reference_id: string;
+  /**
+   * Opaque local transfer correlation copied from verified provider metadata.
+   * It is never inferred from customer, amount, or other payment attributes.
+   */
+  provider_correlation_id?: string;
   eventType: SettlementEventType;
   timestamp: Date;
   isRetry: boolean;

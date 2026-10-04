@@ -1,4 +1,5 @@
 import type { NormalizedEvent, SettlementEventType } from './types';
+import { readStripeTransferCorrelationMetadata } from './stripe-transfer-correlation';
 
 /**
  * Translate Stripe webhook events into the settlement pipeline's vocabulary.
@@ -62,7 +63,7 @@ export interface AdapterResult {
   /** Null when the event is not a settlement event this pipeline acts on. */
   normalized: NormalizedEvent | null;
   /** Why an event was not normalized. Present only when normalized is null. */
-  skipped?: 'unmapped_event_type' | 'missing_object_id';
+  skipped?: 'unmapped_event_type' | 'missing_object_id' | 'invalid_correlation_metadata';
 }
 
 /**
@@ -101,11 +102,23 @@ export function adaptStripeEvent(event: StripeEventLike): AdapterResult {
     return { normalized: null, skipped: 'missing_object_id' };
   }
 
+  // The alternate lookup key comes only from metadata on a Stripe object whose
+  // signature has already been verified by the route. An explicitly malformed
+  // value is not treated as absent: failing closed keeps it visible for manual
+  // review instead of silently falling back to a potentially unrelated intent.
+  const correlation = readStripeTransferCorrelationMetadata(object?.metadata);
+  if (correlation.kind === 'invalid') {
+    return { normalized: null, skipped: 'invalid_correlation_metadata' };
+  }
+
   return {
     normalized: {
       provider: 'stripe',
       provider_event_id: event.id,
       provider_reference_id: referenceId,
+      ...(correlation.kind === 'valid'
+        ? { provider_correlation_id: correlation.correlationId }
+        : {}),
       eventType,
       // Stripe sends `created` in seconds. Falling back to now would silently
       // fabricate ordering information, so an absent value uses the epoch,

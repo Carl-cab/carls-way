@@ -64,6 +64,27 @@ export const SETTLEMENT_TRANSITIONS: SettlementTransitionRule[] = [
     allowedActors: 'webhook',
     description: 'Provider rejected the transfer during submission',
   },
+  {
+    // A terminal success can likewise arrive before the submission response
+    // persists the PaymentIntent id. It is allowed only after the verified
+    // Stripe metadata correlation has selected the one local intent; that
+    // reference binding and the settlement claim occur atomically.
+    from: 'submitting',
+    to: 'settled',
+    eventTypes: ['settled'],
+    allowedActors: 'webhook',
+    description: 'Provider settled the transfer during submission',
+  },
+  {
+    // Preserve terminal provider cancellation rather than leaving a transfer
+    // permanently submitting when the webhook outruns the local reference
+    // write. No wallet or ledger side effects are planned for cancellation.
+    from: 'submitting',
+    to: 'cancelled',
+    eventTypes: ['cancelled'],
+    allowedActors: 'webhook',
+    description: 'Provider cancelled the transfer during submission',
+  },
 
   // ── Original skeleton rules, retained ─────────────────────────────────────
   {

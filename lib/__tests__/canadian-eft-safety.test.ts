@@ -17,8 +17,12 @@
  */
 
 import { getSql } from '../db';
+import { STRIPE_TRANSFER_CORRELATION_METADATA_KEY } from '../settlement/stripe-transfer-correlation';
 
-interface StripeCall { idempotencyKey?: string }
+interface StripeCall {
+  idempotencyKey?: string;
+  metadata?: Record<string, string>;
+}
 
 const stripeCalls = {
   paymentIntents: [] as StripeCall[],
@@ -28,8 +32,10 @@ const stripeCalls = {
 
 /** Objects the fake Stripe account holds, keyed by idempotency key. */
 const stripeObjects = new Map<string, string>();
-/** PaymentIntents indexed by manna_intent_id metadata, for the search path. */
+/** PaymentIntents indexed by the durable intent metadata, for legacy recovery. */
 const byIntentMetadata = new Map<string, string>();
+/** PaymentIntents indexed by the verified early-webhook correlation metadata. */
+const byCorrelationMetadata = new Map<string, string>();
 
 let behaviour: 'ok' | 'timeout' | 'card_error' = 'ok';
 let piSeq = 0;
@@ -40,10 +46,10 @@ vi.mock('@/lib/stripe', () => ({
     customers: { create: async () => ({ id: 'cus_test' }) },
     paymentIntents: {
       create: async (
-        params: { metadata: { manna_intent_id: string } },
+        params: { metadata: Record<string, string> },
         opts?: { idempotencyKey?: string },
       ) => {
-        stripeCalls.paymentIntents.push({ idempotencyKey: opts?.idempotencyKey });
+        stripeCalls.paymentIntents.push({ idempotencyKey: opts?.idempotencyKey, metadata: params.metadata });
         if (behaviour === 'timeout') throw new Error('ETIMEDOUT: stripe did not respond');
         if (behaviour === 'card_error') {
           throw Object.assign(new Error('Your bank account could not be debited'), {
@@ -58,12 +64,18 @@ vi.mock('@/lib/stripe', () => ({
         const id = `pi_${piSeq}`;
         stripeObjects.set(key, id);
         byIntentMetadata.set(params.metadata.manna_intent_id, id);
+        const correlationId = params.metadata[STRIPE_TRANSFER_CORRELATION_METADATA_KEY];
+        if (correlationId) byCorrelationMetadata.set(correlationId, id);
         return { id };
       },
       search: async ({ query }: { query: string }) => {
-        const match = /manna_intent_id'\]\s*:\s*'(\d+)'/.exec(query);
-        const intentId = match?.[1];
-        const found = intentId ? byIntentMetadata.get(intentId) : undefined;
+        const correlationMatch = /manna_transfer_correlation_id'\]\s*:\s*'([^']+)'/.exec(query);
+        const intentMatch = /manna_intent_id'\]\s*:\s*'(\d+)'/.exec(query);
+        const found = correlationMatch?.[1]
+          ? byCorrelationMetadata.get(correlationMatch[1])
+          : intentMatch?.[1]
+            ? byIntentMetadata.get(intentMatch[1])
+            : undefined;
         return { data: found ? [{ id: found }] : [] };
       },
     },
@@ -119,7 +131,7 @@ async function createReadyIntent(
 
 async function readIntent(intentId: number) {
   const rows = await sql`
-    SELECT status, idempotency_key, provider_reference_id, failure_reason
+    SELECT status, idempotency_key, provider_reference_id, failure_reason, correlation_id
     FROM transfer_intents WHERE id = ${intentId}
   `;
   return rows[0] as {
@@ -127,6 +139,7 @@ async function readIntent(intentId: number) {
     idempotency_key: string | null;
     provider_reference_id: string | null;
     failure_reason: string | null;
+    correlation_id: string | null;
   };
 }
 
@@ -181,6 +194,7 @@ beforeEach(async () => {
   stripeCalls.reset();
   stripeObjects.clear();
   byIntentMetadata.clear();
+  byCorrelationMetadata.clear();
   behaviour = 'ok';
   piSeq = 0;
   poSeq = 0;
@@ -217,12 +231,15 @@ describe('Canadian ACSS transfer safety', () => {
       expect(intent.status).toBe('processing');
       expect(intent.provider_reference_id).toBe(result.referenceId);
       expect(intent.failure_reason).toBeNull();
+      expect(intent.correlation_id).toMatch(/^stripe_corr_[0-9a-f-]{36}$/i);
       // Derived from the durable intent id — not Date.now(), not a request id.
       expect(intent.idempotency_key).toBe(`manna_intent_${intentId}`);
 
       // Sent as a request option with the operation suffix.
       expect(stripeCalls.paymentIntents).toHaveLength(1);
       expect(stripeCalls.paymentIntents[0].idempotencyKey).toBe(`manna_intent_${intentId}:pi`);
+      expect(stripeCalls.paymentIntents[0].metadata?.[STRIPE_TRANSFER_CORRELATION_METADATA_KEY])
+        .toMatch(/^stripe_corr_[0-9a-f-]{36}$/i);
     });
 
     it('uses a distinct key suffix for payouts so the two request shapes cannot collide', async () => {
@@ -337,7 +354,11 @@ describe('Canadian ACSS transfer safety', () => {
       const key = `manna_intent_${intentId}:${suffix}`;
       const id = type === 'add_money' ? 'pi_orphan' : 'po_orphan';
       stripeObjects.set(key, id);
-      if (type === 'add_money') byIntentMetadata.set(String(intentId), id);
+      if (type === 'add_money') {
+        byIntentMetadata.set(String(intentId), id);
+        const correlationId = (await readIntent(intentId)).correlation_id;
+        if (correlationId) byCorrelationMetadata.set(correlationId, id);
+      }
       return id;
     }
 
@@ -421,6 +442,7 @@ describe('Canadian ACSS transfer safety', () => {
       behaviour = 'ok';
       stripeObjects.set(`manna_intent_${intentId}:pi`, 'pi_orphan');
       byIntentMetadata.set(String(intentId), 'pi_orphan');
+      byCorrelationMetadata.set((await readIntent(intentId)).correlation_id as string, 'pi_orphan');
 
       // No reference persisted yet, so the event cannot match and must not
       // drive a state transition.
@@ -467,6 +489,7 @@ describe('Canadian ACSS transfer safety', () => {
       behaviour = 'ok';
       stripeObjects.set(`manna_intent_${intentId}:pi`, 'pi_orphan');
       byIntentMetadata.set(String(intentId), 'pi_orphan');
+      byCorrelationMetadata.set((await readIntent(intentId)).correlation_id as string, 'pi_orphan');
 
       await provider.reconcileTransfer(intentId, USER_ID);
       const afterReconcile = await readIntent(intentId);
