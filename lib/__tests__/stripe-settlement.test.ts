@@ -14,6 +14,10 @@ import {
   mappedStripeEventTypes,
 } from '../settlement/stripe-event-adapter';
 import { handleStripeSettlementEvent } from '../settlement/handle-stripe-settlement';
+import {
+  createStripeTransferCorrelationId,
+  STRIPE_TRANSFER_CORRELATION_METADATA_KEY,
+} from '../settlement/stripe-transfer-correlation';
 
 const sql = getSql();
 const USER_ID = 9501;
@@ -29,12 +33,18 @@ function stripeEvent(
   type: string,
   objectId: string,
   eventId = `evt_${Date.now()}_${++seq}`,
-): { id: string; type: string; created: number; data: { object: { id: string } } } {
+  metadata?: Record<string, string>,
+): {
+  id: string;
+  type: string;
+  created: number;
+  data: { object: { id: string; metadata?: Record<string, string> } };
+} {
   return {
     id: eventId,
     type,
     created: Math.floor(Date.now() / 1000),
-    data: { object: { id: objectId } },
+    data: { object: { id: objectId, ...(metadata ? { metadata } : {}) } },
   };
 }
 
@@ -43,14 +53,33 @@ async function createIntent(
   status = 'processing',
   type = 'add_money',
   amount = 25,
+  correlationId?: string,
 ): Promise<string> {
   const rows = await sql<{ id: string }[]>`
     INSERT INTO transfer_intents (
       user_id, type, amount, currency, status,
-      provider_region, provider_name, execution_mode, provider_reference_id
+      provider_region, provider_name, execution_mode, provider_reference_id,
+      correlation_id
     ) VALUES (
       ${USER_ID}, ${type}, ${amount}, 'CAD', ${status},
-      'CA', 'canadian_eft', 'sandbox', ${referenceId}
+      'CA', 'canadian_eft', 'sandbox', ${referenceId}, ${correlationId ?? null}
+    )
+    RETURNING id
+  `;
+  return String(rows[0].id);
+}
+
+async function createEarlyStripeIntent(
+  correlationId: string,
+  status = 'submitting',
+): Promise<string> {
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO transfer_intents (
+      user_id, type, amount, currency, status,
+      provider_region, provider_name, execution_mode, correlation_id
+    ) VALUES (
+      ${USER_ID}, 'add_money', 25, 'CAD', ${status},
+      'CA', 'canadian_eft', 'sandbox', ${correlationId}
     )
     RETURNING id
   `;
@@ -189,6 +218,169 @@ describe('duplicate webhook delivery', () => {
 });
 
 describe('settlement handling', () => {
+  describe('early Stripe metadata correlation gate', () => {
+    it('uses the provider reference as the normal authoritative match and preserves correlation across the event and ledger', async () => {
+      const correlationId = createStripeTransferCorrelationId();
+      const referenceId = nextRef();
+      const intentId = await createIntent(referenceId, 'processing', 'add_money', 25, correlationId);
+      const event = stripeEvent('payment_intent.succeeded', referenceId, undefined, {
+        [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: correlationId,
+      });
+
+      const result = await handleStripeSettlementEvent(event);
+
+      expect(result.outcome).toBe('applied');
+      expect(String(result.intentId)).toBe(intentId);
+      const eventRows = await sql<{ correlation_id: string | null }[]>`
+        SELECT correlation_id FROM provider_webhook_events
+        WHERE provider = 'stripe' AND provider_event_id = ${event.id}
+      `;
+      const ledgerRows = await sql<{ correlation_id: string | null }[]>`
+        SELECT correlation_id FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+      `;
+      expect(eventRows[0]?.correlation_id).toBe(correlationId);
+      expect(ledgerRows[0]?.correlation_id).toBe(correlationId);
+    });
+
+    it('settles an early webhook by its persisted verified metadata when provider_reference_id is not written yet', async () => {
+      const correlationId = createStripeTransferCorrelationId();
+      const intentId = await createEarlyStripeIntent(correlationId);
+      const providerReferenceId = nextRef();
+      const event = stripeEvent('payment_intent.succeeded', providerReferenceId, undefined, {
+        [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: correlationId,
+      });
+
+      const result = await handleStripeSettlementEvent(event);
+
+      expect(result.outcome).toBe('applied');
+      expect(String(result.intentId)).toBe(intentId);
+      const intent = await sql<{ status: string; provider_reference_id: string | null }[]>`
+        SELECT status, provider_reference_id FROM transfer_intents WHERE id = ${intentId}
+      `;
+      // The verified event binds the object id atomically with the settlement
+      // transition. A subsequent provider-submission recovery write can only
+      // preserve this same value, never attach a different PaymentIntent.
+      expect(intent[0]).toMatchObject({ status: 'settled', provider_reference_id: providerReferenceId });
+      const ledger = await sql<{ provider_reference: string | null }[]>`
+        SELECT provider_reference FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+      `;
+      expect(ledger[0]?.provider_reference).toBe(providerReferenceId);
+    });
+
+    it('enforces one local intent per persisted Stripe correlation', async () => {
+      const correlationId = createStripeTransferCorrelationId();
+      await createEarlyStripeIntent(correlationId);
+
+      await expect(createEarlyStripeIntent(correlationId)).rejects.toThrow();
+    });
+
+    it('rejects mismatched verified metadata and retains the event for manual review', async () => {
+      const persistedCorrelation = createStripeTransferCorrelationId();
+      const mismatchedCorrelation = createStripeTransferCorrelationId();
+      const referenceId = nextRef();
+      const intentId = await createIntent(referenceId, 'processing', 'add_money', 25, persistedCorrelation);
+      const event = stripeEvent('payment_intent.succeeded', referenceId, undefined, {
+        [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: mismatchedCorrelation,
+      });
+
+      const result = await handleStripeSettlementEvent(event);
+
+      expect(result).toMatchObject({
+        outcome: 'correlation_rejected',
+        markedProcessed: false,
+        reason: 'CORRELATION_MISMATCH',
+      });
+      expect((await eventRow(event.id))?.processing_status).toBe('failed');
+      const intent = await sql<{ status: string }[]>`
+        SELECT status FROM transfer_intents WHERE id = ${intentId}
+      `;
+      expect(intent[0]?.status).toBe('processing');
+      const ledger = await sql<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+      `;
+      expect(ledger[0].n).toBe(0);
+    });
+
+    it('rejects malformed Stripe correlation metadata without falling back to a reference match', async () => {
+      const correlationId = createStripeTransferCorrelationId();
+      const referenceId = nextRef();
+      const intentId = await createIntent(referenceId, 'processing', 'add_money', 25, correlationId);
+      await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+
+      const result = await handleStripeSettlementEvent(
+        stripeEvent('payment_intent.succeeded', referenceId, undefined, {
+          [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: 'not-a-manna-correlation-id',
+        }),
+      );
+
+      expect(result).toMatchObject({
+        outcome: 'correlation_rejected',
+        markedProcessed: false,
+        reason: 'INVALID_CORRELATION_METADATA',
+      });
+      const intent = await sql<{ status: string }[]>`
+        SELECT status FROM transfer_intents WHERE id = ${intentId}
+      `;
+      const balance = await sql<{ balance_cad: number }[]>`
+        SELECT balance_cad FROM users WHERE id = ${USER_ID}
+      `;
+      expect(intent[0]?.status).toBe('processing');
+      expect(Number(balance[0]?.balance_cad)).toBe(0);
+    });
+
+    it('binds and cancels an early provider event without any wallet or ledger side effect', async () => {
+      const correlationId = createStripeTransferCorrelationId();
+      const intentId = await createEarlyStripeIntent(correlationId);
+      const providerReferenceId = nextRef();
+      await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+
+      const result = await handleStripeSettlementEvent(
+        stripeEvent('payment_intent.canceled', providerReferenceId, undefined, {
+          [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: correlationId,
+        }),
+      );
+
+      expect(result.outcome).toBe('applied');
+      const intent = await sql<{ status: string; provider_reference_id: string | null }[]>`
+        SELECT status, provider_reference_id FROM transfer_intents WHERE id = ${intentId}
+      `;
+      const ledger = await sql<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+      `;
+      const balance = await sql<{ balance_cad: number }[]>`
+        SELECT balance_cad FROM users WHERE id = ${USER_ID}
+      `;
+      expect(intent[0]).toMatchObject({ status: 'cancelled', provider_reference_id: providerReferenceId });
+      expect(ledger[0]?.n).toBe(0);
+      expect(Number(balance[0]?.balance_cad)).toBe(0);
+    });
+
+    it('handles duplicate and reordered early metadata deliveries without double settlement', async () => {
+      const correlationId = createStripeTransferCorrelationId();
+      const intentId = await createEarlyStripeIntent(correlationId);
+      await sql`UPDATE users SET balance_cad = 0 WHERE id = ${USER_ID}`;
+      const metadata = { [STRIPE_TRANSFER_CORRELATION_METADATA_KEY]: correlationId };
+      const succeeded = stripeEvent('payment_intent.succeeded', nextRef(), `evt_early_ok_${Date.now()}`, metadata);
+      const latePending = stripeEvent('payment_intent.processing', succeeded.data.object.id, `evt_early_pending_${Date.now()}`, metadata);
+
+      const first = await handleStripeSettlementEvent(succeeded);
+      const duplicate = await handleStripeSettlementEvent(succeeded);
+      const reordered = await handleStripeSettlementEvent(latePending);
+
+      expect(first.outcome).toBe('applied');
+      expect(duplicate.outcome).toBe('duplicate_ignored');
+      expect(['invalid_transition', 'no_change']).toContain(reordered.outcome);
+      const balances = await sql<{ balance_cad: number }[]>`
+        SELECT balance_cad FROM users WHERE id = ${USER_ID}
+      `;
+      const ledger = await sql<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n FROM ledger_entries WHERE transfer_intent_id = ${intentId}
+      `;
+      expect(Number(balances[0].balance_cad)).toBe(25);
+      expect(ledger[0].n).toBe(1);
+    });
+  });
+
   it('advances the intent and marks the event processed only after doing so', async () => {
     const ref = nextRef();
     const intentId = await createIntent(ref);

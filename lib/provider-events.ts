@@ -24,6 +24,7 @@ export async function recordProviderEvent(
   eventType: string,
   options?: {
     relatedProviderReference?: string;
+    correlationId?: string;
     rawPayload?: Record<string, unknown>;
   }
 ): Promise<boolean> {
@@ -32,10 +33,12 @@ export async function recordProviderEvent(
   try {
     await sql`
       INSERT INTO provider_webhook_events (
-        provider, provider_event_id, event_type, related_provider_reference, raw_payload, processing_status
+        provider, provider_event_id, event_type, related_provider_reference,
+        correlation_id, raw_payload, processing_status
       ) VALUES (
         ${provider}, ${providerEventId}, ${eventType},
         ${options?.relatedProviderReference ?? null},
+        ${options?.correlationId ?? null},
         ${options?.rawPayload ? JSON.stringify(options.rawPayload) : null},
         'received'
       )

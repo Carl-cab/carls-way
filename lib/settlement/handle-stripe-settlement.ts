@@ -46,6 +46,10 @@ import { adaptStripeEvent, isSettlementEvent, type StripeEventLike } from './str
  *     intent's current status, so a late `pending` arriving after `settled` is
  *     rejected as an invalid transition rather than dragging the intent
  *     backwards.
+ *   - early delivery: a verified PaymentIntent first resolves by its persisted
+ *     provider reference, then (only when absent) by the opaque correlation
+ *     metadata persisted before provider submission. Conflicting, malformed,
+ *     and ambiguous metadata fails closed into manual review.
  *
  * ## What this does not do
  *
@@ -70,6 +74,7 @@ export type SettlementHandlingOutcome =
   | 'recorded_only'
   | 'duplicate_ignored'
   | 'no_matching_intent'
+  | 'correlation_rejected'
   | 'invalid_transition'
   | 'failed';
 
@@ -91,22 +96,37 @@ export interface SettlementHandlingResult {
 
 export async function handleStripeSettlementEvent(
   event: StripeEventLike,
-  correlationId = '',
 ): Promise<SettlementHandlingResult> {
   const providerEventId = event.id;
   const adapted = adaptStripeEvent(event);
   const referenceId = adapted.normalized?.provider_reference_id;
+  const providerCorrelationId = adapted.normalized?.provider_correlation_id;
 
   // Step 1. Record before doing anything else, so the event survives a crash
   // even if nothing downstream succeeds. `false` means we have seen it before.
   const isFirstDelivery = await recordProviderEvent('stripe', providerEventId, event.type, {
     relatedProviderReference: referenceId,
+    correlationId: providerCorrelationId,
     rawPayload: event as unknown as Record<string, unknown>,
   });
 
-  // An event we do not settle is still worth keeping — it is evidence during an
-  // investigation — but there is nothing to apply, so it is complete on arrival.
+  // An explicit but malformed correlation is not equivalent to an event that
+  // simply is not in the settlement map. Keep the verified payload and fail it
+  // terminally for manual review; accepting it record-only would hide a broken
+  // provider metadata contract.
   if (!adapted.normalized) {
+    if (adapted.skipped === 'invalid_correlation_metadata') {
+      await markProviderEventFailed('stripe', providerEventId, 'INVALID_CORRELATION_METADATA');
+      return {
+        outcome: 'correlation_rejected',
+        markedProcessed: false,
+        reason: 'INVALID_CORRELATION_METADATA',
+      };
+    }
+
+    // An event we do not settle is still worth keeping — it is evidence during
+    // an investigation — but there is nothing to apply, so it is complete on
+    // arrival.
     await markProviderEventProcessed('stripe', providerEventId);
     return {
       outcome: 'recorded_only',
@@ -135,7 +155,7 @@ export async function handleStripeSettlementEvent(
     // Step 2. Plan. Pure: reads the intent and decides, writes nothing.
     const plan = await new SettlementOrchestrator().orchestrateSettlement(
       normalized,
-      correlationId,
+      providerCorrelationId ?? '',
     );
 
     if (plan.error) {
@@ -146,8 +166,13 @@ export async function handleStripeSettlementEvent(
       await markProviderEventFailed('stripe', providerEventId, plan.error);
       // The orchestrator reports a machine-readable code here, not prose.
       const noIntent = plan.error === 'INTENT_NOT_FOUND';
+      const correlationRejected = plan.error.startsWith('CORRELATION_');
       return {
-        outcome: noIntent ? 'no_matching_intent' : 'invalid_transition',
+        outcome: noIntent
+          ? 'no_matching_intent'
+          : correlationRejected
+            ? 'correlation_rejected'
+            : 'invalid_transition',
         markedProcessed: false,
         intentId: plan.intentId,
         reason: plan.error,

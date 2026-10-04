@@ -154,6 +154,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_provider_reference
   ON transfer_intents(provider_reference_id) WHERE provider_reference_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_provider_authorization
   ON transfer_intents(provider_authorization_id) WHERE provider_authorization_id IS NOT NULL;
+-- Production adds this only through the guarded maintenance migration. Tests
+-- create a disposable database, so defining it here exercises the invariant
+-- without moving financial-schema DDL into ordinary request initialization.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_intents_correlation_id
+  ON transfer_intents(correlation_id) WHERE correlation_id IS NOT NULL;
 
 INSERT INTO users (id, name, username, email, password_hash, country, kyc_status)
 VALUES (9001, 'Transfer Test User', 'transfertest9001', 'transfer9001@example.test',

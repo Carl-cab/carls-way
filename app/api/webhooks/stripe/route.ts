@@ -114,7 +114,6 @@ export async function POST(req: NextRequest) {
 
       const result = await handleStripeSettlementEvent(
         event as unknown as StripeEventLike,
-        req.headers.get('x-correlation-id') ?? '',
       );
 
       if (result.outcome === 'failed') {

@@ -70,8 +70,14 @@ export async function applySettlementAtomically(
   return sql.begin(async (tx) => {
     // Claim. `FOR UPDATE` first so concurrent callers serialise on the row
     // rather than racing between the read and the write.
-    const locked = await tx<{ id: string; user_id: number; status: string; provider_reference_id: string | null }[]>`
-      SELECT id, user_id, status, provider_reference_id
+    const locked = await tx<{
+      id: string;
+      user_id: number;
+      status: string;
+      provider_reference_id: string | null;
+      correlation_id: string | null;
+    }[]>`
+      SELECT id, user_id, status, provider_reference_id, correlation_id
       FROM transfer_intents
       WHERE id = ${plan.intentId}
       FOR UPDATE
@@ -90,6 +96,34 @@ export async function applySettlementAtomically(
 
     const intent = locked[0];
 
+    // A Stripe PaymentIntent can arrive before the provider client durably
+    // writes its object id. That event was matched solely through the opaque
+    // correlation metadata persisted before submission. Bind the verified
+    // object id while the intent row is locked so the next event and the later
+    // submission write have one authoritative provider reference.
+    //
+    // The conditional update is intentionally stricter than COALESCE: an
+    // already-bound *different* object id is a correlation conflict. Throwing
+    // rolls the whole settlement transaction back, leaves the event retryable,
+    // and prevents a stale metadata value from attaching a new Stripe object to
+    // the wrong transfer.
+    if (plan.bind_provider_reference) {
+      const bound = await tx<{ id: string }[]>`
+        UPDATE transfer_intents
+        SET provider_reference_id = ${plan.provider_reference_id}, updated_at = NOW()
+        WHERE id = ${plan.intentId}
+          AND (
+            provider_reference_id IS NULL
+            OR provider_reference_id = ${plan.provider_reference_id}
+          )
+        RETURNING id
+      `;
+      if (!bound[0]) {
+        throw new Error('EARLY_WEBHOOK_PROVIDER_REFERENCE_CONFLICT');
+      }
+      intent.provider_reference_id = plan.provider_reference_id;
+    }
+
     await tx`
       UPDATE transfer_intents
       SET status = ${plan.nextStatus}, updated_at = NOW()
@@ -102,19 +136,22 @@ export async function applySettlementAtomically(
         // The event-scoped constraint is kept as a second line of defence
         // against a same-event redelivery that somehow reaches here; the claim
         // above is what stops distinct events double-writing.
-        await tx`
+        const inserted = await tx<{ id: string }[]>`
           INSERT INTO ledger_entries (
             user_id, transfer_intent_id, currency, account_type, entry_type,
-            debit, credit, provider, provider_reference, provider_event_id, description
+            debit, credit, provider, provider_reference, provider_event_id,
+            correlation_id, description
           ) VALUES (
             ${intent.user_id}, ${intent.id}, ${entry.currency}, 'wallet',
             ${mapEntryType(entry.entryType, plan.nextStatus)},
             ${entry.debit}, ${entry.credit}, ${plan.provider},
-            ${intent.provider_reference_id}, ${plan.provider_event_id}, ${entry.description}
+            ${intent.provider_reference_id}, ${plan.provider_event_id},
+            ${intent.correlation_id}, ${entry.description}
           )
           ON CONFLICT (transfer_intent_id, provider_event_id, entry_type) DO NOTHING
+          RETURNING id
         `;
-        ledgerEntriesCreated += 1;
+        ledgerEntriesCreated += inserted.length;
       }
     }
 

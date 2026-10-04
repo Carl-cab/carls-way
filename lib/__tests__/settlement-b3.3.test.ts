@@ -25,6 +25,7 @@ function makePlan(overrides: Partial<SettlementPlan>): SettlementPlan {
     provider: 'plaid',
     provider_event_id: 'evt_test_b33',
     provider_reference_id: 'trf_test_b33',
+    bind_provider_reference: false,
     correlationId: 'corr-b33',
     updateBalance: { shouldUpdate: false },
     createLedgerEntries: { shouldCreate: false },
