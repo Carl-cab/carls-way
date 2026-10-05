@@ -504,14 +504,32 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
     `;
   });
 
-  // Runs outside the DDL transaction above: a database created before money
-  // became NUMERIC still has float columns, and CREATE TABLE IF NOT EXISTS will
-  // never fix them. No-op once converted.
-  const upgraded = await upgradeLegacyMoneyColumns(db);
-  if (upgraded.length > 0) {
+  // Report legacy float money columns. Deliberately does NOT convert them.
+  //
+  // This used to call upgradeLegacyMoneyColumns() here. That issues
+  // `ALTER TABLE … ALTER COLUMN … TYPE NUMERIC(14,2) USING …`, and a USING
+  // clause rewrites the whole table under ACCESS EXCLUSIVE — the same class of
+  // operation that migrations/20260907_money_real_to_numeric.sql wraps in a
+  // preflight, a lock timeout, a statement timeout and a reconciliation check.
+  // Running it from initializeSchema() made it a cold-start side effect: any
+  // request that warmed a serverless instance could begin rewriting a balance
+  // column, and because this sits outside the advisory-locked transaction
+  // above, concurrent cold starts each attempted it. PostgreSQL serialises
+  // them on the lock rather than corrupting anything, but with no lock_timeout
+  // they queue holding requests open.
+  //
+  // Converting a financial column is a separately authorized maintenance
+  // procedure with a backup, a write drain and reconciliation. It is not
+  // something a schema bootstrap decides to do. Detection stays here so an
+  // operator still learns the column needs attention.
+  const legacy = await detectLegacyMoneyColumns(db);
+  if (legacy.length > 0) {
     console.warn(
-      'Converted legacy float money columns to NUMERIC(14,2): ' +
-        upgraded.map((u) => `${u.table}.${u.column} (was ${u.from})`).join(', '),
+      'Legacy float money columns detected and NOT converted: ' +
+        legacy.map((u) => `${u.table}.${u.column} (${u.from})`).join(', ') +
+        '. Float storage is a decimal-correctness problem. Convert with ' +
+        'migrations/20260907_money_real_to_numeric.sql under the maintenance ' +
+        'procedure in sql/README.md.',
     );
   }
 }
@@ -682,10 +700,18 @@ export interface MoneyColumnUpgrade {
  *
  * @returns the columns it converted, empty when there was nothing to do
  */
-export async function upgradeLegacyMoneyColumns(
+/**
+ * Report which money columns are still stored as a float, changing nothing.
+ *
+ * Read-only by construction, so it is safe on any path — including a cold
+ * start, where the conversion itself is not (see initializeSchema()). The
+ * upgrade below calls this rather than repeating the predicate, so the two can
+ * never disagree about what counts as legacy.
+ */
+export async function detectLegacyMoneyColumns(
   sql: ReturnType<typeof getSql> = getSql(),
 ): Promise<MoneyColumnUpgrade[]> {
-  const upgraded: MoneyColumnUpgrade[] = [];
+  const legacy: MoneyColumnUpgrade[] = [];
 
   for (const [table, column] of MONEY_COLUMNS) {
     const meta = await sql<{ data_type: string }[]>`
@@ -700,6 +726,18 @@ export async function upgradeLegacyMoneyColumns(
     // nothing to do. Either way, leave it be.
     if (dataType !== 'real' && dataType !== 'double precision') continue;
 
+    legacy.push({ table, column, from: dataType });
+  }
+
+  return legacy;
+}
+
+export async function upgradeLegacyMoneyColumns(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<MoneyColumnUpgrade[]> {
+  const upgraded: MoneyColumnUpgrade[] = [];
+
+  for (const { table, column, from: dataType } of await detectLegacyMoneyColumns(sql)) {
     // Identifiers cannot be bound as parameters. Both come from MONEY_COLUMNS
     // above — a module-level constant, never from a request — and postgres.js
     // quotes them via sql(). The round-trip cast target is chosen from the two
