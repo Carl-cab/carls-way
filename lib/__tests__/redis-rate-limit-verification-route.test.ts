@@ -10,10 +10,8 @@ vi.mock('@/lib/rate-limit', () => ({
   verifyRateLimitBackend: verification,
 }));
 
-import {
-  POST,
-  redisRateLimitVerificationHandler,
-} from '@/app/api/admin/operations/redis-rate-limit/route';
+import { POST } from '@/app/api/admin/operations/redis-rate-limit/route';
+import { redisRateLimitVerificationHandler } from '@/lib/admin-operations/redis-rate-limit-verification';
 
 const REDIS_URL_SENTINEL = 'redis://operator:never-return-this-secret@redis.example.test:6379/0';
 
