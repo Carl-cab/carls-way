@@ -18,7 +18,7 @@ import {
   resolveSslMode,
   isUninitializedDatabase,
   isAuthBlockedBySchema,
-  isBootstrapAllowed,
+  anonymousRecoveryMode,
   AUTH_CRITICAL_USER_COLUMNS,
 } from '../db';
 
@@ -96,17 +96,17 @@ describe('the deadlock this closes', () => {
     await scratch`ALTER TABLE users DROP COLUMN token_version`;
 
     await expect(isAuthBlockedBySchema(scratch)).resolves.toBe(true);
-    await expect(isBootstrapAllowed(scratch)).resolves.toBe(true);
+    await expect(anonymousRecoveryMode(scratch)).resolves.toBe('auth-repair');
   });
 
   it('shuts the window again once the column is restored', async () => {
     await scratch`ALTER TABLE users DROP COLUMN token_version`;
-    expect(await isBootstrapAllowed(scratch)).toBe(true);
+    expect(await anonymousRecoveryMode(scratch)).toBe('auth-repair');
 
     await scratch`ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0`;
 
     expect(await isAuthBlockedBySchema(scratch)).toBe(false);
-    expect(await isBootstrapAllowed(scratch)).toBe(false);
+    expect(await anonymousRecoveryMode(scratch)).toBe(null);
   });
 });
 
@@ -121,7 +121,7 @@ describe('isAuthBlockedBySchema', () => {
 
   it('stays shut on a healthy live database', async () => {
     await expect(isAuthBlockedBySchema(scratch)).resolves.toBe(false);
-    await expect(isBootstrapAllowed(scratch)).resolves.toBe(false);
+    await expect(anonymousRecoveryMode(scratch)).resolves.toBe(null);
   });
 
   it('is not the answer for a database with no users table at all', async () => {
@@ -130,13 +130,13 @@ describe('isAuthBlockedBySchema', () => {
     await scratch`DROP TABLE users CASCADE`;
     await expect(isAuthBlockedBySchema(scratch)).resolves.toBe(false);
     await expect(isUninitializedDatabase(scratch)).resolves.toBe(true);
-    await expect(isBootstrapAllowed(scratch)).resolves.toBe(true);
+    await expect(anonymousRecoveryMode(scratch)).resolves.toBe('full-bootstrap');
   });
 
   it('fails closed when the catalogue cannot be read', async () => {
     const broken = connect('postgres://nobody:nobody@127.0.0.1:1/nope?sslmode=disable');
     await expect(isAuthBlockedBySchema(broken)).resolves.toBe(false);
-    await expect(isBootstrapAllowed(broken)).resolves.toBe(false);
+    await expect(anonymousRecoveryMode(broken)).resolves.toBe(null);
     await broken.end();
   });
 
@@ -144,7 +144,7 @@ describe('isAuthBlockedBySchema', () => {
     await scratch`DELETE FROM users`;
     await expect(isAuthBlockedBySchema(scratch)).resolves.toBe(false);
     await expect(isUninitializedDatabase(scratch)).resolves.toBe(true);
-    await expect(isBootstrapAllowed(scratch)).resolves.toBe(true);
+    await expect(anonymousRecoveryMode(scratch)).resolves.toBe('full-bootstrap');
   });
 });
 
