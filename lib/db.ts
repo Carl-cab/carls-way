@@ -630,18 +630,75 @@ export async function isAuthBlockedBySchema(
   }
 }
 
+
 /**
- * Whether /api/migrate may run without a cookie.
+ * Which anonymous recovery an unauthenticated caller is entitled to, if any.
  *
- * True only when nobody could present one: an empty database, or one whose
- * schema cannot satisfy the auth path. Both are states where requiring
- * authentication would make the fix unreachable.
+ * This replaces a removed `isBootstrapAllowed()`, which answered a plain yes/no
+ * and so collapsed two states that carry very different risk. It is gone rather
+ * than kept alongside this, because a predicate that cannot tell a populated
+ * database from an empty one is the defect, and leaving it exported invites the
+ * same mistake again. The two states are:
+ *
+ *   'full-bootstrap' — `users` is absent, or present with no rows. There is no
+ *     account to authenticate as and no customer data to damage, and creating
+ *     the schema is the only way out. The full pipeline is appropriate.
+ *
+ *   'auth-repair' — `users` holds rows but lacks a column authentication reads.
+ *     This is a POPULATED database, and it is the state that follows a deploy
+ *     whose migration has not run (how users.token_version broke production
+ *     login). It needs exactly those columns back. Nothing else.
+ *
+ *   null — no anonymous recovery is warranted.
+ *
+ * Treating 'auth-repair' as 'full-bootstrap' made the entire migration
+ * pipeline anonymously reachable against live data.
  */
-export async function isBootstrapAllowed(
+export type AnonymousRecovery = 'full-bootstrap' | 'auth-repair';
+
+export async function anonymousRecoveryMode(
   sql: ReturnType<typeof getSql> = getSql(),
-): Promise<boolean> {
-  if (await isUninitializedDatabase(sql)) return true;
-  return isAuthBlockedBySchema(sql);
+): Promise<AnonymousRecovery | null> {
+  if (await isUninitializedDatabase(sql)) return 'full-bootstrap';
+  if (await isAuthBlockedBySchema(sql)) return 'auth-repair';
+  return null;
+}
+
+/**
+ * The only DDL an unauthenticated caller may cause on a populated database.
+ *
+ * A fixed allowlist, not a parameter: the statements are written out here, one
+ * per AUTH_CRITICAL_USER_COLUMNS entry, so no caller can widen it and no
+ * request value reaches the query text.
+ *
+ * Both are additive and idempotent. `password_hash` is added NULLable even
+ * though the CREATE TABLE declares it NOT NULL — on a table with existing rows
+ * a NOT NULL column without a default fails outright, and a repair path that
+ * cannot complete is no repair. Existing rows get NULL, which `verifyUserPassword()`
+ * treats as a failed login rather than a bypass.
+ *
+ * Returns the columns it actually added, empty when there was nothing to do.
+ */
+export async function repairAuthCriticalColumns(
+  sql: ReturnType<typeof getSql> = getSql(),
+): Promise<string[]> {
+  const before = await sql<{ column_name: string }[]>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'users'
+  `;
+  const have = new Set(before.map((r) => r.column_name));
+
+  const added: string[] = [];
+  if (!have.has('password_hash')) {
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT`;
+    added.push('password_hash');
+  }
+  if (!have.has('token_version')) {
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`;
+    added.push('token_version');
+  }
+
+  return added;
 }
 
 /**

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  anonymousRecoveryMode,
   getSql,
   initializeSchema,
-  isBootstrapAllowed,
+  repairAuthCriticalColumns,
   upgradeLegacyMoneyColumns,
 } from '@/lib/db';
 import { getAuthUser, auditLog } from '@/lib/auth';
@@ -18,24 +19,37 @@ import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-l
  * The one exception is bootstrap: the window opens when nobody *could* present
  * a cookie, because requiring one would put the fix out of reach.
  *
- * Two states qualify, and they are the same problem. A brand-new deployment
- * cannot authenticate anyone, because registration needs the `users` table that
- * only this migration creates. And a live database whose schema is missing a
- * column the auth path reads cannot authenticate anyone either — login and
- * registration both fail on it, so no cookie can be obtained, so this endpoint
- * cannot be reached to add the column. Release 1.0 hit exactly that with
- * `users.token_version` and locked production out until the ALTER was run by
- * hand. See isAuthBlockedBySchema in lib/db.ts.
+ * Two states qualify, and an earlier version of this comment called them "the
+ * same problem" and granted both the same thing. They are not the same, and
+ * that was the defect:
  *
- * The window shuts as soon as either condition clears.
+ *   - A brand-new deployment cannot authenticate anyone, because registration
+ *     needs the `users` table that only this migration creates. There is no
+ *     account and no customer data, so running the full pipeline costs nothing
+ *     an anonymous caller could not have caused by letting the deploy proceed.
  *
- * What that window can be used for is bounded: every statement here is
- * idempotent (CREATE TABLE / ADD COLUMN / CREATE INDEX ... IF NOT EXISTS) and
- * none are destructive, so the most an anonymous caller can do on a database
- * with no accounts on it is create the empty schema that deployment was about
- * to create anyway. No data is read back to the caller and no privilege is
- * granted. The path is rate limited and audited separately from the
- * authenticated one.
+ *   - A LIVE database missing a column the auth path reads cannot authenticate
+ *     anyone either — login and registration both fail, so no cookie can be
+ *     obtained, so this endpoint cannot be reached to add the column. Release
+ *     1.0 hit exactly that with `users.token_version` and locked production out
+ *     until the ALTER was run by hand.
+ *
+ * The second state has rows in it. Treating it like the first made the entire
+ * migration pipeline — every ALTER, and until recently a money-column type
+ * conversion that rewrites a balance table — anonymously reachable against
+ * live customer data. The justification written here, that the worst case is
+ * "the empty schema that deployment was about to create anyway", was simply
+ * untrue of it.
+ *
+ * So the two now get different treatment, decided by anonymousRecoveryMode():
+ * 'full-bootstrap' runs the pipeline, 'auth-repair' runs
+ * repairAuthCriticalColumns() and nothing else — a fixed allowlist of the two
+ * columns authentication reads, both additive and idempotent. A populated
+ * database gets back exactly enough to let someone log in; everything further
+ * is theirs to run authenticated.
+ *
+ * Both anonymous paths are rate limited, read no data back to the caller, grant
+ * no privilege, and are audited separately from the authenticated one.
  *
  * Follow-up recorded for a later phase: hold the authenticated path to an admin
  * permission rather than to any authenticated customer. That depends on the
@@ -47,13 +61,13 @@ export async function GET(req: NextRequest) {
     let bootstrap = false;
 
     if (!user) {
-      bootstrap = await isBootstrapAllowed();
-      if (!bootstrap) {
+      const mode = await anonymousRecoveryMode();
+      if (!mode) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
 
-      // Throttle the anonymous path so the bootstrap window cannot be used to
-      // hammer DDL at the database.
+      // Throttle both anonymous paths so the window cannot be used to hammer
+      // DDL at the database.
       const limit = await checkRateLimit('schema:bootstrap', clientIdentifier(req), {
         limit: 3,
         windowSeconds: 3600,
@@ -64,6 +78,24 @@ export async function GET(req: NextRequest) {
           { status: 429, headers: rateLimitHeaders(limit) },
         );
       }
+
+      // A populated database gets the auth-critical columns back and nothing
+      // else. Returning here is the whole point: none of the pipeline below
+      // runs for an anonymous caller once the database holds rows.
+      if (mode === 'auth-repair') {
+        const repaired = await repairAuthCriticalColumns();
+        return NextResponse.json({
+          success: true,
+          repair: true,
+          message:
+            repaired.length > 0
+              ? 'Authentication columns restored. Log in, then call this endpoint again to apply the full migration.'
+              : 'Nothing to repair.',
+          ...(repaired.length > 0 ? { columnsRestored: repaired } : {}),
+        });
+      }
+
+      bootstrap = true;
     }
 
     // On the bootstrap path audit_logs does not exist yet, so the bootstrap
