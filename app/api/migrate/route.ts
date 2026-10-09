@@ -8,6 +8,8 @@ import {
 } from '@/lib/db';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
+import { resolveAdminBySessionId } from '@/lib/rbac/admin-middleware';
+import { canRunOperations } from '@/lib/rbac/types';
 
 /**
  * Apply pending schema changes.
@@ -51,16 +53,30 @@ import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-l
  * Both anonymous paths are rate limited, read no data back to the caller, grant
  * no privilege, and are audited separately from the authenticated one.
  *
- * Follow-up recorded for a later phase: hold the authenticated path to an admin
- * permission rather than to any authenticated customer. That depends on the
- * admin login lifecycle, which remains out of scope here.
+ * The authenticated full pipeline is not available to a customer. A customer
+ * JWT and an administrator session are different credentials. Only an active
+ * administrator whose role can run operations (SuperAdmin or OperationsAdmin)
+ * may run initializeSchema and the money-column conversion. A customer, or an
+ * administrator in a read-only role, receives 403 and the pipeline does not run.
  */
 export async function GET(req: NextRequest) {
   try {
     const user = await getAuthUser();
+    const adminCredential =
+      req.cookies.get('admin_session')?.value ||
+      req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+    const admin = await resolveAdminBySessionId(adminCredential);
+    const operator = Boolean(admin && canRunOperations(admin.role));
     let bootstrap = false;
 
-    if (!user) {
+    if (!operator && (user || admin)) {
+      return NextResponse.json(
+        { error: 'Schema migration requires an operations administrator' },
+        { status: 403 },
+      );
+    }
+
+    if (!user && !operator) {
       const mode = await anonymousRecoveryMode();
       if (!mode) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -89,7 +105,7 @@ export async function GET(req: NextRequest) {
           repair: true,
           message:
             repaired.length > 0
-              ? 'Authentication columns restored. Log in, then call this endpoint again to apply the full migration.'
+              ? 'Authentication columns restored. An operations administrator must call this endpoint again to apply the full migration.'
               : 'Nothing to repair.',
           ...(repaired.length > 0 ? { columnsRestored: repaired } : {}),
         });
@@ -100,7 +116,12 @@ export async function GET(req: NextRequest) {
 
     // On the bootstrap path audit_logs does not exist yet, so the bootstrap
     // run is recorded after the schema has been created instead.
-    if (user) await auditLog(user.userId, 'schema_migration_run', {});
+    if (operator && admin) {
+      await auditLog(user?.userId ?? null, 'schema_migration_run', {
+        admin_id: admin.id,
+        admin_role: admin.role,
+      });
+    }
 
     // Run full schema initialization (creates missing tables)
     await initializeSchema();

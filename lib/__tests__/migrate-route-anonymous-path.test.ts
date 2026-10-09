@@ -13,7 +13,7 @@
  * pass while both still ran.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server';
 
 const getAuthUser = vi.hoisted(() => vi.fn());
 const anonymousRecoveryMode = vi.hoisted(() => vi.fn());
@@ -21,6 +21,7 @@ const repairAuthCriticalColumns = vi.hoisted(() => vi.fn());
 const initializeSchema = vi.hoisted(() => vi.fn());
 const upgradeLegacyMoneyColumns = vi.hoisted(() => vi.fn());
 const checkRateLimit = vi.hoisted(() => vi.fn());
+const resolveAdminBySessionId = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/db', () => ({
   anonymousRecoveryMode,
@@ -47,10 +48,16 @@ vi.mock('@/lib/rate-limit', () => ({
   rateLimitHeaders: () => ({}),
 }));
 
+vi.mock('@/lib/rbac/admin-middleware', () => ({
+  resolveAdminBySessionId,
+}));
+
 import { GET } from '@/app/api/migrate/route';
 
-function request(): NextRequest {
-  return new Request('https://manna.example.test/api/migrate') as unknown as NextRequest;
+function request(adminSession?: string): NextRequest {
+  return new NextRequest('https://manna.example.test/api/migrate', {
+    headers: adminSession ? { cookie: `admin_session=${adminSession}` } : {},
+  });
 }
 
 beforeEach(() => {
@@ -59,6 +66,7 @@ beforeEach(() => {
   repairAuthCriticalColumns.mockResolvedValue(['token_version']);
   initializeSchema.mockResolvedValue(undefined);
   upgradeLegacyMoneyColumns.mockResolvedValue([]);
+  resolveAdminBySessionId.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -147,16 +155,55 @@ describe('anonymous caller with no recovery warranted', () => {
   });
 });
 
-describe('authenticated caller', () => {
-  it('gets the full pipeline and is not diverted to the repair path', async () => {
-    getAuthUser.mockResolvedValue({ userId: 1, email: 'ops@example.test', username: 'ops' });
+describe('authenticated customer', () => {
+  it('is refused with 403 and the pipeline does not run', async () => {
+    getAuthUser.mockResolvedValue({ userId: 1, email: 'customer@example.test', username: 'customer' });
 
-    await GET(request());
+    const res = await GET(request());
 
-    expect(initializeSchema).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(403);
+    expect(initializeSchema).not.toHaveBeenCalled();
+    expect(upgradeLegacyMoneyColumns).not.toHaveBeenCalled();
     expect(repairAuthCriticalColumns).not.toHaveBeenCalled();
-    // An authenticated caller is not subject to the anonymous window at all.
+    expect(anonymousRecoveryMode).not.toHaveBeenCalled();
+  });
+});
+
+describe('administrator', () => {
+  it('runs the full pipeline for an operations administrator', async () => {
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue({
+      id: 7,
+      role: 'SuperAdmin',
+      status: 'active',
+      email: 'ops@example.test',
+      name: 'Ops',
+    });
+
+    const res = await GET(request('session.token'));
+
+    expect(res.status).toBe(200);
+    expect(initializeSchema).toHaveBeenCalledTimes(1);
+    expect(upgradeLegacyMoneyColumns).toHaveBeenCalledTimes(1);
+    expect(repairAuthCriticalColumns).not.toHaveBeenCalled();
     expect(anonymousRecoveryMode).not.toHaveBeenCalled();
     expect(checkRateLimit).not.toHaveBeenCalled();
+  });
+
+  it('refuses a read-only administrator', async () => {
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue({
+      id: 8,
+      role: 'ReadOnlyAuditor',
+      status: 'active',
+      email: 'audit@example.test',
+      name: 'Audit',
+    });
+
+    const res = await GET(request('session.token'));
+
+    expect(res.status).toBe(403);
+    expect(initializeSchema).not.toHaveBeenCalled();
+    expect(upgradeLegacyMoneyColumns).not.toHaveBeenCalled();
   });
 });
