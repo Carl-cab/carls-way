@@ -99,12 +99,13 @@ transfer stops at `ready` and never submits to Plaid/Stripe.
 - [ ] Confirm `app/api/webhooks/stripe` handles ACSS PaymentIntent/Payout events similarly.
 - [ ] Confirm the SettlementExecutor updates balances **only** on settlement (never in the provider).
 
-### 4.3 Stripe SDK version pin (VERIFY)
+### 4.3 Stripe SDK version pin (🟢 DONE)
 
-- [ ] `lib/stripe.ts` pins `apiVersion: '2026-06-24.dahlia'`. Ensure the installed
-      `stripe` package version's types include that version (pin `stripe` in
-      package.json to a matching version) so CI/`tsc` build is clean. This currently
-      type-errors against `stripe@22.2.1`.
+- [x] `lib/stripe.ts` pins `apiVersion: '2026-06-24.dahlia'`. Installed
+      `stripe@22.3.2` declares that exact string as `LatestApiVersion`, and
+      `pnpm typecheck` is clean against it. No dependency change was required.
+      The earlier type error was against `stripe@22.2.1`, which is not what
+      `package.json` or the lockfile install.
 
 ### 4.4 Ready and gated (🟢 DONE)
 
@@ -124,14 +125,18 @@ Set these in the Vercel project (Production scope). **Add the two live flags LAS
 | `DATABASE_URL` | Supabase prod pooler URL | Production database |
 | `JWT_SECRET` | long random string | Rotate from any dev value |
 | `PLAID_CLIENT_ID` | live client id | |
-| `PLAID_SECRET` | **production** secret | not sandbox |
-| `NEXT_PUBLIC_PLAID_ENV` | `production` | |
+| `PLAID_SECRET` | **production** secret | not sandbox; must match `PLAID_ENV` |
+| `PLAID_ENV` | `production` | Code reads `PLAID_ENV`, not `NEXT_PUBLIC_PLAID_ENV`. Unset means **sandbox**. Set `production` only when the secret above is the production secret. |
 | `WISE_API_KEY` | production token | |
 | `WISE_ENV` | `production` | |
 | `PLAID_TOKEN_ENCRYPTION_KEY` | 64-char hex | `openssl rand -hex 32`; never reuse dev key |
 | `STRIPE_SECRET_KEY` | `sk_live_…` | live key triggers real KYC automatically |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | from live webhook endpoint |
+| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | `pk_live_…` | Browser key for the Canadian ACSS mandate. Must belong to the same Stripe account as `STRIPE_SECRET_KEY`. |
 | `NEXT_PUBLIC_APP_URL` | `https://<prod-domain>` | no trailing slash |
+| `MANNA_ENV` | leave unset | Unset resolves to production. The only sandbox opt-in is the exact value `sandbox`, and `VERCEL_ENV=production` overrides it. Do not set `sandbox` on the production go-live. |
+| `CRON_SECRET` | long random string | `Authorization: Bearer` credential for `/api/cron/*`. The reconciliation cron returns 503 when this is unset. |
+| `REDIS_URL` | Redis connection URL | Optional. When set, rate limits use Redis; when unset, they use an in-process map. |
 | `PLAID_TRANSFER_LIVE` | `true` | ⚠️ SET LAST — enables live US ACH |
 | `CA_EFT_LIVE` | `true` | ⚠️ SET LAST — enables live CA EFT |
 
