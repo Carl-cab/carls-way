@@ -8,31 +8,20 @@ import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
 import type { SettlementEventType } from '@/lib/settlement';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 import { markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
+import { plaidWebhookJwksUrl, resolvePlaidEnvironment } from '@/lib/plaid-env';
 
 // ─── JWK cache ────────────────────────────────────────────────────────────────
 // Plaid rotates keys infrequently; cache the JWKS for the lifetime of the
 // serverless function instance to avoid a round-trip on every webhook.
-const PLAID_ENV = process.env.PLAID_ENV || 'sandbox';
-const PLAID_JWKS_URL =
-  PLAID_ENV === 'production'
-    ? 'https://production.plaid.com/webhook_verification_key/get'
-    : 'https://sandbox.plaid.com/webhook_verification_key/get';
-
-// jose's createRemoteJWKSet handles caching and key rotation automatically.
-// We use the standard JWKS endpoint exposed by Plaid.
-// Plaid also exposes a standard JWKS-compatible endpoint at:
-//   https://{env}.plaid.com/.well-known/jwks.json  (undocumented but stable)
-// We use the documented /webhook_verification_key/get approach via the SDK
-// but fall back to the well-known endpoint for jose's RemoteJWKSet.
-const PLAID_JWKS_WELL_KNOWN =
-  PLAID_ENV === 'production'
-    ? 'https://production.plaid.com/.well-known/jwks.json'
-    : 'https://sandbox.plaid.com/.well-known/jwks.json';
-
+// The host comes from resolvePlaidEnvironment(), the same helper the Plaid
+// client uses, so the verifier and the API cannot point at different environments.
 let _jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+let _jwksEnv: string | null = null;
 function getJWKS() {
-  if (!_jwks) {
-    _jwks = createRemoteJWKSet(new URL(PLAID_JWKS_WELL_KNOWN));
+  const env = resolvePlaidEnvironment();
+  if (!_jwks || _jwksEnv !== env) {
+    _jwksEnv = env;
+    _jwks = createRemoteJWKSet(new URL(plaidWebhookJwksUrl()));
   }
   return _jwks;
 }

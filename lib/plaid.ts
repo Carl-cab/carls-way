@@ -1,6 +1,7 @@
-import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from 'plaid';
+import { Configuration, PlaidApi, Products, CountryCode } from 'plaid';
 import { getSql } from '@/lib/db';
 import { decryptToken } from '@/lib/encryption';
+import { plaidApiBasePath, resolvePlaidEnvironment } from '@/lib/plaid-env';
 
 export const RELINK_REQUIRED_MESSAGE =
   'Please re-link your bank account before using transfers. Your account needs to be reconnected for security reasons.';
@@ -42,21 +43,43 @@ export async function requireEncryptedBankToken(
   return decryptToken(plaid_access_token_enc);
 }
 
-const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID || '';
-const PLAID_SECRET = process.env.PLAID_SECRET || '';
-const PLAID_ENV = (process.env.PLAID_ENV || 'production') as keyof typeof PlaidEnvironments;
+/**
+ * Built on first use, and rebuilt if PLAID_ENV changes, so the host always
+ * comes from resolvePlaidEnvironment() rather than from a default captured
+ * at import time.
+ */
+let cachedClient: { env: string; client: PlaidApi } | null = null;
 
-const config = new Configuration({
-  basePath: PlaidEnvironments[PLAID_ENV],
-  baseOptions: {
-    headers: {
-      'PLAID-CLIENT-ID': PLAID_CLIENT_ID,
-      'PLAID-SECRET': PLAID_SECRET,
-    },
+export function getPlaidClient(): PlaidApi {
+  const env = resolvePlaidEnvironment();
+  if (!cachedClient || cachedClient.env !== env) {
+    cachedClient = {
+      env,
+      client: new PlaidApi(
+        new Configuration({
+          basePath: plaidApiBasePath(),
+          baseOptions: {
+            headers: {
+              'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID || '',
+              'PLAID-SECRET': process.env.PLAID_SECRET || '',
+            },
+          },
+        }),
+      ),
+    };
+  }
+  return cachedClient.client;
+}
+
+export const plaidClient: PlaidApi = new Proxy({} as PlaidApi, {
+  get(_target, property) {
+    const client = getPlaidClient() as unknown as Record<PropertyKey, unknown>;
+    const value = client[property];
+    return typeof value === 'function'
+      ? (value as (...args: unknown[]) => unknown).bind(client)
+      : value;
   },
 });
-
-export const plaidClient = new PlaidApi(config);
 
 export const PLAID_PRODUCTS: Products[] = [Products.Auth, Products.Transactions];
 export const PLAID_COUNTRY_CODES: CountryCode[] = [CountryCode.Us, CountryCode.Ca];
