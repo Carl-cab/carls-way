@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import { getStripe } from '@/lib/stripe';
 import { getSql } from '@/lib/db';
+import { logRedactedError } from '@/lib/plaid-error';
 
 /**
  * POST /api/stripe/setup-intent
@@ -76,7 +77,7 @@ export async function POST() {
       customer_id: customerId,
     });
   } catch (err) {
-    console.error('Stripe setup-intent error:', err);
+    logRedactedError('Stripe setup-intent error:', err);
     return NextResponse.json({ error: 'Failed to create setup intent' }, { status: 500 });
   }
 }

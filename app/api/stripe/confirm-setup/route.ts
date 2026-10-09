@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { getStripe } from '@/lib/stripe';
 import { getSql } from '@/lib/db';
+import { logRedactedError } from '@/lib/plaid-error';
 
 /**
  * POST /api/stripe/confirm-setup
@@ -81,7 +82,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true, payment_method_id: paymentMethodId });
   } catch (err) {
-    console.error('Stripe confirm-setup error:', err);
+    logRedactedError('Stripe confirm-setup error:', err);
     return NextResponse.json({ error: 'Failed to confirm setup intent' }, { status: 500 });
   }
 }

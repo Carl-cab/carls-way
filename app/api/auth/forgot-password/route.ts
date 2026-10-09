@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { createPasswordResetToken } from '@/lib/password-reset';
 import { sendPasswordResetEmail } from '@/lib/email';
+import { logRedactedError } from '@/lib/plaid-error';
 
 export async function POST(req: Request) {
   try {
@@ -22,7 +23,7 @@ export async function POST(req: Request) {
         const token = await createPasswordResetToken(user.id);
         await sendPasswordResetEmail(user.email, token);
       } catch (err) {
-        console.error('Password reset email error:', err);
+        logRedactedError('Password reset email error:', err);
         // Don't expose email errors
       }
     }
@@ -30,7 +31,7 @@ export async function POST(req: Request) {
     // Always return success, never reveal if email exists
     return NextResponse.json({ success: true });
   } catch (err) {
-    console.error('Forgot password error:', err);
+    logRedactedError('Forgot password error:', err);
     return NextResponse.json({ success: true });
   }
 }

@@ -8,6 +8,7 @@ import {
   type UserRegion,
 } from '@/lib/providers/TransferProviderFactory';
 import type { TransferProvider } from '@/lib/providers/TransferProvider';
+import { logRedactedError } from '@/lib/plaid-error';
 
 /**
  * Submit a confirmed live transfer to its provider.
@@ -175,7 +176,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       status: 'processing',
     });
   } catch (err) {
-    console.error('Transfer execute error:', err);
+    logRedactedError('Transfer execute error:', err);
     return NextResponse.json({ error: 'Failed to execute transfer' }, { status: 500 });
   }
 }

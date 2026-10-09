@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { getSql } from '@/lib/db';
 import { getStripe } from '@/lib/stripe';
+import { logRedactedError } from '@/lib/plaid-error';
 import {
   canAutoVerifyIdentity,
   assertKycProviderConfigured,
@@ -91,7 +92,7 @@ export async function POST() {
 
     // Provider failure (Stripe unreachable, rejected the request, invalid key at
     // the API boundary, ...) also leaves the user unverified.
-    console.error('KYC create-session error:', err);
+    logRedactedError('KYC create-session error:', err);
     return NextResponse.json({ error: 'Failed to create verification session' }, { status: 500 });
   }
 }

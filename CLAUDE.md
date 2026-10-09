@@ -265,7 +265,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `JWT_SECRET` | Long random string for signing `manna-token` JWTs |
 | `PLAID_CLIENT_ID` | From Plaid dashboard |
 | `PLAID_SECRET` | Production secret from Plaid dashboard |
-| `NEXT_PUBLIC_PLAID_ENV` | Must be `production` |
+| `PLAID_ENV` | Unset means sandbox. Set `production` only when `PLAID_SECRET` is the production secret. |
 | `WISE_API_KEY` | API token from Wise developer settings |
 | `WISE_ENV` | Set to `production` |
 | `PLAID_TOKEN_ENCRYPTION_KEY` | 64-character hex string (32 bytes) used to AES-256-GCM encrypt Plaid access tokens before storing in `bank_accounts.plaid_access_token_enc`. Generate with `openssl rand -hex 32`. |

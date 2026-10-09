@@ -21,6 +21,7 @@
 //   - Settlement: 2–5 business days for ACSS
 
 import { getStripe } from '@/lib/stripe';
+import { redactedErrorMessage } from '@/lib/plaid-error';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import {
@@ -617,9 +618,9 @@ export class CanadianEFTProvider implements TransferProvider {
           const stripe = getStripe();
           await stripe.paymentIntents.cancel(ref);
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const code = redactedErrorMessage(err);
           throw new Error(
-            `Transfer cannot be cancelled — it may already be processing. Contact support. (${msg})`
+            `Transfer cannot be cancelled — it may already be processing. Contact support. (${code})`
           );
         }
       } else if (ref.startsWith('po_')) {

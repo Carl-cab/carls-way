@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { logRedactedError } from '@/lib/plaid-error';
 import { auditLog } from '@/lib/auth';
 import {
   type MinorUnits, MoneyValidationError, assertMoneyCurrency, minorUnitsToMajorNumber,
@@ -147,7 +148,7 @@ async function resolveFxRate(
       throw new Error('No Wise API key configured');
     }
   } catch (err) {
-    console.warn('Wise API unavailable, using fallback rates:', err);
+    logRedactedError('Wise API unavailable, using fallback rates:', err, 'warn');
     // Fallback rates (updated periodically in production via cron)
     const fallbackRates: Record<string, string> = {
       'USD_CAD': '1.365',
