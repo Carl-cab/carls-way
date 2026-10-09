@@ -55,6 +55,16 @@ export const SETTLEMENT_TRANSITIONS: SettlementTransitionRule[] = [
     description: 'Transfer was cancelled before completion',
   },
   {
+    // A return can arrive while the intent is still `processing`: Plaid's
+    // `posted` state is in-flight and does not settle the wallet, so the
+    // local row may never have passed through `settled`.
+    from: 'processing',
+    to: 'returned',
+    eventTypes: ['returned'],
+    allowedActors: 'webhook',
+    description: 'Provider returned the transfer before local settlement',
+  },
+  {
     // A provider can report failure before the local write recording the
     // reference lands. Without this the intent would be stranded in
     // `submitting` with no route out.

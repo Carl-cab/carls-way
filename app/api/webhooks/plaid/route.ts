@@ -4,8 +4,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import type postgres from 'postgres';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
-import { SettlementOrchestrator, SettlementExecutor } from '@/lib/settlement';
-import type { SettlementEventType } from '@/lib/settlement';
+import { handlePlaidTransferSettlement } from '@/lib/settlement/handle-plaid-settlement';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 import { markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
 import { plaidWebhookJwksUrl, resolvePlaidEnvironment } from '@/lib/plaid-env';
@@ -195,107 +194,19 @@ async function handleTransferEventStatusUpdate(
   webhookId: string,
   correlationId: string
 ) {
-  // Phase B3.1/B3.2a/B3.2b/B3.3: Handle transfer settlement events
-  // Extract transfer_id from payload data
-  const transferId = (payload.data as Record<string, unknown>)?.transfer_id as
-    | string
-    | undefined;
-  if (!transferId) {
-    console.warn('[plaid-webhook] TRANSFER event missing transfer_id');
-    return;
-  }
+  const data = payload.data as Record<string, unknown> | undefined;
+  const transferId = typeof data?.transfer_id === 'string' ? data.transfer_id : undefined;
+  const eventStatus = typeof data?.status === 'string' ? data.status : undefined;
 
-  try {
-    const eventStatus = (payload.data as Record<string, unknown>)?.status as
-      | string
-      | undefined;
-
-    // Create normalized event for settlement orchestration
-    const normalizedEvent = {
-      provider: 'plaid',
-      provider_event_id: webhookId,
-      provider_reference_id: transferId,
-      eventType: mapPlaidTransferStatus(eventStatus),
-      timestamp: new Date(),
-      isRetry: false, // TODO: track retry status from Plaid headers if available
-    };
-
-    // B2: Get settlement plan
-    // Milestone 2: Pass correlation ID through settlement pipeline
-    const orchestrator = new SettlementOrchestrator();
-    const plan = await orchestrator.orchestrateSettlement(normalizedEvent, correlationId);
-
-    // B3.1: Execute status transition
-    const executor = new SettlementExecutor();
-    const statusResult = await executor.executeSettlementPlan(plan);
-
-    // B3.2a: Execute ledger creation
-    const ledgerResult = await executor.executeLedgerCreation(plan);
-
-    // B3.2b: Execute balance update
-    const balanceResult = await executor.executeBalanceUpdate(plan);
-
-    // B3.3: Execute notification (non-blocking)
-    const notificationResult = await executor.executeNotification(plan);
-
-    // B3.3: Execute velocity reversal (non-blocking)
-    const velocityResult = await executor.executeVelocityReversal(plan);
-
-    // Log execution results
-    console.log(
-      `[plaid-webhook] Transfer settlement executed: ${transferId} → ${statusResult.newStatus}`,
-      {
-        status: statusResult,
-        ledger: ledgerResult,
-        balance: balanceResult,
-        notification: notificationResult,
-        velocity: velocityResult,
-      }
-    );
-
-    await auditLog(
-      0, // Will be replaced by intent owner in future phases
-      'transfer_settlement_executed',
-      {
-        transfer_id: transferId,
-        status_transition: `${statusResult.previousStatus} → ${statusResult.newStatus}`,
-        status_updated: statusResult.updated,
-        ledger_entries_created: ledgerResult.entriesCreated,
-        balance_updated: balanceResult.balanceUpdated,
-        balance_currency: balanceResult.currency,
-        balance_amount: balanceResult.amountApplied,
-        notification_sent: notificationResult.notificationSent,
-        velocity_reversed: velocityResult.velocityReversed,
-      }
-    );
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[plaid-webhook] Transfer event handler error: ${errMsg}`, err);
-  }
-}
-
-function mapPlaidTransferStatus(status: string | undefined): SettlementEventType {
-  // Map Plaid transfer status to settlement event type
-  switch (status) {
-    case 'submitted':
-      return 'submitted';
-    case 'authorized':
-      return 'authorized';
-    case 'pending':
-      return 'pending';
-    case 'posted':
-      return 'posted';
-    case 'settled':
-      return 'settled';
-    case 'failed':
-      return 'failed';
-    case 'returned':
-      return 'returned';
-    case 'cancelled':
-      return 'cancelled';
-    default:
-      return 'submitted';
-  }
+  // Returns the settlement result instead of swallowing it. A retryable
+  // failure must not be marked processed by the route, or Plaid will not
+  // redeliver and the transfer never settles.
+  return handlePlaidTransferSettlement({
+    providerEventId: webhookId,
+    transferId,
+    plaidStatus: eventStatus,
+    correlationId,
+  });
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -412,7 +323,24 @@ export async function POST(req: NextRequest) {
       } else if (webhook_type === 'ITEM' && webhook_code === 'PENDING_EXPIRATION') {
         await handleItemPendingExpiration(payload);
       } else if (webhook_type === 'TRANSFER' && webhook_code === 'STATUS_UPDATE') {
-        await handleTransferEventStatusUpdate(payload, webhookId, correlationId);
+        const settlement = await handleTransferEventStatusUpdate(payload, webhookId, correlationId);
+        if (settlement.retryable) {
+          // The handler already recorded the failure. 500 is what makes Plaid
+          // redeliver; marking the row processed here would drop the transfer.
+          return NextResponse.json(
+            { error: 'Settlement failed; event will be retried' },
+            { status: 500 },
+          );
+        }
+        if (settlement.markedProcessed) {
+          await sql`
+            UPDATE provider_webhook_events
+            SET processing_status = 'processed',
+                processed_at = NOW()
+            WHERE id = ${eventRowId}
+          `;
+        }
+        return NextResponse.json({ received: true, outcome: settlement.outcome });
       } else {
         // Unhandled event type — log and acknowledge
         console.log(`[plaid-webhook] Unhandled event: ${eventType}`);

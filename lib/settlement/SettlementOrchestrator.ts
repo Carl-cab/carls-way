@@ -295,26 +295,42 @@ export class SettlementOrchestrator {
       type: string;
       amount: string;
       currency: string;
+      status: SettlementStatus;
     },
     nextStatus: SettlementStatus
   ): SettlementPlan['updateBalance'] {
-    // Only settled transfers update balances (in Phase B3)
-    if (nextStatus !== 'settled') {
-      return { shouldUpdate: false };
+    if (nextStatus === 'settled') {
+      const operation =
+        intent.type === 'add_money'
+          ? ('add' as const)
+          : ('subtract' as const);
+
+      return {
+        shouldUpdate: true,
+        currency: intent.currency,
+        amount: intent.amount,
+        operation,
+      };
     }
 
-    // Determine operation based on transfer type
-    const operation =
-      intent.type === 'add_money'
-        ? ('add' as const)
-        : ('subtract' as const);
+    // Unwind a wallet change only when settlement already applied one.
+    // A return that arrives while the intent is still processing never
+    // credited or debited the wallet, so there is nothing to reverse.
+    if (nextStatus === 'returned' && intent.status === 'settled') {
+      const operation =
+        intent.type === 'add_money'
+          ? ('subtract' as const)
+          : ('add' as const);
 
-    return {
-      shouldUpdate: true,
-      currency: intent.currency,
-      amount: intent.amount,
-      operation,
-    };
+      return {
+        shouldUpdate: true,
+        currency: intent.currency,
+        amount: intent.amount,
+        operation,
+      };
+    }
+
+    return { shouldUpdate: false };
   }
 
   /**
@@ -327,6 +343,7 @@ export class SettlementOrchestrator {
       type: string;
       amount: string;
       currency: string;
+      status: SettlementStatus;
     },
     nextStatus: SettlementStatus
   ): SettlementPlan['createLedgerEntries'] {
@@ -345,7 +362,7 @@ export class SettlementOrchestrator {
       };
     }
 
-    if (nextStatus === 'returned') {
+    if (nextStatus === 'returned' && intent.status === 'settled') {
       return {
         shouldCreate: true,
         entries: [
