@@ -2,6 +2,7 @@ import { Configuration, PlaidApi, Products, CountryCode } from 'plaid';
 import { getSql } from '@/lib/db';
 import { decryptToken } from '@/lib/encryption';
 import { plaidApiBasePath, resolvePlaidEnvironment } from '@/lib/plaid-env';
+import { cleanPlaidCredential, logPlaidCredentialDiagnostic } from '@/lib/plaid-credentials';
 
 export const RELINK_REQUIRED_MESSAGE =
   'Please re-link your bank account before using transfers. Your account needs to be reconnected for security reasons.';
@@ -53,6 +54,7 @@ let cachedClient: { env: string; client: PlaidApi } | null = null;
 export function getPlaidClient(): PlaidApi {
   const env = resolvePlaidEnvironment();
   if (!cachedClient || cachedClient.env !== env) {
+    logPlaidCredentialDiagnostic('init');
     cachedClient = {
       env,
       client: new PlaidApi(
@@ -60,8 +62,8 @@ export function getPlaidClient(): PlaidApi {
           basePath: plaidApiBasePath(),
           baseOptions: {
             headers: {
-              'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID || '',
-              'PLAID-SECRET': process.env.PLAID_SECRET || '',
+              'PLAID-CLIENT-ID': cleanPlaidCredential(process.env.PLAID_CLIENT_ID),
+              'PLAID-SECRET': cleanPlaidCredential(process.env.PLAID_SECRET),
             },
           },
         }),
