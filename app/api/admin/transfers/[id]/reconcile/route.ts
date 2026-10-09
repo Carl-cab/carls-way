@@ -5,6 +5,7 @@ import { getSql } from '@/lib/db';
 import { PlaidTransferProvider } from '@/lib/providers/PlaidTransferProvider';
 import { CanadianEFTProvider } from '@/lib/providers/CanadianEFTProvider';
 import { errorMessage } from '@/lib/errors';
+import { logRedactedError } from '@/lib/plaid-error';
 
 /**
  * POST /api/admin/transfers/[id]/reconcile
@@ -79,7 +80,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
     }
     // Reconciliation failing leaves the intent exactly as it was — still in
     // `submitting`, still reconcilable. It is never downgraded to `failed`.
-    console.error('Transfer reconciliation error:', err);
+    logRedactedError('Transfer reconciliation error:', err);
     return NextResponse.json(
       { error: 'Reconciliation failed', detail: errorMessage(err) },
       { status: 500 },

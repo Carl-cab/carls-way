@@ -15,6 +15,7 @@
 // All balance changes happen only after settlement via SettlementOrchestrator/Executor.
 
 import { plaidClient, requireEncryptedBankToken } from '@/lib/plaid';
+import { plaidErrorDetails } from '@/lib/plaid-error';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import {
@@ -550,9 +551,9 @@ export class PlaidTransferProvider implements TransferProvider {
           transfer_id: provider_reference_id as string,
         });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const code = plaidErrorDetails(err).error_code ?? 'rejected';
         throw new Error(
-          `Transfer cannot be cancelled — it may already be posted or settled. Contact support. (${msg})`
+          `Transfer cannot be cancelled — it may already be posted or settled. Contact support. (${code})`
         );
       }
     }

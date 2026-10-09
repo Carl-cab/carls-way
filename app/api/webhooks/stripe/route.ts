@@ -9,6 +9,7 @@ import {
 } from '@/lib/settlement/handle-stripe-settlement';
 import type { StripeEventLike } from '@/lib/settlement/stripe-event-adapter';
 import { isSettlementEvent } from '@/lib/settlement/stripe-event-adapter';
+import { logRedactedError, redactedErrorMessage } from '@/lib/plaid-error';
 
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -39,7 +40,7 @@ export async function POST(req: NextRequest) {
   try {
     event = getStripe().webhooks.constructEvent(rawBody, sig, WEBHOOK_SECRET);
   } catch (err) {
-    console.error('Stripe webhook signature verification failed:', err);
+    logRedactedError('Stripe webhook signature verification failed:', err);
     return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 400 });
   }
 
@@ -152,7 +153,7 @@ export async function POST(req: NextRequest) {
     //   - the KYC updates are idempotent, scoped by kyc_session_id.
     //
     // This also matches the Plaid webhook, which already returns 500 here.
-    console.error('Stripe webhook handler error:', err);
+    logRedactedError('Stripe webhook handler error:', err);
     // C1.4: track the failure so repeated failures dead-letter instead of
     // retrying forever unseen. Failure tracking must never mask the 500 —
     // the 500 is what makes Stripe redeliver.
@@ -161,7 +162,7 @@ export async function POST(req: NextRequest) {
         const outcome = await markProviderEventFailed(
           'stripe',
           event.id,
-          err instanceof Error ? err : String(err)
+          redactedErrorMessage(err)
         );
         if (outcome.deadLettered) {
           console.error(

@@ -163,7 +163,7 @@ These must be configured in the Vercel dashboard:
 - `JWT_SECRET`: Secret key for signing auth cookies
 - `PLAID_CLIENT_ID`: Plaid API Client ID
 - `PLAID_SECRET`: Plaid API Secret (Production)
-- `NEXT_PUBLIC_PLAID_ENV`: Must be set to `production`
+- `PLAID_ENV`: Unset means sandbox. Set to `production` only when `PLAID_SECRET` is the production secret.
 - `WISE_API_KEY`: Wise API token
 - `WISE_ENV`: Set to `production`
 

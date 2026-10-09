@@ -219,7 +219,7 @@ Event intake (B1) ✅ → Settlement planning (B2) ✅ → Status transitions (B
 | `JWT_SECRET` | Set ✅ |
 | `PLAID_CLIENT_ID` | Set ✅ |
 | `PLAID_SECRET` | Set ✅ |
-| `NEXT_PUBLIC_PLAID_ENV` | Set ✅ |
+| `PLAID_ENV` | Code reads `PLAID_ENV`. Unset means sandbox. |
 | `WISE_API_KEY` | Set ✅ |
 | `WISE_ENV` | Set ✅ |
 | `PLAID_TOKEN_ENCRYPTION_KEY` | Set ✅ |

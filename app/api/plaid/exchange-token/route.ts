@@ -3,6 +3,7 @@ import { getAuthUser, auditLog } from '@/lib/auth';
 import { plaidClient } from '@/lib/plaid';
 import { getSql } from '@/lib/db';
 import { encryptToken } from '@/lib/encryption';
+import { logRedactedError } from '@/lib/plaid-error';
 
 export async function POST(req: NextRequest) {
   try {
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
     await auditLog(user.userId, 'bank_account_linked', { institution, country, accountCount: savedAccounts.length });
     return NextResponse.json({ success: true, accounts: savedAccounts });
   } catch (err) {
-    console.error('Plaid exchange token error:', err);
+    logRedactedError('Plaid exchange token error:', err);
     return NextResponse.json({ error: 'Failed to link bank account' }, { status: 500 });
   }
 }

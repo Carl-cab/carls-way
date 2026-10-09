@@ -8,6 +8,7 @@ import { handlePlaidTransferSettlement } from '@/lib/settlement/handle-plaid-set
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 import { markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
 import { plaidWebhookJwksUrl, resolvePlaidEnvironment } from '@/lib/plaid-env';
+import { logRedactedError, redactedErrorMessage } from '@/lib/plaid-error';
 
 // ─── JWK cache ────────────────────────────────────────────────────────────────
 // Plaid rotates keys infrequently; cache the JWKS for the lifetime of the
@@ -355,8 +356,8 @@ export async function POST(req: NextRequest) {
       `;
       return NextResponse.json({ received: true });
     } catch (handlerErr) {
-      const errMsg = handlerErr instanceof Error ? handlerErr.message : String(handlerErr);
-      console.error(`[plaid-webhook] Handler error for ${eventType}:`, handlerErr);
+      const errMsg = redactedErrorMessage(handlerErr);
+      logRedactedError(`[plaid-webhook] Handler error for ${eventType}:`, handlerErr);
 
       // C1.4: track the failure; after MAX_WEBHOOK_RETRIES the event moves to
       // the dead-letter queue. Return 500 so Plaid redelivers — previously a
@@ -376,7 +377,7 @@ export async function POST(req: NextRequest) {
 
     // Unreachable: both paths above return.
   } catch (err) {
-    console.error('[plaid-webhook] Database error:', err);
+    logRedactedError('[plaid-webhook] Database error:', err);
     // Return 500 so Plaid will retry
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
