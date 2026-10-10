@@ -390,3 +390,19 @@ CREATE TABLE IF NOT EXISTS webhook_dead_letters (
   requeued_at TIMESTAMPTZ,
   UNIQUE(provider, provider_event_id)
 );
+
+-- ADDITIVE, IDEMPOTENT MIGRATION. Plaid Transfer event cursor.
+-- TRANSFER_EVENTS_UPDATE carries no transfer id or status. The webhook calls
+-- /transfer/event/sync and stores the largest handled event_id here.
+-- cursor_id 'default' is the single stream cursor. Does not touch money
+-- columns. Also created by lib/db.ts initializeSchema() and
+-- app/api/migrate/route.ts. after_id 0 means "start of the stream".
+CREATE TABLE IF NOT EXISTS plaid_transfer_event_cursors (
+  cursor_id TEXT PRIMARY KEY,
+  after_id BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO plaid_transfer_event_cursors (cursor_id, after_id)
+VALUES ('default', 0)
+ON CONFLICT (cursor_id) DO NOTHING;

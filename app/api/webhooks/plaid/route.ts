@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import type postgres from 'postgres';
 import { getSql } from '@/lib/db';
 import { auditLog } from '@/lib/auth';
 import { handlePlaidTransferSettlement } from '@/lib/settlement/handle-plaid-settlement';
+import { syncPlaidTransferEvents } from '@/lib/settlement/plaid-transfer-event-sync';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
-import { markProviderEventFailed, getProviderEvent } from '@/lib/provider-events';
+import { markProviderEventFailed, markProviderEventProcessed, getProviderEvent, recordProviderEvent } from '@/lib/provider-events';
 import { plaidWebhookJwksUrl, resolvePlaidEnvironment } from '@/lib/plaid-env';
 import { logRedactedError, redactedErrorMessage } from '@/lib/plaid-error';
 
@@ -210,6 +211,58 @@ async function handleTransferEventStatusUpdate(
   });
 }
 
+/**
+ * TRANSFER_EVENTS_UPDATE is Plaid's real Transfer webhook. The body never
+ * carries a transfer id or a status, and it is identical across deliveries,
+ * so the body-hash idempotency key below would treat every later notification
+ * as a duplicate of the first and stop syncing. Each verified delivery gets
+ * its own row and then runs the cursor sync. Settlement idempotency stays in
+ * applySettlementAtomically.
+ */
+async function handleTransferEventsUpdate(
+  correlationId: string,
+  payload: PlaidWebhookPayload,
+  eventType: string,
+) {
+  const deliveryId = `plaid_transfer_events_update:${randomUUID()}`;
+  try {
+    await recordProviderEvent('plaid', deliveryId, eventType, {
+      correlationId,
+      rawPayload: {
+        webhook_type: payload.webhook_type,
+        webhook_code: payload.webhook_code,
+        environment: payload.environment ?? null,
+      },
+    });
+    const sync = await syncPlaidTransferEvents(correlationId);
+    if (sync.retryable) {
+      await markProviderEventFailed(
+        'plaid',
+        deliveryId,
+        sync.reason ?? 'Plaid transfer event sync did not finish',
+      );
+      return NextResponse.json(
+        { error: 'Settlement failed; event will be retried' },
+        { status: 500 },
+      );
+    }
+    await markProviderEventProcessed('plaid', deliveryId);
+    return NextResponse.json({ received: true, synced: true });
+  } catch (err) {
+    const errMsg = redactedErrorMessage(err);
+    logRedactedError('[plaid-webhook] TRANSFER_EVENTS_UPDATE sync failed:', err);
+    try {
+      await markProviderEventFailed('plaid', deliveryId, errMsg);
+    } catch (markErr) {
+      logRedactedError('[plaid-webhook] Failed to record sync failure:', markErr);
+    }
+    return NextResponse.json(
+      { error: 'Settlement failed; event will be retried' },
+      { status: 500 },
+    );
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface PlaidWebhookPayload {
@@ -220,6 +273,7 @@ interface PlaidWebhookPayload {
   removed_transactions?: string[];
   error?: { error_code?: string; error_message?: string } | null;
   consent_expiration_time?: string;
+  environment?: string;
   data?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -264,6 +318,13 @@ export async function POST(req: NextRequest) {
 
   const { webhook_type, webhook_code } = payload;
   const eventType = `${webhook_type}.${webhook_code}`;
+
+  // The real Transfer webhook is handled before the body-hash dedupe. Its
+  // body does not change between deliveries, so that hash would swallow every
+  // notification after the first. Signature verification has already passed.
+  if (webhook_type === 'TRANSFER' && webhook_code === 'TRANSFER_EVENTS_UPDATE') {
+    return handleTransferEventsUpdate(correlationId, payload, eventType);
+  }
 
   // 4. Idempotency — use a stable event ID derived from the JWT kid + body hash
   //    Plaid does not send a unique event ID in the body, so we derive one from
