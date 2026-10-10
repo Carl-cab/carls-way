@@ -45,6 +45,16 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
   'auth:2fa': { limit: 5, windowSeconds: 900 },
   'money:send': { limit: 20, windowSeconds: 3600 },
   'money:split-pay': { limit: 30, windowSeconds: 3600 },
+  // Submitting a confirmed transfer to a real payment rail. Keyed on the user
+  // id, not the IP, because this is always an authenticated call and the limit
+  // should follow the account rather than the network it dials from.
+  //
+  // Lower than money:send because each submission is one bank instruction, and
+  // a legitimate person executes a handful of transfers an hour at most. The
+  // claim already stops a single intent being submitted twice — this bounds how
+  // many *different* intents one account can push at a rail in a burst, which
+  // the claim says nothing about.
+  'money:transfer-execute': { limit: 10, windowSeconds: 3600 },
   'contacts:add': { limit: 30, windowSeconds: 3600 },
   // Provider webhooks are server-to-server and signature-verified, but an
   // unauthenticated flood still burns compute before verification rejects it.
