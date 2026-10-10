@@ -57,8 +57,10 @@ interface SyncPage {
 
 function readNonNegativeSafeInteger(value: unknown): number | null {
   if (typeof value === 'bigint') {
-    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-    return Number(value);
+    const asNumber = Number(value);
+    // Number() rounds past MAX_SAFE_INTEGER, and isSafeInteger rejects that.
+    if (!Number.isSafeInteger(asNumber) || asNumber < 0) return null;
+    return asNumber;
   }
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
     return value;
