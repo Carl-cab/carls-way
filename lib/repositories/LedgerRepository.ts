@@ -349,7 +349,7 @@ export class LedgerRepository extends BaseRepository {
    * @returns Total count
    */
   async countByUser(userId: number): Promise<number> {
-    return this.count('ledger_entries', `user_id = ${userId}`);
+    return this.count('ledger_entries', this.sql`user_id = ${userId}`);
   }
 
   /**
