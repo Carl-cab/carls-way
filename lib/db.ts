@@ -279,6 +279,28 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
       UNIQUE(provider, provider_event_id)
     )
   `;
+  // ── Plaid Transfer event cursor (TRANSFER_EVENTS_UPDATE) ─────────────────
+  // ADDITIVE, IDEMPOTENT MIGRATION. Does not touch money columns.
+  //
+  // Plaid's real Transfer webhook carries no transfer id and no status. The
+  // handler calls /transfer/event/sync and stores the largest event_id it has
+  // finished here. Until this table exists, that handler cannot persist a
+  // cursor and answers 500. CREATE TABLE IF NOT EXISTS plus the seed insert
+  // are safe to re-run. cursor_id 'default' is the single stream cursor.
+  // The same statements are in app/api/migrate/route.ts and
+  // lib/__tests__/helpers/test-schema.sql.
+  await sql`
+    CREATE TABLE IF NOT EXISTS plaid_transfer_event_cursors (
+      cursor_id TEXT PRIMARY KEY,
+      after_id BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`
+    INSERT INTO plaid_transfer_event_cursors (cursor_id, after_id)
+    VALUES ('default', 0)
+    ON CONFLICT (cursor_id) DO NOTHING
+  `;
   // ── Correlation ids (Milestone 2) ────────────────────────────────────────
   // One id threaded through a financial event's whole lifecycle, so an
   // operator can trace an intent to its webhooks to its ledger rows.

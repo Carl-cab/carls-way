@@ -12,7 +12,10 @@ FROM (VALUES
   ('velocity_checks'), ('audit_logs'), ('fx_rates'),
   ('notifications'), ('provider_webhook_events'),
   ('webhook_dead_letters'), ('ledger_entries'),
-  ('password_reset_tokens')
+  ('password_reset_tokens'),
+  -- TRANSFER_EVENTS_UPDATE cursor. Missing means the real Plaid Transfer
+  -- webhook cannot persist its sync position and answers 500.
+  ('plaid_transfer_event_cursors')
 ) AS t(name)
 LEFT JOIN information_schema.tables c
   ON c.table_schema = 'public' AND c.table_name = t.name

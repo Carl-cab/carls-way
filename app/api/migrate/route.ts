@@ -469,6 +469,32 @@ export async function GET(req: NextRequest) {
       )
     `;
 
+    // ── Plaid Transfer event cursor (TRANSFER_EVENTS_UPDATE) ───────────────
+    // ADDITIVE, IDEMPOTENT MIGRATION. Does not touch money columns.
+    //
+    // Plaid's real Transfer webhook is TRANSFER_EVENTS_UPDATE. The body has
+    // no transfer id and no status; it only says that new events exist. The
+    // webhook handler calls /transfer/event/sync and stores the largest
+    // event_id it has finished in this table. Until an operator runs this
+    // migration, that handler cannot persist a cursor and answers 500, so
+    // live Transfer settlement via the real webhook cannot complete.
+    //
+    // Safe to re-run: CREATE TABLE IF NOT EXISTS, then INSERT ... ON CONFLICT
+    // DO NOTHING. cursor_id 'default' is the single stream cursor. The same
+    // statements live in lib/db.ts initializeSchema() for fresh databases.
+    await sql`
+      CREATE TABLE IF NOT EXISTS plaid_transfer_event_cursors (
+        cursor_id TEXT PRIMARY KEY,
+        after_id BIGINT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`
+      INSERT INTO plaid_transfer_event_cursors (cursor_id, after_id)
+      VALUES ('default', 0)
+      ON CONFLICT (cursor_id) DO NOTHING
+    `;
+
     // Phase C1: Live provider columns
     // bank_accounts: Plaid account_id (for Transfer API) and Stripe payment method (for ACSS)
     await sql`ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS plaid_account_id TEXT`;
