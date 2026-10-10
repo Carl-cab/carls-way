@@ -15,6 +15,15 @@ import { getSql } from '@/lib/db';
 import { RepositoryError, DuplicateKeyError, NotFoundError, TransactionError } from './types';
 
 /**
+ * A composable `sql` fragment, as produced by a tagged template.
+ *
+ * Used where a helper accepts part of a query: taking this instead of `string`
+ * means the values inside are bound parameters and cannot be assembled by
+ * concatenation.
+ */
+type SqlFragment = ReturnType<ReturnType<typeof getSql>>;
+
+/**
  * Base repository class.
  *
  * All repositories should extend this class to ensure consistent:
@@ -193,34 +202,54 @@ export abstract class BaseRepository {
   }
 
   /**
-   * Check if a record with the given condition exists.
+   * Check if a record matching `condition` exists.
+   *
+   * `condition` is a postgres.js fragment, not a string, and that is the whole
+   * point. These two helpers took `condition: string` and interpolated it into
+   * `sql.unsafe`, so the only way to call them was to build SQL by
+   * concatenation — which `UserRepository.emailExists` duly did with a
+   * request-shaped value:
+   *
+   *     this.exists('users', `email = '${email.toLowerCase()}'`)
+   *
+   * An address of `x' OR '1'='1` made that condition always true, and because
+   * `sql.unsafe` executes stacked statements the same hole ran arbitrary SQL,
+   * not merely a boolean oracle. A fragment carries its values as bound
+   * parameters, so the type now refuses the shape that caused it:
+   *
+   *     this.exists('users', this.sql`email = ${email.toLowerCase()}`)
+   *
+   * The table name is an identifier and cannot be a parameter, so it goes
+   * through `sql()`, which quotes it.
    *
    * @param tableName Table to check
-   * @param condition WHERE clause condition
-   * @returns true if record exists, false otherwise
+   * @param condition A `sql` fragment for the WHERE clause
+   * @returns true if a record exists, false otherwise
    */
-  protected async exists(tableName: string, condition: string): Promise<boolean> {
+  protected async exists(tableName: string, condition: SqlFragment): Promise<boolean> {
     return this.executeQuery(async () => {
-      const result = await this.sql.unsafe(
-        `SELECT 1 FROM ${tableName} WHERE ${condition} LIMIT 1`
-      );
+      const result = await this.sql`
+        SELECT 1 FROM ${this.sql(tableName)} WHERE ${condition} LIMIT 1
+      `;
       return result.length > 0;
     }, `exists in ${tableName}`);
   }
 
   /**
-   * Count records matching a condition.
+   * Count records matching `condition`.
+   *
+   * Takes a `sql` fragment for the same reason as `exists()` above.
    *
    * @param tableName Table to count from
-   * @param condition WHERE clause condition
+   * @param condition A `sql` fragment for the WHERE clause
    * @returns Count of matching records
    */
-  protected async count(tableName: string, condition: string): Promise<number> {
+  protected async count(tableName: string, condition: SqlFragment): Promise<number> {
     return this.executeQuery(async () => {
-      const result = await this.sql.unsafe<{ count: number }[]>(
-        `SELECT COUNT(*) as count FROM ${tableName} WHERE ${condition}`
-      );
-      return result[0]?.count || 0;
+      const result = await this.sql<{ count: number }[]>`
+        SELECT COUNT(*)::int AS count FROM ${this.sql(tableName)} WHERE ${condition}
+      `;
+      return result[0]?.count ?? 0;
     }, `count in ${tableName}`);
   }
 }
