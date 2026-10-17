@@ -196,3 +196,90 @@ jobs:
             exit 0
           fi
           echo "::warning::Full-tree audit could not reach the advisory service. Check Dependabot alerts."
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history, not just the PR's commits. A credential committed and
+      # then "removed" in a later commit is still in the pack and still
+      # exposed, so a diff-only scan would call that clean. 92 non-merge
+      # commits scan in under a second, so there is no reason to narrow it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Pinned by version AND verified by the checksum from the release's own
+      # manifest, so the job cannot silently start running a different binary.
+      # Using the published binary rather than a marketplace action keeps the
+      # control free of a third-party action's licensing and release cadence.
+      - name: Install Gitleaks ${{ env.GITLEAKS_VERSION }}
+        env:
+          GITLEAKS_VERSION: 8.21.2
+          GITLEAKS_SHA256: 5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL --retry 3 -o gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+
+      # --redact is load-bearing, not hygiene. Measured: without it the full
+      # secret appears twice in the JSON report, which CI logs and artifacts
+      # retain; with it, zero times. A scanner that prints the credential it
+      # found turns a private leak into a public one.
+      - name: Scan history for committed credentials
+        id: scan
+        run: |
+          set -uo pipefail
+          ./gitleaks git \
+            --config .gitleaks.toml \
+            --redact \
+            --no-banner \
+            --report-format sarif \
+            --report-path gitleaks.sarif \
+            --exit-code 1 \
+            . && echo "clean=true" >> "$GITHUB_OUTPUT" || echo "clean=false" >> "$GITHUB_OUTPUT"
+
+      # The SARIF is uploaded whatever the outcome so a reviewer can see WHERE
+      # without the value being disclosed. Redaction already applied above.
+      - name: Upload redacted findings
+        if: always() && hashFiles('gitleaks.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+          retention-days: 14
+
+      # A detection is an incident, not a failing lint rule. Deleting the line
+      # and force-pushing does NOT remediate it: the credential was pushed to a
+      # remote, is in the reflog and any fork or clone, and must be assumed
+      # compromised. The only remediation is rotation at the provider.
+      - name: Fail with the incident requirement
+        if: steps.scan.outputs.clean != 'true'
+        run: |
+          echo "::error title=Credential detected::A credential was found in this repository's history."
+          cat <<'MSG'
+          REQUIRED, IN THIS ORDER:
+
+            1. ROTATE the credential at the provider now (Plaid, Stripe, Wise,
+               Supabase, or the JWT signing secret). Assume it is compromised
+               from the moment it was pushed. Removing the commit does not
+               un-expose it — it is in the remote, the reflog, and any clone or
+               fork.
+            2. Record the exposure: what credential, which commit, when pushed,
+               when rotated, and what it could reach while valid.
+            3. Only then clean the history, if you choose to.
+            4. If it reached production, treat it as an access incident and
+               review the provider's logs for use you did not authorise.
+
+          The redacted SARIF artifact on this run shows the file and line
+          without the value. Do not paste the value into an issue or a PR.
+
+          If this is a genuine false positive, add a NARROW exception to
+          .gitleaks.toml keyed on the literal, not the path — a path exemption
+          would also hide a real credential added to that file later.
+          MSG
+          exit 1

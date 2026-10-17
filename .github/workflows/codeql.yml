@@ -1,0 +1,66 @@
+name: CodeQL
+
+# Static application security testing.
+#
+# Separate from ci.yml because CodeQL needs `security-events: write` to publish
+# alerts, and granting that to the job that runs the test suite would widen the
+# token for every step in it.
+#
+# This repository is public, so CodeQL and code scanning are available at no
+# cost. On a private repository the same workflow requires GitHub Advanced
+# Security and would fail without it — worth knowing before anyone makes the
+# repository private.
+
+on:
+  pull_request:
+    branches: [master, 'integration/**']
+  push:
+    branches: [master, 'integration/**']
+  schedule:
+    # Weekly, so a newly published query finds an existing latent issue rather
+    # than waiting for someone to touch the file. 04:17 Monday to avoid the
+    # on-the-hour queue.
+    - cron: '17 4 * * 1'
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze javascript-typescript
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      # Least privilege: only what CodeQL needs to read the code and publish
+      # alerts. No write access to contents, packages, or deployments.
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # security-extended over the default suite. The default is tuned for
+          # a low false-positive rate on general code; this application takes
+          # untrusted request bodies, builds SQL, verifies webhook signatures
+          # and moves money, so the extra precision-medium queries are worth
+          # the extra noise. security-and-quality was considered and rejected:
+          # it adds maintainability queries that would bury security findings.
+          queries: security-extended
+
+      # No custom build. Next.js + TypeScript is analysed from source, and a
+      # production build here would duplicate ci.yml's build step for no
+      # analytical gain.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript

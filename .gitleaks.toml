@@ -1,0 +1,40 @@
+# Gitleaks configuration.
+#
+# Scope: this repository is a payments application. A leaked Plaid, Stripe,
+# Wise, Supabase or JWT credential is an incident, not a lint failure — see the
+# runbook paragraph in .github/workflows/ci.yml, which the CI job prints on a
+# detection.
+#
+# The default ruleset is used in full. Nothing is disabled: a narrower ruleset
+# would have to be re-audited every time Gitleaks adds a provider, and this
+# repository already integrates four of them.
+
+[extend]
+useDefault = true
+
+# ── Allowlist ───────────────────────────────────────────────────────────────
+#
+# Deliberately keyed on the exact synthetic literal, NOT on a path.
+#
+# A path allowlist would exempt every secret in that file, including a real one
+# pasted there later. Keying on the literal means the exemption covers this one
+# value and nothing else: a genuine Stripe key in the same test still fails the
+# scan.
+#
+# `sk_live_abc123` appears twice in lib/__tests__/security-kyc.test.ts, in a
+# table of key shapes that asserts the KYC gate's behaviour — alongside
+# `pk_live_abc123` (wrong key type), `sk_live_` (truncated), `sk_prod_abc123`
+# (wrong mode) and `xsk_live_abc123` (leading junk). A real Stripe secret has a
+# 24-plus character random body; `abc123` cannot be one. Verified by reading the
+# file, not inferred from the name.
+#
+# Removing the fixture instead of allowlisting it was considered and rejected:
+# the tests assert that a live-shaped key does NOT enable auto-verification,
+# which is a live-money safety property, and it needs a live-shaped literal to
+# assert against.
+[allowlist]
+description = "Synthetic Stripe key shapes used by the KYC configuration tests"
+regexTarget = "match"
+regexes = [
+  '''sk_live_abc123''',
+]
