@@ -1,6 +1,12 @@
 # Manna — Current Status
 
-Last updated: 2026-06-28 (Phase B3.2b Settlement Balance Executor complete)
+Last updated: 2026-10-17 — verified against commit `40946fb` (PR #55).
+Command-level evidence for this state: `docs/audits/2026-10-17-baseline.md`.
+
+The header previously read "2026-06-28 (Phase B3.2b Settlement Balance
+Executor complete)" while the body had been revised as recently as
+2026-10-09 — a stale date on current content, which is the more
+misleading of the two failure modes.
 
 ---
 

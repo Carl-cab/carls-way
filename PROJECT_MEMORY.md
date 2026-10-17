@@ -130,3 +130,72 @@ None currently tracked. ~~Request acceptance used legacy `balance` field~~, ~~Ac
 - **Phase B3.1: Settlement Status Executor** (2026-06-28): `lib/settlement/SettlementExecutor.ts` created with `executeSettlementPlan(plan)` method that applies status transitions from SettlementPlan to transfer_intents table (Phase B3.1 scope: status-only, no balance/ledger/notifications/velocity); `SettlementExecutionResult` interface contains: success (boolean), intentId (string), previousStatus (SettlementStatus), newStatus (SettlementStatus), updated (whether status actually changed), reason (string), error (optional); executor queries transfer_intents by intentId, checks if plan has error (returns failure), checks if already at target status (idempotent: returns success without update), executes UPDATE transfer_intents SET status = nextStatus, updated_at = NOW(), returns success result; handles plan errors gracefully with structured error responses; wired into `POST /api/webhooks/plaid` TRANSFER/STATUS_UPDATE handler; `handleTransferEventStatusUpdate()` creates NormalizedEvent with provider='plaid', provider_event_id=webhookId, provider_reference_id=transferId, eventType from mapPlaidTransferStatus, timestamp=now, isRetry=false; calls orchestrator.orchestrateSettlement(event) to get plan, calls executor.executeSettlementPlan(plan) to apply status, logs result via auditLog; `mapPlaidTransferStatus()` maps Plaid status strings to SettlementEventType (submitted→submitted, authorized→authorized, pending→pending, posted→posted, settled→settled, failed→failed, returned→returned, cancelled→cancelled, default→submitted); critical constraint: status transitions only — NO balance updates, NO ledger entries, NO notifications, NO velocity reversal, NO provider API calls; lint clean (0 new errors, 8 pre-existing warnings), build clean; Phase B3.2 will implement balance and ledger executors; Phase B3.3 will implement notification and velocity executors; full settlement flow: webhook receive (B1) → orchestrate plan (B2) → execute status (B3.1) → execute balance/ledger (B3.2) → execute notifications/velocity (B3.3)
 - **Phase B3.2a: Settlement Ledger Executor** (2026-06-28): `lib/settlement/SettlementExecutor.ts` extended with `executeLedgerCreation(plan)` method for Phase B3.2a (ledger entries only, no balance updates); `LedgerExecutionResult` interface: success, intentId, entriesCreated (count), reason, error; added `provider_event_id` column to ledger_entries table with UNIQUE constraint `(transfer_intent_id, provider_event_id, entry_type)` to prevent duplicate ledger entries from duplicate webhook events; SettlementPlan interface updated to include provider (string) and provider_event_id (string) fields passed from NormalizedEvent; SettlementOrchestrator.orchestrateSettlement updated to pass provider and provider_event_id through enrichOutcomeWithSideEffects to SettlementPlan; ledger executor maps entry_type from plan format (transfer_settlement, transfer_reversal) to database format (add_money_settled, cash_out_settled, transfer_returned, transfer_failed) based on nextStatus; executor atomically inserts all ledger entries via Promise.all with postgres.js queries; uses ON CONFLICT (transfer_intent_id, provider_event_id, entry_type) DO NOTHING for idempotency (duplicate webhook events safely skipped); entries link to transfer_intents via transfer_intent_id, include provider and provider_reference for audit trail; wired into webhook handler: handleTransferEventStatusUpdate calls executor.executeSettlementPlan (B3.1) then executor.executeLedgerCreation (B3.2a); ledger result logged alongside status result in auditLog; critical constraint: ledger entries only — NO balance updates, NO notifications, NO velocity reversal, NO provider calls; lib/db.ts and app/api/migrate/route.ts updated to add provider_event_id column and UNIQUE constraint; lint clean (0 new errors, 8 pre-existing warnings), build clean; Next: Phase B3.2b will implement balance updates from SettlementPlan
 - **Phase B3.2b: Settlement Balance Executor** (2026-06-28): `lib/settlement/SettlementExecutor.ts` extended with `executeBalanceUpdate(plan)` method for Phase B3.2b (balance updates only, no ledger/notification/velocity); `BalanceExecutionResult` interface: success, intentId, balanceUpdated, currency, amountApplied, operation (add/subtract), reason, error; added `balance_processed_at` (TIMESTAMPTZ) and `balance_processing_error` (TEXT) columns to provider_webhook_events table for idempotency tracking; eventRows declared at method scope for accessibility in catch block; validation: currency must be USD or CAD, amount must be positive, user must own intent, status must allow balance action; idempotency strategy: check balance_processed_at before executing, return idempotent success if already processed, set balance_processed_at = NOW() after successful update; atomic balance update using SQL arithmetic (balance_cad = balance_cad + amount) via single UPDATE statement with RETURNING to verify user exists; special handling: Add Money increases balance on settled, Cash Out skipped with success (no live executeTransfer implementation yet), Returned applies reversal (subtracts balance if previously settled); error tracking: balance_processing_error column updated with error message if execution fails; wired into webhook handler: handleTransferEventStatusUpdate calls executor.executeBalanceUpdate after executeLedgerCreation, logs all three results (status/ledger/balance) in auditLog; critical constraint: balance updates only — NO ledger entries, NO notifications, NO velocity reversal, NO provider API calls; lib/db.ts and app/api/migrate/route.ts updated to add balance tracking columns; lint clean (0 new errors, 8 pre-existing warnings), build clean; Next: Phase B3.3 will implement notifications and velocity reversal
+
+---
+
+## Gap in this record: 2026-06-28 → 2026-10-17
+
+This file's entries stop at Phase B3.2b (2026-06-28). PRs #13 through #55
+landed in the interval and are not recorded here. Rather than reconstruct them
+from memory — which would risk inventing detail — this entry states what the
+gap contains and where the authoritative account lives.
+
+**Where to look instead.** Each merged PR body carries its own evidence:
+the defect, how its existence was demonstrated, the tests added, and the
+mutation results. `git log --merges master` lists them in order. The verified
+current state is `CURRENT_STATUS.md` and `CLAUDE.md`; a dated, command-level
+reconciliation is `docs/audits/2026-10-17-baseline.md`.
+
+**Two claims above are now false** and are corrected here rather than edited in
+place, so the historical record stays intact:
+
+- Phase A3 records `PlaidTransferProvider` and `CanadianEFTProvider` as
+  placeholders that "throw Not implemented on all methods". Both are now fully
+  implemented and env-gated behind `PLAID_TRANSFER_LIVE` and `CA_EFT_LIVE`,
+  which default off.
+- Several entries place the `TransferProvider` interface at
+  `lib/transfers/types.ts`. It is `lib/providers/TransferProvider.ts`;
+  `lib/transfers/` is a deprecated compatibility layer that re-exports from
+  `lib/providers/TransferProviderFactory.ts`. Do not add to it.
+
+**Shape of the interval**, for orientation only — the PR bodies are the record:
+money columns converted from float to `NUMERIC` with a driver-level numeric
+parser; password reset repaired; a login timing oracle and an
+`X-Forwarded-For` rate-limit bypass closed; ledger atomicity for splits and
+P2P; JWT revocation via `users.token_version`; the schema-source drift class
+closed and guarded by `lib/__tests__/schema-source-parity.test.ts`; the live
+transfer execute endpoint added behind both gates; Plaid credential redaction
+and a single Plaid host resolver; the C1.4 webhook dead-letter queue reaching
+the production migration path; money-column DDL removed from cold start; the
+anonymous schema-repair path narrowed to an auth-column allowlist; and a SQL
+injection in `BaseRepository.exists()`/`count()` closed at the type level.
+
+**Going forward.** A material change appends an entry here naming its purpose,
+the financial or security behaviour affected, tests run and results, commit SHA
+and PR, migration impact, unresolved findings, rollback requirement, and the
+next recommended action. An audit appends a dated file under `docs/audits/`; an
+architectural decision appends one under `docs/decisions/`.
+
+### 2026-10-17 — Migration execution gate
+
+- **Purpose.** `app/api/migrate/route.ts` is production's only schema-change
+  mechanism and nothing executed its statements. Demonstrated: changing one
+  statement to `ADD COLUM` left typecheck clean and all 735 tests passing.
+- **Financial/security behaviour affected.** None directly. It closes a
+  verification gap in the path that every production schema change travels —
+  the path CLAUDE.md already records five incidents against.
+- **Tests run.** New `lib/__tests__/migrate-route-execution.test.ts`, 7 cases.
+  Full suite 51 → 52 files, 735 → 742 tests, all passing on a fresh database.
+  Typecheck clean, lint 0 errors / 28 warnings, build clean, `pnpm audit --prod`
+  clean. Mutation-checked both ways: the `ADD COLUM` typo fails 2 of 7; removing
+  the `webhook_dead_letters` `CREATE` fails 1 of 7.
+- **Migration impact.** None. The change adds a test and two documents; it
+  alters no schema and requires no production migration.
+- **Unresolved findings.** Secret scanning and SAST are still absent from CI.
+  No `.claude/` hooks exist. Branch protection cannot be verified or set from a
+  session and remains an owner action. Production-dependent verification (cron
+  and `CRON_SECRET`, Redis backend, DLQ and reconciliation drills) is NOT RUN,
+  not passed — this environment cannot reach production.
+- **Rollback.** Revert the commit. Nothing stateful changes.
+- **Next recommended action.** Secret scanning in CI, as the smallest remaining
+  control with a real failure mode behind it.

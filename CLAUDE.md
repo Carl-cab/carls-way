@@ -180,6 +180,16 @@ has twice hidden a failure that CI then found on a clean one. Also available:
 `pnpm run typecheck` and `pnpm run lint` (0 errors; ~28 unused-variable
 warnings are tolerated).
 
+`lib/__tests__/migrate-route-execution.test.ts` runs the real
+`GET /api/migrate` handler with the real database layer, so the statements that
+production depends on are executed rather than only parsed. Before it existed,
+changing one statement to `ADD COLUM` left typecheck clean and all 735 tests
+passing — the failure would have surfaced only when an operator ran the endpoint
+against production. Its declaration check is deliberately **static**, compared
+against `scripts/verify-migrate.sql`: a catalogue check cannot detect a removed
+statement, because the fixture and `initializeSchema()` create the same tables
+regardless. See `docs/decisions/0001-execute-the-migration-in-ci.md`.
+
 `lib/__tests__/schema-source-parity.test.ts` enforces the two-source rule
 below mechanically: it parses every object `app/api/migrate/route.ts`
 guarantees and requires all of them on a database built by
@@ -187,6 +197,36 @@ guarantees and requires all of them on a database built by
 presence. It checks one direction only — the migrate route is the authority on
 what the live database holds — so an object added to `lib/db.ts` and *not* to
 the route is still yours to catch by hand.
+
+---
+
+## Documentation Governance
+
+Four files carry different kinds of truth, and conflating them is how a session
+ends up acting on a stale claim:
+
+| File | Holds | Rule |
+|---|---|---|
+| `CLAUDE.md` | Engineering instruction | Must match the tree. Correct it in place when the code moves |
+| `CURRENT_STATUS.md` | Verified current state | Carries the commit it was verified against |
+| `PROJECT_MEMORY.md` | Chronological record | Append-only. Correct an old entry by appending, never by editing history |
+| `PRODUCTION_READINESS_BACKLOG.md` | Prioritized backlog | Re-mark an item only when a change verifies it, naming the evidence |
+
+Plus `docs/audits/<date>-<topic>.md` for dated, command-level audit evidence and
+`docs/decisions/NNNN-<slug>.md` for architectural decisions.
+
+A material change appends a `PROJECT_MEMORY.md` entry naming: purpose and scope;
+financial or security behaviour affected; tests run and their results; commit
+SHA and PR; migration impact; unresolved findings; rollback requirement; next
+recommended action.
+
+Two habits this repo has learned the hard way. **Do not re-mark completion state
+from memory** — reconstructing 686 lines of backlog status without re-verifying
+manufactures exactly the false confidence the audit record exists to prevent;
+mark the file stale and point at the evidence instead. And **a stale date on
+current content is worse than an obviously old file**, because it invites trust:
+`CURRENT_STATUS.md` read "2026-06-28" for months while its body was being
+revised.
 
 ---
 

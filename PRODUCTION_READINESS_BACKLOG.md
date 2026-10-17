@@ -4,6 +4,28 @@
 **Total Effort:** 1,532+ hours  
 **Target:** Ship Phase C1-C2 in 4 weeks, C3-C4 in 8 weeks, C5 in 12 weeks
 
+> ## ⚠️ Completion states below are stale as of 2026-10-17
+>
+> This file has not been revised since 2026-06-28. PRs #13–#55 landed in the
+> interval, so several items marked outstanding here are done and a few are
+> framed against an architecture that has since moved — the `TransferProvider`
+> interface relocated to `lib/providers/`, and both live providers are
+> implemented rather than placeholders.
+>
+> **The priority ordering below is still useful; its completion marks are not.**
+> For what is actually verified, use, in this order:
+>
+> 1. `docs/audits/2026-10-17-baseline.md` — dated, command-level evidence with
+>    each requirement classified VERIFIED COMPLETE / IMPLEMENTED BUT UNVERIFIED
+>    / PARTIAL / MISSING / EXTERNALLY BLOCKED.
+> 2. `CLAUDE.md` → **Current Priorities** and **Known gaps, deliberately open**.
+> 3. `CURRENT_STATUS.md`.
+>
+> This notice is deliberately a pointer rather than a rewrite: re-marking 686
+> lines of completion state from memory would manufacture exactly the false
+> confidence the audit record exists to prevent. Items are re-marked here only
+> when a change verifies them, with the evidence named.
+
 ---
 
 ## CRITICAL (Ship before any real money movement)
