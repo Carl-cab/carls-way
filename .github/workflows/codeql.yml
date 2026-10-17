@@ -41,6 +41,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No later Git operation needs the job token, so do not leave it in
+          # .git/config for the analysis steps.
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3

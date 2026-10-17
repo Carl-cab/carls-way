@@ -32,9 +32,20 @@ useDefault = true
 # the tests assert that a live-shaped key does NOT enable auto-verification,
 # which is a live-money safety property, and it needs a live-shaped literal to
 # assert against.
+# Anchored, and against the default target (the extracted secret) rather than
+# the whole rule match. Both details were established by measurement, not
+# preference:
+#
+#   unanchored, regexTarget = "match"  fixture suppressed | sk_live_abc123ZZZZ… ALSO suppressed
+#   anchored,   regexTarget = "match"  fixture DETECTED   | — allowlist broken, CI fails on the fixtures
+#   anchored,   default target         fixture suppressed | sk_live_abc123ZZZZ… DETECTED  ← this
+#
+# The first row is the bug: a real credential that merely *begins* with the
+# fixture was hidden. The second is why the obvious fix is wrong — with
+# regexTarget = "match" the pattern is tested against the entire match,
+# including the assignment around it, so anchors never hit.
 [allowlist]
 description = "Synthetic Stripe key shapes used by the KYC configuration tests"
-regexTarget = "match"
 regexes = [
-  '''sk_live_abc123''',
+  '''^sk_live_abc123$''',
 ]

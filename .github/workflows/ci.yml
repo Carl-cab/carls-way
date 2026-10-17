@@ -201,6 +201,12 @@ jobs:
     name: secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # Least privilege. The default token is broader than a read-only scan needs,
+    # and this job runs a downloaded binary over the whole history.
+    permissions:
+      contents: read
+
     steps:
       # Full history, not just the PR's commits. A credential committed and
       # then "removed" in a later commit is still in the pack and still
@@ -209,6 +215,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # This job downloads and executes a third-party binary. Checkout
+          # persists the job token into .git/config by default, where that
+          # binary could read it; nothing here performs a later Git operation
+          # that needs it.
+          persist-credentials: false
 
       # Pinned by version AND verified by the checksum from the release's own
       # manifest, so the job cannot silently start running a different binary.
@@ -243,8 +254,31 @@ jobs:
             --exit-code 1 \
             . && echo "clean=true" >> "$GITHUB_OUTPUT" || echo "clean=false" >> "$GITHUB_OUTPUT"
 
-      # The SARIF is uploaded whatever the outcome so a reviewer can see WHERE
-      # without the value being disclosed. Redaction already applied above.
+      # --redact does NOT cover everything the SARIF writer emits. Measured on
+      # gitleaks 8.21.2: when a credential also appears in the commit message,
+      # the full value survives at
+      # .runs[].results[].partialFingerprints.commitMessage even with --redact.
+      # An uploaded artifact would therefore publish the credential that the
+      # scan was supposed to protect. Strip that field before upload.
+      #
+      # partialFingerprints only aids alert de-duplication across runs; the
+      # file, line and rule — everything a reviewer needs to locate the finding
+      # — live elsewhere in the document and are untouched.
+      - name: Strip commit messages from the SARIF
+        if: always() && hashFiles('gitleaks.sarif') != ''
+        run: |
+          set -euo pipefail
+          jq 'del(.runs[]?.results[]?.partialFingerprints.commitMessage)' \
+            gitleaks.sarif > gitleaks.redacted.sarif
+          mv gitleaks.redacted.sarif gitleaks.sarif
+          if jq -e '[.runs[]?.results[]?.partialFingerprints.commitMessage] | length > 0' \
+               gitleaks.sarif >/dev/null; then
+            echo "::error::commitMessage survived stripping; refusing to upload"
+            exit 1
+          fi
+
+      # Uploaded whatever the outcome so a reviewer can see WHERE without the
+      # value being disclosed.
       - name: Upload redacted findings
         if: always() && hashFiles('gitleaks.sarif') != ''
         uses: actions/upload-artifact@v4

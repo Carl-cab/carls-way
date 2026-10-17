@@ -213,7 +213,11 @@ architectural decision appends one under `docs/decisions/`.
   third, `.claude/` session hooks, is still open.
 - **Financial/security behaviour affected.** No application code changed. Both
   additions are CI controls. A committed Plaid, Stripe, Wise, Supabase or JWT
-  credential now blocks the pull request instead of reaching `master`.
+  credential now **fails the pull request's checks**. It does not yet *block* a
+  merge: that requires the owner to mark `secret scan` a required check in
+  branch protection, which cannot be done from a session. Until then the
+  control is a loud signal, not a gate — CodeRabbit was right to flag the
+  original wording here as an overclaim.
 - **Tests run.** Suite unchanged at 53 files / 743 tests, typecheck clean, lint
   0 errors / 28 warnings. The security controls were validated by synthetic
   finding rather than by assertion — see below.
@@ -258,8 +262,27 @@ failed is not known to work:
 | Clean history with the config | 0 findings, exit 0 | 0 findings, exit 0 |
 | Real-shaped Stripe key in a new file | detected, exit 1 | detected, exit 1 |
 | Real-shaped key in the **allowlisted** file | still detected | still detected, exit 1 |
-| `--redact` on | value absent from report | 0 occurrences |
-| `--redact` off | value present | 2 occurrences |
+| `--redact` on, `dir` mode | value absent from report | 0 occurrences |
+| `--redact` off, `dir` mode | value present | 2 occurrences |
+| `--redact` on, `git` mode, secret in the commit message | value absent | **1 occurrence — leak** |
+| same, after the `jq` strip | value absent | 0 occurrences |
+
+The third row is a correction to this entry's first version, found by
+CodeRabbit and then reproduced. `--redact` does not cover everything the SARIF
+writer emits: when a credential also appears in a commit message, the full
+value survives at `.runs[].results[].partialFingerprints.commitMessage`. The
+original measurement used `dir` mode on a file and so missed the mode CI
+actually runs. The job now strips that field before upload and fails if it
+survives. `partialFingerprints` only aids alert de-duplication; file, line and
+rule are untouched, verified by reading `a.ts:1` back out of the stripped
+document.
+
+A second correction from the same review: the allowlist regex was unanchored,
+so a real credential merely *beginning* with `sk_live_abc123` was suppressed —
+reproduced, then fixed by anchoring against the extracted secret rather than
+the whole rule match. The suggested remedy of anchoring with
+`regexTarget = "match"` was measured and rejected: it breaks the allowlist
+outright, so CI would fail on the known fixtures.
 
 The third row is the one that matters: it proves the exception is narrow rather
 than a blanket path exemption. The last two show `--redact` is load-bearing — a
