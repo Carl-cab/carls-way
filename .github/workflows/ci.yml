@@ -265,6 +265,7 @@ jobs:
       # file, line and rule — everything a reviewer needs to locate the finding
       # — live elsewhere in the document and are untouched.
       - name: Strip commit messages from the SARIF
+        id: sanitize
         if: always() && hashFiles('gitleaks.sarif') != ''
         run: |
           set -euo pipefail
@@ -277,10 +278,17 @@ jobs:
             exit 1
           fi
 
-      # Uploaded whatever the outcome so a reviewer can see WHERE without the
-      # value being disclosed.
+      # Uploaded whatever the SCAN's outcome — a clean run and a detection are
+      # both worth keeping — but only if sanitization actually succeeded.
+      #
+      # `hashFiles(...) != ''` alone was not enough, and the difference matters:
+      # if jq or mv fails, the ORIGINAL unsanitized file is still on disk and
+      # still hashes non-empty, so the upload would publish exactly the
+      # unredacted commit message the step above exists to remove. Gating on the
+      # step's outcome means a broken sanitizer loses the artifact rather than
+      # leaking through it.
       - name: Upload redacted findings
-        if: always() && hashFiles('gitleaks.sarif') != ''
+        if: always() && steps.sanitize.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: gitleaks-sarif

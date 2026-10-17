@@ -277,6 +277,15 @@ survives. `partialFingerprints` only aids alert de-duplication; file, line and
 rule are untouched, verified by reading `a.ts:1` back out of the stripped
 document.
 
+A third correction, from the re-review of the fix itself: the upload was gated
+on `hashFiles('gitleaks.sarif') != ''`, which a *failed* sanitization still
+satisfies — jq or mv failing leaves the original file on disk, so the unredacted
+commit message would have been published by the very step added to remove it.
+Demonstrated locally: after a deliberately broken `jq` filter the step exits 3
+and the leak is still in the file. The upload now requires
+`steps.sanitize.outcome == 'success'`, so a broken sanitizer loses the artifact
+instead of leaking through it.
+
 A second correction from the same review: the allowlist regex was unanchored,
 so a real credential merely *beginning* with `sk_live_abc123` was suppressed —
 reproduced, then fixed by anchoring against the extracted secret rather than
