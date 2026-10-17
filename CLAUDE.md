@@ -42,6 +42,7 @@ Client (React 19)
 | `lib/plaid.ts` | Plaid client configuration and `requireEncryptedBankToken()` helper |
 | `lib/stripe.ts` | Stripe client singleton (`getStripe()`) and `isStripeLive()` sandbox/live KYC gate |
 | `lib/encryption.ts` | AES-256-GCM `encryptToken`/`decryptToken` helpers for Plaid access tokens |
+| `lib/jsonb.ts` | `jsonbParam()` for binding a `jsonb` parameter and `readJsonbRecord()` for reading a column that may hold a legacy string scalar — see the JSONB rule under Coding Standards |
 | `lib/ledger.ts` | Passive audit ledger helpers: `createLedgerEntry()`, `createLedgerPair()`, `getLedgerBalance()`, `backfillOpeningBalances()` |
 | `lib/provider-events.ts` | Webhook event deduplication: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()` |
 | `lib/providers/TransferProvider.ts` | Core `TransferProvider` interface — all 7 methods each provider must implement |
@@ -116,6 +117,27 @@ this.exists('users', `email = '${email.toLowerCase()}'`);
 
 A table or column name is an identifier and cannot be a bound parameter; pass it
 through `sql(name)`, which quotes it.
+
+**JSONB columns** take a document, never stringified text. `JSON.stringify(v)`
+bound to a `jsonb` column stores a jsonb **string scalar**, so `jsonb_typeof`
+is `'string'` and every `->>`, `#>>`, `@>` and index lookup silently returns
+NULL or no rows — no error anywhere. Adding a `::jsonb` cast does **not** fix
+it. Use `jsonbParam()` from `lib/jsonb.ts`:
+
+```ts
+// Correct
+VALUES (${userId}, ${action}, ${jsonbParam(sql, metadata)})
+
+// Never do this — stores '"{\"ip\":\"1.2.3.4\"}"', and metadata->>'ip' is NULL
+VALUES (${userId}, ${action}, ${metadata ? JSON.stringify(metadata) : null})
+```
+
+Both audit writers did this, and it was invisible because the paired reader
+`JSON.parse`d the scalar back — application reads were correct while the column
+was unqueryable. A reader of a column that may still hold legacy rows must use
+`readJsonbRecord()`; a bare `JSON.parse` on a corrected row throws
+`SyntaxError`. `provider_webhook_events.raw_payload` still has this defect. See
+`docs/decisions/0002-normalize-audit-jsonb-additively.md`.
 
 **Authentication** in API routes always starts with:
 ```ts
@@ -337,6 +359,19 @@ arbitrary end user.
   `lib/rbac/AuditLogRepository.ts:359`, but it compares `COUNT(*)` to
   `MAX(id)` — it detects deletes, not updates. Deleting the stub or
   implementing it is a judgement call about what immutability should assert.
+- **Nothing enforces audit immutability.** Measured on a database built from
+  the schema sources: no trigger, no rewrite rule, no RLS (`relrowsecurity =
+  f` on both audit tables), no `REVOKE` in any schema source, no hash chaining.
+  The application's single DB role can `UPDATE` and `DELETE` audit rows with no
+  residue. Append-only is a convention here, so do not claim tamper resistance.
+- `provider_webhook_events.raw_payload` is still double-encoded by its writer —
+  the same defect the audit writers had. Its readers already tolerate both
+  shapes (`lib/provider-events.ts:160`,
+  `lib/external-settlement-reconciliation.ts`), so nothing is broken today, but
+  SQL-side access to that column returns NULL.
+- Historical audit rows written before the jsonb fix remain string scalars.
+  They are evidence and are deliberately not rewritten, so `readJsonbRecord()`
+  keeps its legacy branch for as long as those rows are retained.
 - The schema-parity test type-checks only `ALTER`-added columns. A type
   mismatch on a column declared inside a `CREATE TABLE` body in the migrate
   route would not be caught.
@@ -394,7 +429,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `velocity_checks` | Rolling transaction volume per user for rate limiting |
 | `ledger_entries` | Passive audit log of all financial movement — immutable, references transactions or transfer_intents |
 | `provider_webhook_events` | Webhook event deduplication — provider + event_id uniqueness prevents duplicate processing |
-| `audit_logs` | Immutable system audit trail |
+| `audit_logs` | System audit trail. Append-only **by convention only** — no trigger, rule, RLS policy or `REVOKE` enforces it, and the application's single DB role can `UPDATE` and `DELETE` these rows. Do not describe it as immutable |
 | `webhook_dead_letters` | Payloads of webhook events that exhausted their retries, for operator review and requeue |
 | `plaid_transfer_event_cursors` | Sync position for `TRANSFER_EVENTS_UPDATE`. Missing means the Plaid Transfer webhook cannot persist its position and answers 500 |
 | `transfer_recovery_flags` | Marks intents needing reconciliation |

@@ -202,3 +202,66 @@ architectural decision appends one under `docs/decisions/`.
 - **Rollback.** Revert the commit. Nothing stateful changes.
 - **Next recommended action.** Secret scanning in CI, as the smallest remaining
   control with a real failure mode behind it.
+
+### 2026-10-17 — Audit JSONB double-encoding repair
+
+- **Commit / PR.** `fix/audit-jsonb-double-encoding` — SHA and PR number
+  appended on push, per the rule the #56 entry recorded.
+- **Purpose and scope.** Both audit writers bound `JSON.stringify(value)` to a
+  `jsonb` column, which stores a jsonb **string scalar** rather than a
+  document. Measured: `jsonb_typeof` = `'string'`, `metadata->>'ip'` = NULL,
+  `m::text` = `'"{\"ip\":\"1.2.3.4\"}"'`. Fixed at both sites
+  (`lib/auth.ts` → `audit_logs.metadata`, `lib/rbac/AuditLogRepository.ts` →
+  `admin_audit_logs.changes`) via a new `lib/jsonb.ts`.
+- **Why it was invisible.** The paired reader did `JSON.parse(row.changes)`,
+  which decoded the scalar back and exactly compensated the writer.
+  Application reads were correct; only SQL-side access was broken, silently,
+  because a JSON path operator against a string scalar returns NULL rather than
+  erroring. The writer could **not** be fixed alone: with a corrected writer the
+  row returns as an object, `JSON.parse` of an object throws `SyntaxError`, and
+  `createAuditLog`'s catch reports `AUDIT_CREATE_FAILED`. Measured, and the
+  reason writer and reader moved in one commit.
+- **Financial/security behaviour affected.** No money path. Audit records
+  written from now on are queryable by JSON path, containment and index, which
+  is what makes the trail usable as compliance evidence by anything other than
+  the application that wrote it. Also found and fixed a **silent audit loss**:
+  `auditLog()` ended in `catch { }`, so an FK violation on a stale
+  `audit_logs.user_id` (`23503`) discarded the record and reported success. The
+  catch now logs action and user id, and deliberately not `metadata`, which
+  carries request-shaped values.
+- **Historical rows are NOT altered.** No `UPDATE` is issued against existing
+  audit rows. Readers normalize both shapes instead, permanently.
+  Additive-normalization vs in-place-migration is argued in
+  `docs/decisions/0002-normalize-audit-jsonb-additively.md`.
+- **Immutability, assessed not assumed.** Measured on a database built from the
+  schema sources: no trigger, no rewrite rule, no RLS (`relrowsecurity = f` on
+  both audit tables), no `REVOKE` in any schema source, no hash chaining. The
+  application's single DB role can `UPDATE` and `DELETE` audit rows with no
+  residue. **Nothing enforces immutability**, and no claim of cryptographic
+  tamper resistance is made. `CLAUDE.md` described `audit_logs` as an
+  "Immutable system audit trail"; that wording is corrected rather than left
+  standing, since the schema does not support it.
+- **Tests run.** New `lib/__tests__/audit-jsonb-encoding.test.ts`, 13 cases,
+  against a real database through the real `auditLog()` and the real
+  `AuditLogRepository`. Full suite 743 → **756 tests across 53 files**, all
+  passing on a database created fresh for the run. Typecheck clean, lint 0
+  errors / 28 warnings. Mutation-checked all three fixes: reverting the
+  `lib/auth.ts` writer fails 2 of 13, the repository writer 1 of 13, the reader
+  2 of 13. The repository-writer mutation fails only the SQL-side assertion,
+  because the tolerant reader still round-trips a string scalar — that
+  asymmetry is the original defect's invisibility reproduced as a test signal.
+- **Migration impact.** None. No schema change, no `/api/migrate` change, no
+  production migration required.
+- **Unresolved findings.** `provider_webhook_events.raw_payload` has the same
+  defect; its readers already tolerate both shapes so nothing is broken today,
+  but SQL-side access to that column returns NULL — recorded, not bundled into
+  an audit change. Audit immutability remains unenforced.
+  `AdminAuditService.verifyImmutability()` still returns a hardcoded `'clean'`;
+  `AuditLogRepository.verifyImmutability()` still compares `COUNT(*)` to
+  `MAX(id)` and so detects deletes but not updates. Both untouched. A GIN index
+  on either jsonb column would need to be partial
+  (`WHERE jsonb_typeof(...) = 'object'`) while legacy rows remain; none exists.
+- **Rollback.** Revert the commit. Nothing stateful changes, and no historical
+  row was modified, so there is nothing to restore.
+- **Next recommended action.** Task 4 — the focused security review of
+  `app/api/migrate/route.ts`.
