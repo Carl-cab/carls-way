@@ -353,7 +353,7 @@ export class TransferIntentRepository extends BaseRepository {
    * @returns Total count for user
    */
   async countByUser(userId: number): Promise<number> {
-    return this.count('transfer_intents', `user_id = ${userId}`);
+    return this.count('transfer_intents', this.sql`user_id = ${userId}`);
   }
 
   /**

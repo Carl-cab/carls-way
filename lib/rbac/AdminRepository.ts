@@ -390,7 +390,7 @@ export class AdminRepository extends BaseRepository {
    * @returns true if email exists
    */
   async adminEmailExists(email: string): Promise<boolean> {
-    return this.exists('admin_users', `email = '${email.toLowerCase()}'`);
+    return this.exists('admin_users', this.sql`email = ${email.toLowerCase()}`);
   }
 
   /**

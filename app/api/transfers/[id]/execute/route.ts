@@ -9,6 +9,7 @@ import {
 } from '@/lib/providers/TransferProviderFactory';
 import type { TransferProvider } from '@/lib/providers/TransferProvider';
 import { logRedactedError } from '@/lib/plaid-error';
+import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
 
 /**
  * Submit a confirmed live transfer to its provider.
@@ -52,6 +53,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const { id } = await params;
     const intentId = parseInt(id, 10);
     if (isNaN(intentId)) return NextResponse.json({ error: 'Invalid intent ID' }, { status: 400 });
+
+    // Every other money path carries a limit; this one reaches a payment rail
+    // and had none. Keyed on the user id rather than the client IP: the call is
+    // always authenticated, so the account is the right subject, and an IP key
+    // would both lump a shared network together and reset on a new one.
+    //
+    // The FOR UPDATE claim below already prevents one intent being submitted
+    // twice. This is the orthogonal bound the claim does not provide — how many
+    // separate intents a single account can push at a rail in one window.
+    const limit = await checkRateLimit('money:transfer-execute', String(user.userId));
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { error: 'Too many transfer submissions. Please try again later. No funds were moved.' },
+        { status: 429, headers: rateLimitHeaders(limit) },
+      );
+    }
 
     const sql = getSql();
 
@@ -106,7 +123,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         RETURNING id
       `;
       if (!updated[0]) {
-        return { kind: 'wrong_status', status: 'ready' } satisfies ClaimResult;
+        // Defensive: the three conditions were just verified under this row's
+        // FOR UPDATE lock, so nothing should slip between. Report the status
+        // actually read rather than the literal 'ready', which produced
+        // "Cannot execute a transfer in status 'ready'. It must be ready." —
+        // a self-contradiction in front of whoever is debugging a live
+        // transfer.
+        return { kind: 'wrong_status', status: row.status } satisfies ClaimResult;
       }
 
       return { kind: 'claimed', provider } satisfies ClaimResult;

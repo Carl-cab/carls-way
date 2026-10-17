@@ -395,7 +395,7 @@ export class UserRepository extends BaseRepository {
    * @returns true if email exists, false otherwise
    */
   async emailExists(email: string): Promise<boolean> {
-    return this.exists('users', `email = '${email.toLowerCase()}'`);
+    return this.exists('users', this.sql`email = ${email.toLowerCase()}`);
   }
 
   /**
@@ -405,7 +405,7 @@ export class UserRepository extends BaseRepository {
    * @returns true if username exists, false otherwise
    */
   async usernameExists(username: string): Promise<boolean> {
-    return this.exists('users', `username = '${username.toLowerCase()}'`);
+    return this.exists('users', this.sql`username = ${username.toLowerCase()}`);
   }
 
   /**

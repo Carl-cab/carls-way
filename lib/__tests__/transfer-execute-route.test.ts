@@ -10,6 +10,7 @@
 import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from 'vitest';
 import { getSql, initializeSchema } from '@/lib/db';
 import { signToken } from '@/lib/auth';
+import { RATE_LIMITS, __resetInMemoryCounters } from '@/lib/rate-limit';
 
 const cookieValue = vi.hoisted(() => ({ current: undefined as string | undefined }));
 
@@ -122,6 +123,10 @@ beforeAll(async () => {
 }, 60000);
 
 beforeEach(() => {
+  // The execute route is rate limited per user id. Without this the
+  // in-process counter accumulates across cases in this file and a later
+  // case 429s for reasons that have nothing to do with what it asserts.
+  __resetInMemoryCounters();
   cookieValue.current = tokenFor(ownerId, OWNER_EMAIL, 'execute_owner');
   providerControl.mode = 'mock';
   providerControl.executionMode = 'live';
@@ -238,4 +243,63 @@ describe('POST /api/transfers/[id]/execute', () => {
     expect(body.error).toContain('submitting');
     expect(await statusOf(id)).toBe('processing');
   });
+});
+
+describe('rate limiting', () => {
+  it('stops submitting at the limit, and moves nothing when it refuses', async () => {
+    // Every other money path carries a limit; this one reached a payment rail
+    // with none. The claim prevents one intent being submitted twice, so this
+    // covers the orthogonal case the claim says nothing about: one account
+    // pushing many separate intents at a rail in a burst.
+    const rule = RATE_LIMITS['money:transfer-execute'];
+    const ids: number[] = [];
+    for (let i = 0; i < rule.limit; i++) ids.push(await insertIntent({}));
+    const overflowId = await insertIntent({});
+
+    for (const id of ids) {
+      expect((await call(id)).status).toBe(200);
+    }
+    expect(providerControl.execute).toHaveBeenCalledTimes(rule.limit);
+
+    const refused = await call(overflowId);
+    expect(refused.status).toBe(429);
+    await expect(refused.json()).resolves.toMatchObject({
+      error: expect.stringContaining('No funds were moved'),
+    });
+
+    // The refusal must come before the provider and before the claim: the
+    // intent stays ready rather than stranded in submitting.
+    expect(providerControl.execute).toHaveBeenCalledTimes(rule.limit);
+    expect(await statusOf(overflowId)).toBe('ready');
+  }, 60000);
+
+  it('limits per account, so one user cannot exhaust another', async () => {
+    const rule = RATE_LIMITS['money:transfer-execute'];
+    for (let i = 0; i < rule.limit; i++) {
+      expect((await call(await insertIntent({}))).status).toBe(200);
+    }
+    expect((await call(await insertIntent({}))).status).toBe(429);
+
+    // A different account is unaffected: the key is the user id, not the IP,
+    // which an IP-keyed limit would get wrong on a shared network.
+    cookieValue.current = tokenFor(otherId, OTHER_EMAIL, 'execute_other');
+    const othersIntent = await insertIntent({ userId: otherId });
+    expect((await call(othersIntent)).status).toBe(200);
+  }, 60000);
+});
+
+describe('status reporting', () => {
+  it('names the status it actually found, never a contradiction', async () => {
+    // The claim's defensive branch reported the literal 'ready', producing
+    // "Cannot execute a transfer in status 'ready'. It must be ready." in front
+    // of whoever was debugging a live transfer.
+    const id = await insertIntent({ status: 'processing' });
+
+    const res = await call(id);
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain("'processing'");
+    expect(body.error).not.toContain("status 'ready'");
+  }, 60000);
 });
