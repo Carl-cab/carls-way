@@ -178,6 +178,9 @@ architectural decision appends one under `docs/decisions/`.
 
 ### 2026-10-17 — Migration execution gate
 
+- **Commit / PR.** `e4852b0` on `ci/migration-execution-gate`, PR #56. The
+  commit SHA and PR number were missing from the first version of this entry,
+  which broke the rule the same change added to CLAUDE.md; CodeRabbit caught it.
 - **Purpose.** `app/api/migrate/route.ts` is production's only schema-change
   mechanism and nothing executed its statements. Demonstrated: changing one
   statement to `ADD COLUM` left typecheck clean and all 735 tests passing.
