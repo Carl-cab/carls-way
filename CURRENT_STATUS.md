@@ -109,13 +109,21 @@ misleading of the two failure modes.
 - **Static analysis** — CodeQL `javascript-typescript`, `security-extended`,
   in its own workflow so `security-events: write` is not granted to the job
   running the test suite.
-- **ADVISORY, NOT ENFORCING.** Both run on every pull request, but a detection
-  only *fails the check*; it does not *block a merge* until the owner marks
-  these four as required under branch protection:
-  `install · typecheck · lint · test · build`, `dependency audit`,
-  `secret scan`, `analyze javascript-typescript`. That cannot be set from a
-  session. Until it is done, treat secret scanning as a signal rather than a
-  gate.
+- **ADVISORY, NOT ENFORCING.** A detection only *fails the check*; it does not
+  *block a merge* until the owner marks these four as required under branch
+  protection: `install · typecheck · lint · test · build`,
+  `dependency audit`, `secret scan`, `analyze javascript-typescript`. That
+  cannot be set from a session. Until it is done, treat secret scanning as a
+  signal rather than a gate.
+- **SCOPED BY BASE BRANCH, and this is wider than the scanners.** Both
+  workflow files carry a single `on:` block filtered to
+  `branches: [master, 'integration/**']`. Because `ci.yml` holds the `verify`,
+  `audit` and `secrets` jobs under that one block, a pull request targeting any
+  other base branch runs **no CI at all** — not the scanners, and not
+  typecheck, lint, tests or build either. Verified by reading both files. A PR
+  into a feature branch is therefore unchecked; only the eventual PR into
+  `master` is covered. Widening the filters, or accepting the gap knowingly, is
+  an owner decision.
 - SHA-pinning of the third-party actions remains an open owner decision.
 
 ### `/api/migrate` — measured weaknesses, NOT yet fixed (PR #61)
