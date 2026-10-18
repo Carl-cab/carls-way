@@ -61,6 +61,26 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
   // loop is a self-inflicted outage. The anonymous recovery paths have their
   // own, tighter limit (`schema:bootstrap`, 3/hour); this one covers the
   // operator path, which previously had none at all.
+  //
+  // WHAT THIS ACTUALLY GUARANTEES. Without REDIS_URL the counter is
+  // process-local, so on Vercel the effective limit is `6 x instances`, and a
+  // cold start resets it. Read "6/hour" as "6 per instance per hour" unless a
+  // shared Redis backend is confirmed. That is weaker than the number looks
+  // and is recorded as an open gap in CLAUDE.md rather than papered over.
+  //
+  // Deliberately NOT fail-closed when shared state is unavailable. Refusing
+  // the migration whenever Redis is absent would make REDIS_URL — documented
+  // as optional — a hard dependency of the only schema-migration path, and
+  // of the command-line auth-repair break-glass. That is the lockout shape
+  // Release 1.0 already suffered once. The threat here is an authenticated
+  // operator's runaway loop, not an unauthenticated attacker, so degrading to
+  // a weaker limit is the safer failure direction than denying the only way
+  // to repair a schema.
+  //
+  // The real fix is a counter in PostgreSQL, which this endpoint has by
+  // definition — it cannot run without DATABASE_URL. That needs a counter
+  // table created ahead of the migration it limits, so it belongs with the
+  // migration-versioning work in decision 0005 Phase 2, not here.
   'schema:migrate-operator': { limit: 6, windowSeconds: 3600 },
   'contacts:add': { limit: 30, windowSeconds: 3600 },
   // Provider webhooks are server-to-server and signature-verified, but an

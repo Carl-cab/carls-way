@@ -426,6 +426,17 @@ arbitrary end user.
   `docs/decisions/0005-migration-privilege-separation.md` exist to resolve.
   `clientIdentifier()` trusting `x-real-ip` first remains **unverified**, not
   cleared.
+  The operator limit is also **weaker than its number suggests**: without
+  `REDIS_URL` the counter is process-local, so on Vercel it is `6 × instances`
+  per hour and a cold start resets it. It is deliberately **not** fail-closed —
+  refusing the migration whenever Redis is absent would make an optional
+  variable a hard dependency of the only schema-migration path and of the
+  command-line break-glass, which is the Release 1.0 lockout shape. The threat
+  is an authenticated operator's runaway loop, not an anonymous attacker, so
+  degrading to a weaker limit beats denying schema repair. A counter in
+  PostgreSQL — which this endpoint always has, since it cannot run without
+  `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
+  the migration that it limits, so it belongs with Phase 2.
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
   `ProviderEventRepository` both use `sql.json`) — an earlier note here claimed
