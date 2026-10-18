@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import type postgres from 'postgres';
 import bcrypt from 'bcryptjs';
 import { getSql } from '@/lib/db';
+import { jsonbParam } from '@/lib/jsonb';
 import {
   type MinorUnits, MoneyValidationError, parsePositiveMoney, parseSignedDatabaseMoney,
   toDatabaseDecimal, toSignedDatabaseDecimal,
@@ -259,9 +260,21 @@ export async function auditLog(userId: number | null, action: string, metadata?:
     const sql = getSql();
     await sql`
       INSERT INTO audit_logs (user_id, action, metadata)
-      VALUES (${userId}, ${action}, ${metadata ? JSON.stringify(metadata) : null})
+      VALUES (${userId}, ${action}, ${jsonbParam(sql, metadata)})
     `;
-  } catch { /* Non-blocking */ }
+  } catch (err) {
+    // Non-blocking by design: a failed audit write must not fail the action
+    // being audited. But it was previously swallowed in total silence, so a
+    // lost audit record left no trace anywhere — an FK violation on a stale
+    // user_id, for instance, discarded the record and reported success.
+    // Losing audit evidence quietly is worse than the noise of saying so.
+    // The action and user id are logged; `metadata` is NOT, because callers
+    // put request-shaped values in it.
+    console.warn(
+      `auditLog: failed to record action=${action} user_id=${userId ?? 'null'}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 // ─── Velocity Reversal (Future Use: For Returned/Failed Transfers) ───────────

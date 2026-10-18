@@ -8,6 +8,7 @@
 import { BaseRepository } from '@/lib/repositories/BaseRepository';
 import { RepositoryError } from '@/lib/repositories/types';
 import { getSql } from '@/lib/db';
+import { jsonbParam, readJsonbRecord } from '@/lib/jsonb';
 import type { AdminAuditLog, AdminAuditLogInput } from './types';
 
 export interface AuditLogQueryOptions {
@@ -33,11 +34,16 @@ export interface AuditLogStats {
 /**
  * Raw row shape returned by the admin_audit_logs queries. The SELECTs project
  * the audit-log columns, so the row mirrors AdminAuditLog; `changes` is stored
- * as JSONB and comes back already parsed.
+ * as JSONB and is normalised on map.
  */
 type AuditLogRow = Omit<AdminAuditLog, 'changes'> & {
-  /** JSONB column; arrives from the driver as JSON text and is parsed on map. */
-  changes: string | null;
+  /**
+   * JSONB column, and genuinely either shape at runtime: an object for rows
+   * written after the double-encoding fix, a string for legacy rows that hold
+   * a jsonb string scalar. Normalised by `readJsonbRecord` on map — the union
+   * is the honest type, so a future `JSON.parse(row.changes)` will not compile.
+   */
+  changes: Record<string, unknown> | string | null;
 };
 
 /** Narrow postgres.js rows to the audit-log row shape at the query boundary. */
@@ -79,7 +85,7 @@ export class AuditLogRepository extends BaseRepository {
           ${input.action},
           ${input.resource_type},
           ${input.resource_id || null},
-          ${input.changes ? JSON.stringify(input.changes) : null},
+          ${jsonbParam(sql, input.changes)},
           ${input.correlation_id || null},
           ${input.ip_address || null},
           ${input.user_agent || null},
@@ -436,7 +442,11 @@ export class AuditLogRepository extends BaseRepository {
       action: row.action,
       resource_type: row.resource_type,
       resource_id: row.resource_id,
-      changes: row.changes ? JSON.parse(row.changes) : undefined,
+      // Accepts both shapes. `postgres.js` returns an object for a row written
+      // after the writer fix and a string for a legacy double-encoded row, and
+      // historical audit rows are evidence that is not rewritten. A bare
+      // JSON.parse here would throw SyntaxError on every corrected row.
+      changes: readJsonbRecord(row.changes),
       correlation_id: row.correlation_id,
       ip_address: row.ip_address,
       user_agent: row.user_agent,
