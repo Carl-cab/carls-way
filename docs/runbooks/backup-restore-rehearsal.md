@@ -104,9 +104,26 @@ The ledger must still reconcile against balances. This is the financial
 invariant: a restore that breaks it is not a usable recovery.
 `lib/internal-reconciliation.ts` has **no CLI entry point** — it is called by
 `/api/cron/internal-reconciliation`, which needs the application running and
-`CRON_SECRET`, and must not be pointed at this target. Run its strongest check,
-`user_wallets_exactly_match_ledger`, directly instead. Every row returned is a
-discrepancy; no rows is a pass:
+`CRON_SECRET`, and must not be pointed at this target. Run its two balance
+invariants directly instead.
+
+**Both are required, and they fail independently.** An earlier version of this
+runbook ran only the first and called it "its strongest check" — but
+they differ in both scope and comparison. `user_wallets_exactly_match_ledger`
+compares each user's balance against that user's own wallet entries, over all
+of them. `internal_ledger_currency_debits_equal_credits` compares aggregate
+debits against aggregate credits per currency, scoped to entries on completed
+internal payments. Neither implies the other.
+
+A concrete divergence: a payment whose two legs are unequal in the same
+currency — sender debited 100 CAD, recipient credited 95 CAD. Every user's
+balance can still agree exactly with their own entries, so the wallet check
+passes, while the per-currency totals are 100 against 95 and the second check
+fails. Running one and reporting "reconciliation passed" is the whole failure
+this rehearsal exists to avoid.
+
+Every row returned by either query is a discrepancy; no rows from both is a
+pass:
 
 ```bash
 psql "$RESTORE_TARGET_URL" <<'SQL'
@@ -129,9 +146,40 @@ WHERE wallet_balance IS DISTINCT FROM ledger_balance;
 SQL
 ```
 
+Then `internal_ledger_currency_debits_equal_credits`, scoped the same way the
+application scopes it — wallet entries on completed internal payments, with
+both the legacy `pay` and current `payment` types included so historical rows
+stay in scope:
+
+```bash
+psql "$RESTORE_TARGET_URL" <<'SQL'
+WITH internal_payments AS (
+  SELECT t.id
+  FROM transactions t
+  WHERE t.payment_rail = 'internal'
+    AND t.type IN ('pay', 'payment')
+    AND t.status = 'completed'
+)
+SELECT le.currency,
+       COALESCE(SUM(le.debit), 0)  AS total_debit,
+       COALESCE(SUM(le.credit), 0) AS total_credit
+FROM ledger_entries le
+JOIN internal_payments p ON p.id = le.transaction_id
+WHERE le.account_type = 'wallet'
+GROUP BY le.currency
+HAVING COALESCE(SUM(le.debit), 0) IS DISTINCT FROM COALESCE(SUM(le.credit), 0);
+SQL
+```
+
 Compare NUMERIC values directly, as the application does — no tolerance. If
-rows come back, confirm whether the same discrepancy exists in production
-before concluding the restore caused it.
+rows come back from either query, confirm whether the same discrepancy exists
+in production before concluding the restore caused it.
+
+These two are the balance invariants. The other five checks in
+`INTERNAL_RECONCILIATION_CHECK_NAMES` cover ledger-pair cardinality, entry
+direction, per-payment amounts, and entries attached to non-completed records;
+they are worth running too if either query above returns rows, since they
+localise the cause.
 
 ### 4. Run the application's own test suite against the restore
 
@@ -243,7 +291,7 @@ hold**:
 | `verify-migrate.sql` reported no ABSENT objects | The backup is current with the code |
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
-| Ledger reconciliation passes | The financial invariant survived |
+| **Both** ledger invariants pass — wallets match their entries, **and** debits equal credits per currency | The financial invariants survived. They fail independently; one passing says nothing about the other |
 | Test suite result as the **owner** role | The application's SQL matches the restored schema. Not a grant check — the suite performs DDL |
 | Output of the `has_table_privilege` / `has_sequence_privilege` query, with the expected audit-table rows marked as such | These are the Phase 4 grants; neither the owner run nor the suite can produce them |
 | Restore target destroyed, and `manna_app_probe` dropped | No stray copy of customer data, no leftover role |

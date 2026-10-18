@@ -94,8 +94,9 @@ acting on the wrong version wastes your time:
   first, so reading the top entries is enough for what this report needs.
 - **`vercel inspect` reports the deployment's build and status, not whether
   the application is healthy.** It will happily describe a successfully built
-  deployment that is returning 500s. Application health needs the logs, or a
-  request against a real endpoint.
+  deployment that is returning 500s. Use `vercel logs` to investigate request
+  and runtime errors; verify health with a request against a real endpoint,
+  which is the only thing that establishes the application answers correctly.
 
 Cron jobs are most reliably read from the dashboard (Settings → Cron Jobs). A
 CLI subcommand for them may or may not exist on this plan; Option 1 above

@@ -86,6 +86,16 @@ import { canRunOperations } from '@/lib/rbac/types';
  * incident diagnostics survive without the response disclosing schema detail.
  */
 
+/**
+ * The 405 body for a GET. Typed because this is the response an operator
+ * mid-incident reads to find out that the runbook changed, so a careless edit
+ * to it should not typecheck.
+ */
+interface MigrateMethodNotAllowedResponse {
+  error: string;
+  hint: string;
+}
+
 /** Human-sized token tying a redacted 500 to its server-side log line. */
 function diagnosticReference(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -98,14 +108,15 @@ function diagnosticReference(): string {
  */
 export async function GET() {
   try {
-    return NextResponse.json(
-      {
-        error:
-          'Schema migration requires POST. GET is refused because this endpoint executes DDL and a state-changing GET is reachable by cross-site request forgery.',
-        hint: 'curl -X POST -b <auth-cookie> https://<host>/api/migrate',
-      },
-      { status: 405, headers: { Allow: 'POST' } },
-    );
+    const body: MigrateMethodNotAllowedResponse = {
+      error:
+        'Schema migration requires POST. GET is refused because this endpoint executes DDL and a state-changing GET is reachable by cross-site request forgery.',
+      hint: 'curl -X POST -b <auth-cookie> https://<host>/api/migrate',
+    };
+    return NextResponse.json(body, {
+      status: 405,
+      headers: { Allow: 'POST' },
+    });
   } catch (err) {
     // Nothing here can realistically throw, but CLAUDE.md requires every
     // route handler to answer rather than surface a framework stack trace,

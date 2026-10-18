@@ -146,9 +146,13 @@ function main() {
   const testCell = tests
     ? `${tests} passing across ${files ?? '?'} files`
     : (testOutcome ?? notRun);
+  // A NOT RUN outcome means the suite never executed, so there is no count to
+  // have failed to parse. Saying "count not parsed" there implies a run
+  // happened — the same over-claim this script exists to prevent.
+  const testRan = Boolean(tests) || (testOutcome && !testOutcome.includes('NOT RUN'));
   out.push(`| Tests | ${testCell} |`);
   out.push(
-    `| Test failures | ${failures ?? (testOutcome ? '(count not parsed from this run)' : notRun)} |`,
+    `| Test failures | ${failures ?? (testRan ? '(count not parsed from this run)' : (testOutcome ?? notRun))} |`,
   );
   out.push(`| Typecheck | ${typecheck ?? notRun} |`);
   out.push(`| Lint | ${lint ?? notRun} |`);
