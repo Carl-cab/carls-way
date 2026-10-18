@@ -149,31 +149,82 @@ grant list that is in fact empty. The same "ownership implies everything" fact
 that decision 0005 Phase 4 is built around invalidates using the owner's own
 connection as the test.
 
-To actually enumerate grants, connect as a role that owns nothing:
+**And the test suite cannot be repurposed as the grant check either.** 32 of
+the 55 test files perform DDL — many call `initializeSchema()` directly — so
+running the suite as a least-privilege role fails on `CREATE TABLE` long before
+it reaches the DML the application actually performs at runtime. Those failures
+are artifacts of the harness building its own fixtures, not missing grants, and
+they would bury the signal. A role that can pass this suite is a role that can
+create and drop tables, which is the opposite of what Phase 4 is for.
+
+So enumerate the grants directly, with no DDL and no application run.
+`has_table_privilege` and `has_sequence_privilege` answer exactly the question
+Phase 4 asks — can the application's role do what it needs on every object —
+and they answer it deterministically:
 
 ```bash
-# As the restore target's owner, create a non-owner role standing in for the
-# application's future least-privilege role, and grant it nothing beyond
-# schema usage.
-# `GRANT ... ON DATABASE` needs a literal identifier, so name the restore
-# target's database explicitly rather than calling current_database().
+# 1. As the restore target's owner, create a role standing in for the
+#    application's future least-privilege role, then apply ONLY the grants
+#    decision 0005 Phase 4 proposes. `GRANT ... ON DATABASE` needs a literal
+#    identifier, so name the database rather than calling current_database().
 psql "$RESTORE_TARGET_URL" <<SQL
-CREATE ROLE manna_app_probe LOGIN PASSWORD '$(openssl rand -hex 16)';
+CREATE ROLE manna_app_probe NOLOGIN;
 GRANT CONNECT ON DATABASE "$RESTORE_TARGET_DB" TO manna_app_probe;
 GRANT USAGE ON SCHEMA public TO manna_app_probe;
+-- ... then paste the Phase 4 grant list here, unmodified ...
 SQL
 
-# Then apply ONLY the grant list decision 0005 Phase 4 proposes, and run the
-# suite as that role. Every permission failure is a grant the list is missing.
-DATABASE_URL="postgres://manna_app_probe:...@<host>/<db>?sslmode=require" pnpm test
+# 2. Report every object the role cannot reach. Rows returned are the grants
+#    the Phase 4 list is missing. No rows is a pass.
+psql "$RESTORE_TARGET_URL" <<'SQL'
+SELECT c.relname AS object, 'table' AS kind, p.priv
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) AS p(priv)
+WHERE c.relkind = 'r'
+  AND NOT has_table_privilege('manna_app_probe', c.oid, p.priv)
+UNION ALL
+SELECT c.relname, 'sequence', p.priv
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+CROSS JOIN (VALUES ('USAGE'),('SELECT')) AS p(priv)
+WHERE c.relkind = 'S'
+  AND NOT has_sequence_privilege('manna_app_probe', c.oid, p.priv)
+ORDER BY 2, 1, 3;
+SQL
 ```
 
-Two things to expect. The grant list in 0005 was derived from reading the
-schema, not from watching the application fail, so additions are likely —
-`permission denied for sequence` on every `SERIAL` insert is the usual first
-one. And `CREATE ROLE` is a cluster-level change: do it on the restore target's
-cluster only, never production's, and drop the role when you destroy the
+The role is `NOLOGIN` deliberately: these functions need no connection, so the
+rehearsal never creates a credential that could be used.
+
+**Measured, on a database built from this repository's schema sources.** With
+table grants applied via `GRANT ... ON ALL TABLES` and no sequence grants at
+all, the query returns **40 rows covering all 20 `_id_seq` sequences** — by
+name, in one result, instead of making you hit `permission denied for sequence`
+one insert at a time. That is the omission to expect first: the grant list in
+0005 was derived from reading the schema, not from watching the application
+fail, so `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public` is load-bearing
+and easy to leave out.
+
+`CREATE ROLE` is a cluster-level change: do it on the restore target's cluster
+only, never production's, and `DROP ROLE manna_app_probe` when you destroy the
 target.
+
+**Audit tables are the deliberate exception.** The Phase 4 list grants the
+application `INSERT` but not `UPDATE` or `DELETE` on `audit_logs` and
+`admin_audit_logs`, so exactly these four rows *should* appear in the output —
+confirmed in the same measurement:
+
+```
+ admin_audit_logs | table | DELETE
+ admin_audit_logs | table | UPDATE
+ audit_logs       | table | DELETE
+ audit_logs       | table | UPDATE
+```
+
+They are the control working, not a gap. Note them as expected rather than
+"fixing" them — granting them back is precisely what decision 0004 exists to
+prevent.
 
 ### 5. Destroy the restore target
 
@@ -193,9 +244,9 @@ hold**:
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
 | Ledger reconciliation passes | The financial invariant survived |
-| Test suite result as the **owner** role | The application's SQL matches the restored schema |
-| Test suite result as the **non-owner probe** role, and every permission failure seen | These are the Phase 4 grants; the owner run cannot produce them |
-| Restore target destroyed, and `manna_app_probe` dropped | No stray copy of customer data, no leftover login role |
+| Test suite result as the **owner** role | The application's SQL matches the restored schema. Not a grant check — the suite performs DDL |
+| Output of the `has_table_privilege` / `has_sequence_privilege` query, with the expected audit-table rows marked as such | These are the Phase 4 grants; neither the owner run nor the suite can produce them |
+| Restore target destroyed, and `manna_app_probe` dropped | No stray copy of customer data, no leftover role |
 
 If any row fails, Phase 0 stays **NOT RUN** and the failure is the next
 engineering task. A partial pass is not a pass: the purpose of this exercise is

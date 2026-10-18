@@ -121,6 +121,11 @@ feature. On the current Hobby plan that option does not exist, which is why
 Option 1 — you reading five facts out of the dashboard — is the recommendation
 rather than the fallback.
 
+If you grant a token anyway, confirm the boundary *before* issuing it: check
+that each command above, run with that token, cannot reach a project other than
+`carlos_cab74`. `--scope` selects a team context; it does not restrict the
+token to one project. If you cannot confirm that boundary, use Option 1.
+
 Either way the egress proxy must also be allowed to reach `api.vercel.com`,
 which is a separate change to this environment.
 
