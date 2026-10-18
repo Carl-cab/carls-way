@@ -71,6 +71,7 @@ Client (React 19)
 | `lib/repositories/BaseRepository.ts` | Repository base. `exists()`/`count()` take a `sql` **fragment**, never a condition string — see the note under Coding Standards |
 | `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise |
 | `scripts/verify-migrate.sql` | Read-only check that `/api/migrate` applied everything code reads. Safe against production |
+| `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
 

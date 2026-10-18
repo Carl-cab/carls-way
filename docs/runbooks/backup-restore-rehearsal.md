@@ -106,86 +106,55 @@ UNION ALL SELECT 'audit_logs', count(*) FROM audit_logs;
 -- read clean on a column that was gone.
 ```
 
-The ledger must still reconcile against balances. This is the financial
-invariant: a restore that breaks it is not a usable recovery.
+The ledger must still reconcile against balances. These are the financial
+invariants: a restore that breaks one is not a usable recovery.
+
 `lib/internal-reconciliation.ts` has **no CLI entry point** — it is called by
 `/api/cron/internal-reconciliation`, which needs the application running and
-`CRON_SECRET`, and must not be pointed at this target. Run its two balance
-invariants directly instead.
-
-**Both are required, and they fail independently.** An earlier version of this
-runbook ran only the first and called it "its strongest check" — but
-they differ in both scope and comparison. `user_wallets_exactly_match_ledger`
-compares each user's balance against that user's own wallet entries, over all
-of them. `internal_ledger_currency_debits_equal_credits` compares aggregate
-debits against aggregate credits per currency, scoped to entries on completed
-internal payments. Neither implies the other.
-
-A concrete divergence: a payment whose two legs are unequal in the same
-currency — sender debited 100 CAD, recipient credited 95 CAD. Every user's
-balance can still agree exactly with their own entries, so the wallet check
-passes, while the per-currency totals are 100 against 95 and the second check
-fails. Running one and reporting "reconciliation passed" is the whole failure
-this rehearsal exists to avoid.
-
-Every row returned by either query is a discrepancy; no rows from both is a
-pass:
+`CRON_SECRET`, and must not be pointed at this target. So run the committed
+query file, which is the same query the application runs:
 
 ```bash
-psql "$RESTORE_TARGET_URL" <<'SQL'
-WITH wallets AS (
-  SELECT u.id AS user_id, 'CAD' AS currency, u.balance_cad AS wallet_balance,
-         COALESCE(SUM(le.credit - le.debit) FILTER (
-           WHERE le.currency = 'CAD' AND le.account_type = 'wallet'), 0) AS ledger_balance
-  FROM users u LEFT JOIN ledger_entries le ON le.user_id = u.id
-  GROUP BY u.id, u.balance_cad
-  UNION ALL
-  SELECT u.id, 'USD', u.balance_usd,
-         COALESCE(SUM(le.credit - le.debit) FILTER (
-           WHERE le.currency = 'USD' AND le.account_type = 'wallet'), 0)
-  FROM users u LEFT JOIN ledger_entries le ON le.user_id = u.id
-  GROUP BY u.id, u.balance_usd
-)
-SELECT user_id, currency, wallet_balance, ledger_balance
-FROM wallets
-WHERE wallet_balance IS DISTINCT FROM ledger_balance;
-SQL
+psql "$RESTORE_TARGET_URL" -f scripts/reconciliation-check.sql
 ```
 
-Then `internal_ledger_currency_debits_equal_credits`, scoped the same way the
-application scopes it — wallet entries on completed internal payments, with
-both the legacy `pay` and current `payment` types included so historical rows
-stay in scope:
+**Every row must report `PASS`.** All seven, not a subset.
 
-```bash
-psql "$RESTORE_TARGET_URL" <<'SQL'
-WITH internal_payments AS (
-  SELECT t.id
-  FROM transactions t
-  WHERE t.payment_rail = 'internal'
-    AND t.type IN ('pay', 'payment')
-    AND t.status = 'completed'
-)
-SELECT le.currency,
-       COALESCE(SUM(le.debit), 0)  AS total_debit,
-       COALESCE(SUM(le.credit), 0) AS total_credit
-FROM ledger_entries le
-JOIN internal_payments p ON p.id = le.transaction_id
-WHERE le.account_type = 'wallet'
-GROUP BY le.currency
-HAVING COALESCE(SUM(le.debit), 0) IS DISTINCT FROM COALESCE(SUM(le.credit), 0);
-SQL
-```
+Two earlier versions of this runbook got this wrong in the same way, and the
+reasons are worth keeping because they are easy to repeat:
 
-Compare NUMERIC values directly, as the application does — no tolerance. If
-rows come back from either query, confirm whether the same discrepancy exists
-in production before concluding the restore caused it.
+- The first ran `user_wallets_exactly_match_ledger` alone and called it "its
+  strongest check". But the two *aggregate* checks differ in scope and
+  comparison — one compares each user's balance against that user's own wallet
+  entries, the other compares aggregate debits against credits per currency on
+  completed internal payments — so neither implies the other. A payment with
+  unequal legs in one currency (sender debited 100 CAD, recipient credited
+  95 CAD) leaves every balance agreeing with its own entries while the
+  per-currency totals are 100 against 95.
+- The second ran both aggregate checks and made only those two required,
+  treating the five transaction-level checks as optional follow-up. **That is
+  also unsound, because errors cancel in aggregates.** Two payments off by
+  +5 and -5 leave the currency totals equal and every wallet matching its own
+  entries, while `internal_payment_amounts_match_ledger` fails on both. An
+  aggregate check passing is not evidence that the per-payment checks pass.
 
-These two are the balance invariants. The other five checks in
-`INTERNAL_RECONCILIATION_CHECK_NAMES` cover ledger-pair cardinality, entry
-direction, per-payment amounts, and entries attached to non-completed records;
-they are worth running too if either query above returns rows, since they
-localise the cause.
+One caveat on reading the output, so nobody over-reports it:
+`completed_internal_payments_in_scope` is a **scope counter**, not an
+invariant — its status is the literal `'PASS'` in both implementations. Seven
+`PASS` rows mean six invariants held and one count was reported. Do not cite
+it as a seventh passing check.
+
+The file is read-only, takes no parameters, and compares NUMERIC values
+directly as the application does, with no tolerance. It is a second source of
+the application's query, so
+`lib/__tests__/reconciliation-sql-parity.test.ts` runs both against one
+database and requires identical names, counts and statuses — including a case
+that tampers with the file and asserts the comparison notices. That is what
+makes "the same query the application runs" a checked claim rather than an
+assurance.
+
+If any row reports `FAIL`, confirm whether the same discrepancy exists in
+production before concluding the restore caused it.
 
 ### 4. Run the application's own test suite against the restore
 
@@ -309,7 +278,7 @@ hold**:
 | `verify-migrate.sql` reported no ABSENT objects | The backup is current with the code |
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
-| **Both** ledger invariants pass — wallets match their entries, **and** debits equal credits per currency | The financial invariants survived. They fail independently; one passing says nothing about the other |
+| **All seven** rows from `scripts/reconciliation-check.sql` report `PASS` — paste the output | The financial invariants survived. Aggregate and per-payment checks fail independently, and errors cancel in aggregates, so a subset is not evidence |
 | Test suite result as the **owner** role | The application's SQL matches the restored schema. Not a grant check — the suite performs DDL |
 | Output of the `has_table_privilege` / `has_sequence_privilege` query, with the expected audit-table rows marked as such | These are the Phase 4 grants; neither the owner run nor the suite can produce them. Covers table and sequence ACLs only — not function or trigger privileges |
 | Restore target destroyed, and `manna_app_probe` dropped | No stray copy of customer data, no leftover role |
