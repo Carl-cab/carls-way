@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { jsonbParam, normalizeJsonbDocument } from '@/lib/jsonb';
 import type postgres from 'postgres';
 
 /**
@@ -156,14 +157,23 @@ export async function markProviderEventFailed(
     // Preserve the event in the dead-letter queue for operator review/replay.
     // Idempotent: a provider that keeps redelivering refreshes the entry
     // instead of duplicating it.
-    const payload =
-      typeof row.raw_payload === 'string' ? row.raw_payload : JSON.stringify(row.raw_payload ?? null);
+    // Copying one jsonb column into another: bind the document, never
+    // re-serialised text. `postgres.js` returns the source document as an
+    // object, so the previous `JSON.stringify(...)` + `::jsonb` stored a jsonb
+    // **string scalar** here — making every operator query over a dead-lettered
+    // payload (`raw_payload->>'id'`, a `@>` filter, a path into data.object)
+    // return NULL or no rows, silently. A `::jsonb` cast does not avoid that:
+    // the cast is applied to text that is already a complete JSON document.
+    // It also turned a NULL payload into the jsonb `null` literal.
+    // `normalizeJsonbDocument` additionally repairs a legacy string-scalar
+    // source row instead of carrying the double-encoding forward.
+    const payload = normalizeJsonbDocument(row.raw_payload);
     await tx`
       INSERT INTO webhook_dead_letters
         (provider, provider_event_id, event_type, raw_payload, failure_count, last_error)
       VALUES (
         ${provider}, ${providerEventId}, ${row.event_type},
-        ${payload}::jsonb, ${row.retry_count}, ${errorMessage}
+        ${jsonbParam(sql, payload)}, ${row.retry_count}, ${errorMessage}
       )
       ON CONFLICT (provider, provider_event_id) DO UPDATE SET
         failure_count = EXCLUDED.failure_count,

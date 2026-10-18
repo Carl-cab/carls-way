@@ -275,3 +275,58 @@ architectural decision appends one under `docs/decisions/`.
   claimed rollback was clean, which was wrong; corrected before merge.
 - **Next recommended action.** Task 4 — the focused security review of
   `app/api/migrate/route.ts`.
+
+### 2026-10-18 — Dead-letter queue JSONB double-encoding; PR #58 merged
+
+- **Commit / PR.** PR #58 merged as `244c91e`. This entry's own change is on
+  `fix/dead-letter-jsonb-encoding`; SHA and PR appended on push.
+- **Purpose and scope.** `markProviderEventFailed()` copies a dead-lettered
+  payload from `provider_webhook_events.raw_payload` into
+  `webhook_dead_letters.raw_payload`. Both columns are `jsonb` and **both
+  source writers are already correct** (`sql.json`), but the copy did
+  `JSON.stringify(row.raw_payload)` then `${payload}::jsonb` — and a cast
+  applied to text that is already a complete JSON document yields a jsonb
+  **string scalar**. Correct writers at both ends, double-encoded destination
+  between them. Fixed with a new `normalizeJsonbDocument()` plus the existing
+  `jsonbParam()`.
+- **Financial/security behaviour affected.** No money path. `webhook_dead_letters`
+  is the operator-review queue for events that exhausted their retries, and
+  every SQL-side look into a dead-lettered payload (`raw_payload->>'id'`, a
+  `@>` filter, a path into `data.object`) returned NULL or no rows, silently.
+  Replay kept working because `parseStoredStripeEvent()` tolerates the string
+  form — the same compensating reader that hid the audit defect in #58. A
+  second, independent bug in the same line: `JSON.stringify(null)` is `"null"`,
+  so a NULL payload became the jsonb `null` literal instead of SQL NULL.
+- **A documentation error corrected.** `CLAUDE.md` claimed
+  `provider_webhook_events.raw_payload` "is still double-encoded by its writer".
+  **That was wrong** — both writers use `sql.json`, and a comment already in
+  `lib/external-settlement-reconciliation.ts` said so explicitly. The claim was
+  inferred from the defensive *readers* rather than read off the writers, and
+  the real defect was one table over. Both `CLAUDE.md` statements are corrected;
+  the merged #58 text carried the error.
+- **Historical rows are NOT altered.** The source row is untouched; only the new
+  `webhook_dead_letters` row is written correctly. A legacy string-scalar source
+  is repaired on the way through rather than carried forward.
+- **Tests run.** New `lib/__tests__/dead-letter-jsonb-encoding.test.ts`, 6 cases,
+  through the real `recordProviderEvent()` and `markProviderEventFailed()`
+  against a real database. **Written before the fix and confirmed failing: 4 of
+  6.** Full suite 756 → **762 tests across 54 files**, all passing on a database
+  created fresh for the run. Typecheck clean, lint 0 errors / 28 warnings, build
+  clean. Mutation-checked: restoring `JSON.stringify` + `::jsonb` fails 4 of 6;
+  keeping `jsonbParam` but dropping `normalizeJsonbDocument` fails exactly 1 —
+  the legacy source case — so the two halves are independently guarded.
+- **Migration impact.** None. No schema change, no `/api/migrate` change.
+- **Unresolved findings.** Audit immutability remains unenforced (no trigger,
+  rule, RLS, `REVOKE` or hash chaining); both `verifyImmutability()`
+  implementations untouched. Historical string-scalar rows remain in
+  `provider_webhook_events` and `webhook_dead_letters` and are read, not
+  rewritten. PR #57 (secret scanning + CodeQL) is green but **not merged** —
+  awaiting owner authorization; its `PROJECT_MEMORY.md` conflict from #58
+  landing first was resolved in `5951904`.
+- **Rollback.** Clean, unlike #58: no reader anywhere does a bare `JSON.parse`
+  on `webhook_dead_letters.raw_payload`, and `parseStoredStripeEvent()` already
+  accepts both shapes, so documents written during the window stay readable
+  after a revert.
+- **Next recommended action.** Task 4 of the prior directive — the focused
+  security review of `app/api/migrate/route.ts` — then the append-only audit
+  architecture proposal (directive section 4).
