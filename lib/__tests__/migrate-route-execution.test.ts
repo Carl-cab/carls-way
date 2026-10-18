@@ -1,5 +1,5 @@
 /**
- * Does GET /api/migrate actually run?
+ * Does POST /api/migrate actually run?
  *
  * This route is the only mechanism by which the production schema changes. Its
  * SQL was executed nowhere in the suite:
@@ -139,12 +139,24 @@ interface MigrateBody {
 }
 
 async function runMigration(): Promise<{ status: number; body: MigrateBody }> {
-  const { GET } = await import('@/app/api/migrate/route');
+  const { POST } = await import('@/app/api/migrate/route');
   const { NextRequest } = await import('next/server');
+  const { __resetInMemoryCounters } = await import('@/lib/rate-limit');
+
+  // This file asserts that the statements execute and are idempotent, so it
+  // runs the pipeline repeatedly — more times than the operator rate limit
+  // added in Phase 1 permits in an hour. Clearing the counter keeps this file
+  // about the statements; the limiter itself is covered in
+  // migrate-route-security.test.ts, which asserts the 7th call is refused.
+  __resetInMemoryCounters();
+
+  // No Origin header, which is the command-line case the route deliberately
+  // allows — see lib/request-origin.ts.
   const req = new NextRequest('https://manna.example.test/api/migrate', {
+    method: 'POST',
     headers: { authorization: 'Bearer operations-session' },
   });
-  const res = await GET(req);
+  const res = await POST(req);
   return { status: res.status, body: (await res.json()) as MigrateBody };
 }
 
@@ -179,7 +191,7 @@ afterAll(async () => {
   `.catch(() => undefined);
 }, 60000);
 
-describe('GET /api/migrate executes its statements', () => {
+describe('POST /api/migrate executes its statements', () => {
   it('runs every statement without error', async () => {
     // The assertion the ADD COLUM typo fails. A 500 here means some statement
     // in the route is malformed, out of dependency order, or invalid against a

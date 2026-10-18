@@ -1,5 +1,5 @@
 /**
- * The control flow of GET /api/migrate on its anonymous paths.
+ * The control flow of POST /api/migrate on its anonymous paths.
  *
  * The companion file lib/__tests__/anonymous-schema-repair.test.ts covers the
  * repair helper against a real database. That is not enough on its own: the
@@ -52,7 +52,7 @@ vi.mock('@/lib/rbac/admin-middleware', () => ({
   resolveAdminBySessionId,
 }));
 
-import { GET } from '@/app/api/migrate/route';
+import { POST } from '@/app/api/migrate/route';
 
 function request(adminSession?: string): NextRequest {
   return new NextRequest('https://manna.example.test/api/migrate', {
@@ -80,7 +80,7 @@ describe('anonymous caller on a populated database (auth-repair)', () => {
   });
 
   it('repairs the auth columns', async () => {
-    const res = await GET(request());
+    const res = await POST(request());
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({
@@ -92,7 +92,7 @@ describe('anonymous caller on a populated database (auth-repair)', () => {
   });
 
   it('never runs the full pipeline', async () => {
-    await GET(request());
+    await POST(request());
 
     // The assertion the defect would fail. Both of these ran anonymously
     // against live customer data before.
@@ -101,14 +101,14 @@ describe('anonymous caller on a populated database (auth-repair)', () => {
   });
 
   it('is still rate limited', async () => {
-    await GET(request());
+    await POST(request());
     expect(checkRateLimit).toHaveBeenCalledTimes(1);
   });
 
   it('returns 429 without repairing when the limit is spent', async () => {
     checkRateLimit.mockResolvedValue({ allowed: false, remaining: 0, limit: 3, resetAt: Date.now() });
 
-    const res = await GET(request());
+    const res = await POST(request());
 
     expect(res.status).toBe(429);
     expect(repairAuthCriticalColumns).not.toHaveBeenCalled();
@@ -118,7 +118,7 @@ describe('anonymous caller on a populated database (auth-repair)', () => {
   it('reports plainly when there was nothing to repair', async () => {
     repairAuthCriticalColumns.mockResolvedValue([]);
 
-    const res = await GET(request());
+    const res = await POST(request());
 
     await expect(res.json()).resolves.toMatchObject({ success: true, repair: true });
     expect(initializeSchema).not.toHaveBeenCalled();
@@ -134,7 +134,7 @@ describe('anonymous caller on an empty database (full-bootstrap)', () => {
   it('runs the pipeline, because creating the schema is the only way out', async () => {
     // Narrowing the populated case must not strand a genuinely new deployment —
     // that would recreate the deadlock this window exists to break.
-    await GET(request());
+    await POST(request());
 
     expect(initializeSchema).toHaveBeenCalledTimes(1);
     expect(repairAuthCriticalColumns).not.toHaveBeenCalled();
@@ -146,7 +146,7 @@ describe('anonymous caller with no recovery warranted', () => {
     getAuthUser.mockResolvedValue(null);
     anonymousRecoveryMode.mockResolvedValue(null);
 
-    const res = await GET(request());
+    const res = await POST(request());
 
     expect(res.status).toBe(401);
     expect(repairAuthCriticalColumns).not.toHaveBeenCalled();
@@ -159,7 +159,7 @@ describe('authenticated customer', () => {
   it('is refused with 403 and the pipeline does not run', async () => {
     getAuthUser.mockResolvedValue({ userId: 1, email: 'customer@example.test', username: 'customer' });
 
-    const res = await GET(request());
+    const res = await POST(request());
 
     expect(res.status).toBe(403);
     expect(initializeSchema).not.toHaveBeenCalled();
@@ -180,14 +180,19 @@ describe('administrator', () => {
       name: 'Ops',
     });
 
-    const res = await GET(request('session.token'));
+    const res = await POST(request('session.token'));
 
     expect(res.status).toBe(200);
     expect(initializeSchema).toHaveBeenCalledTimes(1);
     expect(upgradeLegacyMoneyColumns).toHaveBeenCalledTimes(1);
     expect(repairAuthCriticalColumns).not.toHaveBeenCalled();
     expect(anonymousRecoveryMode).not.toHaveBeenCalled();
-    expect(checkRateLimit).not.toHaveBeenCalled();
+    // Phase 1 added a limiter to the operator path, which previously had none.
+    // Keyed on the admin id, so the assertion names it rather than just
+    // counting calls — a limiter keyed on something else would be a different
+    // control.
+    expect(checkRateLimit).toHaveBeenCalledTimes(1);
+    expect(checkRateLimit).toHaveBeenCalledWith('schema:migrate-operator', '7');
   });
 
   it('refuses a read-only administrator', async () => {
@@ -200,7 +205,7 @@ describe('administrator', () => {
       name: 'Audit',
     });
 
-    const res = await GET(request('session.token'));
+    const res = await POST(request('session.token'));
 
     expect(res.status).toBe(403);
     expect(initializeSchema).not.toHaveBeenCalled();

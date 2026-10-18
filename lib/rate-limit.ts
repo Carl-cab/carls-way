@@ -55,6 +55,13 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
   // many *different* intents one account can push at a rail in a burst, which
   // the claim says nothing about.
   'money:transfer-execute': { limit: 10, windowSeconds: 3600 },
+  // Schema migration by an authenticated operator. The pipeline is idempotent,
+  // so repetition is not itself damaging — but it executes ~103 DDL statements
+  // including a balance-table rewrite under ACCESS EXCLUSIVE, so an unbounded
+  // loop is a self-inflicted outage. The anonymous recovery paths have their
+  // own, tighter limit (`schema:bootstrap`, 3/hour); this one covers the
+  // operator path, which previously had none at all.
+  'schema:migrate-operator': { limit: 6, windowSeconds: 3600 },
   'contacts:add': { limit: 30, windowSeconds: 3600 },
   // Provider webhooks are server-to-server and signature-verified, but an
   // unauthenticated flood still burns compute before verification rejects it.

@@ -86,6 +86,34 @@ jobs:
           fi
           echo "No live provider flags enabled."
 
+      # Owner-facing progress report, rendered into this run's summary page.
+      #
+      # Deliberately not a web application: the GitHub Actions summary is
+      # already authenticated to people who can see the repository, needs no
+      # new credential or deployment, and cannot be reached by the public.
+      # The report prints no secrets, customer data or transaction detail —
+      # its inputs are git, a committed JSON file, and the values passed here.
+      #
+      # `if: always()` so the report still appears when an earlier step failed;
+      # that is exactly when the owner most wants to see where things stand.
+      # The values below come from steps that actually ran in this job, so the
+      # report never claims a check it did not observe.
+      - name: Progress report
+        if: always()
+        env:
+          # typecheck, lint, test and build all run earlier in this job and run
+          # sequentially, so a successful job means every one of them passed.
+          # Deriving all four from job.status is therefore accurate without
+          # parsing tool output — and when the job failed it points at the log
+          # rather than guessing which step broke.
+          OUTCOME: ${{ job.status == 'success' && '✅ clean' || '⚠️ see job log' }}
+        run: |
+          pnpm run status -- \
+            --typecheck="$OUTCOME" \
+            --lint="$OUTCOME" \
+            --build="$OUTCOME" \
+            >> "$GITHUB_STEP_SUMMARY"
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
