@@ -39,6 +39,12 @@ is on fire.
 4. **Pick a window.** The restore itself does not touch production, but you
    will be reading production backup artifacts and should not be doing it
    during a deploy.
+5. **Note which role `RESTORE_TARGET_URL` connects as.** Every command in this
+   runbook uses it, and every one of them is an **owner-role** operation:
+   `pg_restore`, `verify-migrate.sql`, the data checks, the test suite and the
+   privilege enumeration. There is deliberately no second, application-role
+   connection string, because with the grant check in step 4 nothing here
+   needs one — see the note there.
 
 ## Procedure
 
@@ -242,8 +248,20 @@ ORDER BY 2, 1, 3;
 SQL
 ```
 
-The role is `NOLOGIN` deliberately: these functions need no connection, so the
-rehearsal never creates a credential that could be used.
+The role is `NOLOGIN` deliberately. `has_table_privilege` and
+`has_sequence_privilege` are evaluated *by the owner's connection, about
+another role*, so no second connection string and no second credential is
+needed — which is why this runbook has one `RESTORE_TARGET_URL` rather than an
+owner URL and an application URL.
+
+**What this check does not cover.** It reads ACLs on tables and sequences. It
+does not prove the application *works* under only those grants: `EXECUTE` on a
+function, privileges a trigger needs, or anything beyond table and sequence
+DML would not appear here. Closing that gap means connecting as the role and
+exercising real queries, and the test suite cannot stand in for that for the
+DDL reason above. Treat a clean result as "the ACLs in the Phase 4 list are
+present", not "the application runs least-privilege" — those are different
+claims and only the first is measured here.
 
 **Measured, on a database built from this repository's schema sources.** With
 table grants applied via `GRANT ... ON ALL TABLES` and no sequence grants at
@@ -293,7 +311,7 @@ hold**:
 | Money columns are NUMERIC | The restore is not silently corrupt |
 | **Both** ledger invariants pass — wallets match their entries, **and** debits equal credits per currency | The financial invariants survived. They fail independently; one passing says nothing about the other |
 | Test suite result as the **owner** role | The application's SQL matches the restored schema. Not a grant check — the suite performs DDL |
-| Output of the `has_table_privilege` / `has_sequence_privilege` query, with the expected audit-table rows marked as such | These are the Phase 4 grants; neither the owner run nor the suite can produce them |
+| Output of the `has_table_privilege` / `has_sequence_privilege` query, with the expected audit-table rows marked as such | These are the Phase 4 grants; neither the owner run nor the suite can produce them. Covers table and sequence ACLs only — not function or trigger privileges |
 | Restore target destroyed, and `manna_app_probe` dropped | No stray copy of customer data, no leftover role |
 
 If any row fails, Phase 0 stays **NOT RUN** and the failure is the next
