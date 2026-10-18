@@ -1,7 +1,13 @@
 # Manna — Current Status
 
-Last updated: 2026-10-17 — verified against commit `d161728` (PR #56 merged).
-Command-level evidence for this state: `docs/audits/2026-10-17-baseline.md`.
+Last updated: 2026-10-18 — verified against commit `4e63bb9` (PRs #57, #59,
+#60, #61 merged).
+Command-level evidence for the preceding baseline:
+`docs/audits/2026-10-17-baseline.md`.
+
+Verified on `4e63bb9` itself, not on a near-identical tree: 55 files / 778
+tests pass on a database created fresh for the run, typecheck clean, lint 0
+errors / 28 warnings, `pnpm audit --prod` reports no known vulnerabilities.
 
 The header previously read "2026-06-28 (Phase B3.2b Settlement Balance
 Executor complete)" while the body had been revised as recently as
@@ -94,6 +100,41 @@ misleading of the two failure modes.
 - `JWT_SECRET` missing in production throws at request time
 - Friend accept/decline: server enforces recipient-only authorization (`friend_id = user.userId`)
 - Transfer intents: auth → KYC verified → encrypted bank account → velocity check → draft insert only (no money movement)
+
+### CI controls (merged 2026-10-18, PR #57)
+
+- **Secret scanning** — Gitleaks 8.21.2, checksum-verified, scanning full
+  history rather than the PR diff. SARIF is sanitised before upload and the
+  upload is gated on that sanitisation succeeding.
+- **Static analysis** — CodeQL `javascript-typescript`, `security-extended`,
+  in its own workflow so `security-events: write` is not granted to the job
+  running the test suite.
+- **ADVISORY, NOT ENFORCING.** Both run on every pull request, but a detection
+  only *fails the check*; it does not *block a merge* until the owner marks
+  these four as required under branch protection:
+  `install · typecheck · lint · test · build`, `dependency audit`,
+  `secret scan`, `analyze javascript-typescript`. That cannot be set from a
+  session. Until it is done, treat secret scanning as a signal rather than a
+  gate.
+- SHA-pinning of the third-party actions remains an open owner decision.
+
+### `/api/migrate` — measured weaknesses, NOT yet fixed (PR #61)
+
+`lib/__tests__/migrate-route-security.test.ts` pins these as present
+behaviour, so each is a live risk until the corresponding assertion is
+inverted. Full analysis in
+`docs/decisions/0005-migration-privilege-separation.md`.
+
+- **DDL on `GET`, reachable by CSRF.** Only `GET` is exported and the admin
+  session cookie is `sameSite: 'lax'`, which sends on top-level cross-site GET
+  navigation. One link click by an operations administrator runs 103
+  statements, including a balance-table rewrite under `ACCESS EXCLUSIVE`.
+- No `Origin`, `Referer` or CSRF-token check.
+- The authenticated operator path has **no rate limit** (the anonymous path
+  has 3/hour).
+- **No transaction** across the pipeline, so a failure leaves the schema
+  neither old nor new.
+- The 500 response returns raw `String(err)`.
 
 ---
 
