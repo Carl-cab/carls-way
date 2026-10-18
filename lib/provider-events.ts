@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { jsonbParam } from '@/lib/jsonb';
 import type postgres from 'postgres';
 
 /**
@@ -156,14 +157,32 @@ export async function markProviderEventFailed(
     // Preserve the event in the dead-letter queue for operator review/replay.
     // Idempotent: a provider that keeps redelivering refreshes the entry
     // instead of duplicating it.
-    const payload =
-      typeof row.raw_payload === 'string' ? row.raw_payload : JSON.stringify(row.raw_payload ?? null);
+    // Copying one jsonb column into another: bind the value, never
+    // re-serialised text. `postgres.js` returns the source document as an
+    // object, so the previous `JSON.stringify(...)` + `::jsonb` stored a jsonb
+    // **string scalar** here — making every operator query over a dead-lettered
+    // payload (`raw_payload->>'id'`, a `@>` filter, a path into data.object)
+    // return NULL or no rows, silently. A `::jsonb` cast does not avoid that:
+    // the cast is applied to text that is already a complete JSON document.
+    // It also turned a NULL payload into the jsonb `null` literal.
+    //
+    // The source value is bound AS IS, deliberately not normalised. The replay
+    // claim in lib/webhooks/replay.ts requires
+    // `dl.raw_payload IS NOT DISTINCT FROM e.raw_payload` so a corrupt row
+    // cannot be replayed under another event, and that equality is between the
+    // two stored representations. "Repairing" a legacy string-scalar source
+    // into a document here would store a shape the source does not have, the
+    // claim would never match, and the event would become **unreplayable** —
+    // measured. Preserving the source shape keeps both halves equal, so a
+    // document source yields a document and a legacy scalar yields the same
+    // scalar.
+    const payload = row.raw_payload;
     await tx`
       INSERT INTO webhook_dead_letters
         (provider, provider_event_id, event_type, raw_payload, failure_count, last_error)
       VALUES (
         ${provider}, ${providerEventId}, ${row.event_type},
-        ${payload}::jsonb, ${row.retry_count}, ${errorMessage}
+        ${jsonbParam(sql, payload)}, ${row.retry_count}, ${errorMessage}
       )
       ON CONFLICT (provider, provider_event_id) DO UPDATE SET
         failure_count = EXCLUDED.failure_count,

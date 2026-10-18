@@ -136,8 +136,26 @@ Both audit writers did this, and it was invisible because the paired reader
 `JSON.parse`d the scalar back — application reads were correct while the column
 was unqueryable. A reader of a column that may still hold legacy rows must use
 `readJsonbRecord()`; a bare `JSON.parse` on a corrected row throws
-`SyntaxError`. `provider_webhook_events.raw_payload` still has this defect. See
-`docs/decisions/0002-normalize-audit-jsonb-additively.md`.
+`SyntaxError`.
+
+**Copying one `jsonb` column into another is the trap that outlives the writer
+fix.** `postgres.js` returns the source as an object, so the natural
+`JSON.stringify(row.col)` plus `::jsonb` re-creates the string scalar even
+though both ends are correct. This is how `webhook_dead_letters.raw_payload`
+was double-encoded long after the `provider_webhook_events` writers had been
+fixed — and it silently turned a NULL payload into the jsonb `null` literal
+too. Bind the source value as is with `jsonbParam()`.
+
+**Do not "repair" the source shape while copying.** It looks like a free fix
+and it is not. `lib/webhooks/replay.ts` claims a dead letter only when
+`dl.raw_payload IS NOT DISTINCT FROM e.raw_payload`, deliberately, so a corrupt
+row cannot be replayed under another event — and that equality is between the
+two *stored* representations. Normalising one side makes a legacy event
+**unreplayable**: the claim matches nothing and the caller sees
+`not_found_or_already_replayed` instead of reaching recovery. Measured. The
+same caution applies to any copy whose two sides are later compared.
+
+See `docs/decisions/0002-normalize-audit-jsonb-additively.md`.
 
 **Authentication** in API routes always starts with:
 ```ts
@@ -364,11 +382,14 @@ arbitrary end user.
   f` on both audit tables), no `REVOKE` in any schema source, no hash chaining.
   The application's single DB role can `UPDATE` and `DELETE` audit rows with no
   residue. Append-only is a convention here, so do not claim tamper resistance.
-- `provider_webhook_events.raw_payload` is still double-encoded by its writer —
-  the same defect the audit writers had. Its readers already tolerate both
-  shapes (`lib/provider-events.ts:160`,
-  `lib/external-settlement-reconciliation.ts`), so nothing is broken today, but
-  SQL-side access to that column returns NULL.
+- Historical `provider_webhook_events.raw_payload` rows hold string scalars.
+  **Both current writers are correct** (`recordProviderEvent` and
+  `ProviderEventRepository` both use `sql.json`) — an earlier note here claimed
+  the writer was still broken, which was wrong; the comment in
+  `lib/external-settlement-reconciliation.ts` already said so. That query and
+  `parseStoredStripeEvent` normalize both shapes, so historical rows are read,
+  not rewritten. SQL-side access to a *historical* row still needs
+  `#>> '{}'`.
 - Historical audit rows written before the jsonb fix remain string scalars.
   They are evidence and are deliberately not rewritten, so `readJsonbRecord()`
   keeps its legacy branch for as long as those rows are retained.
