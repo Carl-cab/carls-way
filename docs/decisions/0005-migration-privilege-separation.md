@@ -209,23 +209,64 @@ r_old (still the app's credential) → SELECT  → ERROR: permission denied for 
 Ownership was granting the application everything **implicitly**. The moment it
 moves, a role holding no explicit grants has no access at all — so the live
 application would start failing every query while still pointed at the old
-credential. The sub-steps therefore are:
+credential.
 
-- **4a.** Grant the role `DATABASE_URL` currently uses the privileges it holds
-  only implicitly today: DML on business tables, `INSERT, SELECT` on audit
-  tables, **and sequence privileges** (below). Verify the application still
-  works. This is temporary scaffolding, revoked in 4e.
-- **4b.** Create `manna_app` and grant it the same set.
-- **4c.** `REASSIGN OWNED` to `manna_migrator`. Because of 4a the old
-  credential keeps working, so there is no window.
-- **4d.** `ALTER DEFAULT PRIVILEGES FOR ROLE manna_migrator IN SCHEMA public`
-  for both `TABLES` and `SEQUENCES`, so objects created later inherit the
-  grants instead of silently coming back inaccessible.
-- **4e.** After Phase 5 has succeeded, revoke 4a's temporary grants from the
-  old role.
+### Pre-granting to the old role does not work, and this is the trap
 
-Alternatively 4c and Phase 5 can be run as one coordinated cutover with a
-maintenance window; 4a exists so that a window is not *required*.
+The obvious repair is to grant the old role its privileges explicitly *before*
+reassigning. **It has no effect**, because the owner's ACL entry already
+contains every privilege, so the grant adds nothing distinguishable, and
+`REASSIGN OWNED` replaces that entry wholesale. Measured, granting to the owner
+both as itself and from a superuser:
+
+```
+GRANT SELECT, INSERT, UPDATE, DELETE ON t TO r_old   (r_old is the owner)
+relacl before reassign  →  {r_old=arwdDxt/r_old}      ← the grant added nothing
+REASSIGN OWNED BY r_old TO r_new
+relacl after reassign   →  {r_new=arwdDxt/r_new}      ← old entry replaced
+r_old SELECT → ERROR: permission denied for table t
+r_old INSERT → ERROR: permission denied for table t
+```
+
+An earlier revision of this record proposed exactly that pre-grant as the fix.
+It was wrong, and it would have produced the same outage with one extra step
+that did nothing. Privileges can only be granted to the old role **after** it
+stops being the owner, because only then does a grant create a real ACL entry.
+
+### What does work: reassign and re-grant in one transaction
+
+PostgreSQL DDL is transactional, so both can commit together and **no window
+exists and no maintenance pause is required.** Measured:
+
+```sql
+BEGIN;
+  REASSIGN OWNED BY <old_role> TO manna_migrator;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO <old_role>;
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO <old_role>;
+COMMIT;
+```
+
+```
+relacl after  →  {r_new=arwdDxt/r_new,r_old=arwd/r_new}   ← a real, separate entry
+r_old SELECT  →  1          r_old INSERT → succeeded
+owner         →  r_new
+```
+
+The sub-steps therefore are:
+
+- **4a.** Create `manna_app`. No grants yet.
+- **4b.** In **one transaction**: `REASSIGN OWNED` to `manna_migrator`; grant the
+  old `DATABASE_URL` role DML on business tables plus `USAGE, SELECT` on all
+  sequences, so it keeps working unchanged; grant `manna_app` the same set plus
+  `INSERT, SELECT` on the audit tables and nothing more.
+- **4c.** `ALTER DEFAULT PRIVILEGES FOR ROLE manna_migrator IN SCHEMA public`
+  for both `TABLES` and `SEQUENCES`, so objects created later inherit the grants
+  instead of silently coming back inaccessible.
+- **4d.** Verify the application still works on the old credential before
+  touching `DATABASE_URL`.
+- **4e.** Revoke the old role's grants only once the **rollback window has
+  closed** — not merely once Phase 5 has succeeded. Until then they are what
+  makes the Phase 5 rollback viable.
 
 **Sequence privileges are not optional.** Every `SERIAL` column is backed by a
 sequence, and the application omits those `id` columns on insert, so it calls
@@ -247,16 +288,27 @@ by running the test suite against it — the grant list above is derived from th
 schema, not from having watched the application fail, so treat it as a starting
 point rather than complete.
 
-**Rollback requires restoring ownership, not only grants** —
-`ALTER TABLE ... OWNER TO` or pointing `DATABASE_URL` back — because
-`ALTER TABLE` is owner-only and a grant-only rollback leaves the runner failing
-with `must be owner`, which reads as a new fault rather than an incomplete
-rollback.
+### Two different rollbacks, which are easy to conflate
+
+- **Rolling back Phase 5** (the credential switch) means pointing
+  `DATABASE_URL` at the old role again. It works **only while 4b's grants to
+  that role persist** — hence 4e's ordering. It does **not** restore ownership,
+  and it does not need to: the application never needed ownership, only the
+  grants.
+- **Rolling back Phase 4** (the ownership move) is a separate, larger
+  operation: `REASSIGN OWNED BY manna_migrator TO <old_role>`, or
+  `ALTER TABLE ... OWNER TO` per object. This is required if the migration
+  runner itself must go back to the old credential, because `ALTER TABLE` is
+  owner-only — a grant-only rollback leaves the runner failing with
+  `must be owner`, which reads as a new fault rather than an incomplete
+  rollback.
+
+Stating both matters because the cheap rollback (revert an environment
+variable) does not undo the expensive change, and someone reaching for it
+during an incident needs to know which problem it actually solves.
 
 **Phase 5 — switch `DATABASE_URL`** to `manna_app`. Reversible by reverting the
-environment variable, which is why 4a's grants must still be in place at this
-point: if they have already been revoked, reverting the variable restores a
-credential that no longer works.
+environment variable, subject to the ordering constraint above.
 
 **Phase 6 — audit immutability**, per 0004: the two triggers first (independent
 of all the above, so they could in fact land at any point), then the
