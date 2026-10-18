@@ -232,6 +232,20 @@ DDL reason above. Treat a clean result as "the ACLs in the Phase 4 list are
 present", not "the application runs least-privilege" — those are different
 claims and only the first is measured here.
 
+**That gap is Phase 4's to close, and it is open.** Verifying the application
+actually runs under the grant list needs a connection as a non-owner role plus
+a **permission-focused query set that performs only DML** — no `initializeSchema()`,
+no `CREATE TABLE`. No such set exists in this repository today; the test suite
+is the wrong instrument because 32 of its 56 files perform DDL. Building it
+belongs with decision 0005 Phase 4, where the grant list is applied for real,
+not with this rehearsal, which is read-only with respect to roles. Recorded
+here so it is an open task rather than a caveat someone reads as "handled":
+
+- [ ] **Phase 4 prerequisite:** a DML-only permission probe, run as the
+      application role against a restored copy, covering every table the
+      application reads and writes plus the functions and triggers it relies
+      on. Until it exists, "least-privilege works" is unverified.
+
 **Measured, on a database built from this repository's schema sources.** With
 table grants applied via `GRANT ... ON ALL TABLES` and no sequence grants at
 all, the query returns **40 rows covering all 20 `_id_seq` sequences** — by
