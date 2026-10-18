@@ -106,10 +106,13 @@ question is whether audit records written from now on are queryable; they are.
 Historical rows remain reachable by `metadata #>> '{}'`, so they are awkward,
 not lost — and a view can paper over that without touching a byte.
 
-**Indexing is the one real cost.** A GIN index on a mixed column indexes legacy
-rows uselessly, so a jsonb index on either column should be created `WHERE
-jsonb_typeof(...) = 'object'` — a partial index, matching the shape already used
-for `velocity_checks`. No such index exists yet, so nothing is blocked today.
+**Indexing is a minor cost, not a blocker.** A GIN index on a mixed column is
+created without complaint and works — measured, on a column holding one legacy
+scalar and one document. It simply also indexes the legacy rows, which is
+wasted space rather than an error, and those rows cannot satisfy a containment
+or path query either way. So a `WHERE jsonb_typeof(...) = 'object'` predicate is
+an available optimization — a partial index, matching the shape already used for
+`velocity_checks` — not a requirement. No such index exists yet in any case.
 
 **If a uniform column is later wanted**, the honest route is to write the
 normalized value to a **new** column, leave the original untouched, and record

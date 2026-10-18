@@ -205,8 +205,7 @@ architectural decision appends one under `docs/decisions/`.
 
 ### 2026-10-17 — Audit JSONB double-encoding repair
 
-- **Commit / PR.** `fix/audit-jsonb-double-encoding` — SHA and PR number
-  appended on push, per the rule the #56 entry recorded.
+- **Commit / PR.** `9f60d56` on `fix/audit-jsonb-double-encoding`, PR #58.
 - **Purpose and scope.** Both audit writers bound `JSON.stringify(value)` to a
   `jsonb` column, which stores a jsonb **string scalar** rather than a
   document. Measured: `jsonb_typeof` = `'string'`, `metadata->>'ip'` = NULL,
@@ -259,8 +258,10 @@ architectural decision appends one under `docs/decisions/`.
   `AdminAuditService.verifyImmutability()` still returns a hardcoded `'clean'`;
   `AuditLogRepository.verifyImmutability()` still compares `COUNT(*)` to
   `MAX(id)` and so detects deletes but not updates. Both untouched. A GIN index
-  on either jsonb column would need to be partial
-  (`WHERE jsonb_typeof(...) = 'object'`) while legacy rows remain; none exists.
+  on either jsonb column would work as-is on the mixed column — measured, it
+  creates without complaint — so a `WHERE jsonb_typeof(...) = 'object'`
+  predicate is an optional optimization that skips indexing legacy scalar rows,
+  not a requirement. No such index exists.
 - **Rollback.** Revert the commit. Nothing stateful changes, and no historical
   row was modified, so there is nothing to restore.
 - **Next recommended action.** Task 4 — the focused security review of
