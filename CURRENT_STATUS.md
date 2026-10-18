@@ -1,6 +1,6 @@
 # Manna — Current Status
 
-Last updated: 2026-10-17 — verified against commit `40946fb` (PR #55).
+Last updated: 2026-10-17 — verified against commit `d161728` (PR #56 merged).
 Command-level evidence for this state: `docs/audits/2026-10-17-baseline.md`.
 
 The header previously read "2026-06-28 (Phase B3.2b Settlement Balance

@@ -203,6 +203,110 @@ architectural decision appends one under `docs/decisions/`.
 - **Next recommended action.** Secret scanning in CI, as the smallest remaining
   control with a real failure mode behind it.
 
+### 2026-10-17 — PR #56 merged; secret scanning and SAST added
+
+- **Commit / PR.** PR #56 merged as `d161728`. This entry's own change is
+  PR #57 on `ci/secret-scanning-and-sast`, commits `1a9b244`, `48fd84e`,
+  `23e6032`, plus the merge of `master` that resolved the `PROJECT_MEMORY.md`
+  conflict created by PR #58 landing first.
+- **Purpose.** Two of the three controls the 2026-10-17 baseline audit recorded
+  as MISSING: secret scanning and static application security testing. The
+  third, `.claude/` session hooks, is still open.
+- **Financial/security behaviour affected.** No application code changed. Both
+  additions are CI controls. A committed Plaid, Stripe, Wise, Supabase or JWT
+  credential now **fails the pull request's checks**. It does not yet *block* a
+  merge: that requires the owner to mark `secret scan` a required check in
+  branch protection, which cannot be done from a session. Until then the
+  control is a loud signal, not a gate — CodeRabbit was right to flag the
+  original wording here as an overclaim.
+- **Tests run.** Suite unchanged at 53 files / 743 tests, typecheck clean, lint
+  0 errors / 28 warnings. The security controls were validated by synthetic
+  finding rather than by assertion — see below.
+- **Migration impact.** None.
+- **Unresolved findings.** `.claude/` session hooks absent. Branch protection
+  still cannot be set from a session and remains an owner action; the checks to
+  mark required are now four: `install · typecheck · lint · test · build`,
+  `dependency audit`, `secret scan`, and `analyze javascript-typescript`.
+  CodeQL's behaviour could not be validated locally (see below).
+- **Rollback.** Revert the commit. Both controls are additive workflow files;
+  nothing stateful changes.
+- **Next recommended action.** The `auditLog` jsonb double-encoding repair
+  (Task 3), whose investigation is recorded in
+  `docs/audits/2026-10-17-audit-log-encoding.md`.
+
+**Secret scanning.** Gitleaks 8.21.2, pinned by version and verified against
+the SHA256 in the release's own checksum manifest, scanning all 92 non-merge
+commits rather than the pull request's diff — a credential committed and later
+"removed" is still in the pack, so a diff-only scan would call that clean.
+
+The repository had two pre-existing findings, both `sk_live_abc123` in
+`lib/__tests__/security-kyc.test.ts`. Verified synthetic by reading the file:
+they sit in a table of key shapes (`pk_live_abc123`, `sk_live_`,
+`sk_prod_abc123`, `xsk_live_abc123`) asserting that a live-shaped key does not
+enable KYC auto-verification. The exception is keyed on **the literal, not the
+path**, so a genuine credential added to that same file still fails. Removing
+the fixture was considered and rejected: the test asserts a live-money safety
+property and needs a live-shaped literal to assert against.
+
+**Static analysis.** CodeQL, `javascript-typescript`, `security-extended`
+rather than the default suite — this application takes untrusted request
+bodies, builds SQL, verifies webhook signatures and moves money.
+`security-and-quality` was rejected because its maintainability queries would
+bury security findings. In its own workflow so `security-events: write` is not
+granted to the job running the test suite.
+
+**Validation by synthetic finding**, since a security control that has never
+failed is not known to work:
+
+| Probe | Expected | Result |
+|---|---|---|
+| Clean history with the config | 0 findings, exit 0 | 0 findings, exit 0 |
+| Real-shaped Stripe key in a new file | detected, exit 1 | detected, exit 1 |
+| Real-shaped key in the **allowlisted** file | still detected | still detected, exit 1 |
+| `--redact` on, `dir` mode | value absent from report | 0 occurrences |
+| `--redact` off, `dir` mode | value present | 2 occurrences |
+| `--redact` on, `git` mode, secret in the commit message | value absent | **1 occurrence — leak** |
+| same, after the `jq` strip | value absent | 0 occurrences |
+
+The third row is a correction to this entry's first version, found by
+CodeRabbit and then reproduced. `--redact` does not cover everything the SARIF
+writer emits: when a credential also appears in a commit message, the full
+value survives at `.runs[].results[].partialFingerprints.commitMessage`. The
+original measurement used `dir` mode on a file and so missed the mode CI
+actually runs. The job now strips that field before upload and fails if it
+survives. `partialFingerprints` only aids alert de-duplication; file, line and
+rule are untouched, verified by reading `a.ts:1` back out of the stripped
+document.
+
+A third correction, from the re-review of the fix itself: the upload was gated
+on `hashFiles('gitleaks.sarif') != ''`, which a *failed* sanitization still
+satisfies — jq or mv failing leaves the original file on disk, so the unredacted
+commit message would have been published by the very step added to remove it.
+Demonstrated locally: after a deliberately broken `jq` filter the step exits 3
+and the leak is still in the file. The upload now requires
+`steps.sanitize.outcome == 'success'`, so a broken sanitizer loses the artifact
+instead of leaking through it.
+
+A second correction from the same review: the allowlist regex was unanchored,
+so a real credential merely *beginning* with `sk_live_abc123` was suppressed —
+reproduced, then fixed by anchoring against the extracted secret rather than
+the whole rule match. The suggested remedy of anchoring with
+`regexTarget = "match"` was measured and rejected: it breaks the allowlist
+outright, so CI would fail on the known fixtures.
+
+The third row is the one that matters: it proves the exception is narrow rather
+than a blanket path exemption. The last two show `--redact` is load-bearing — a
+scanner that prints the credential it found turns a private leak into a public
+one, since CI logs and artifacts are retained.
+
+**CodeQL could not be validated locally** and is recorded as NOT RUN rather
+than passed. It needs the GitHub-hosted analysis service; this environment has
+no way to execute it. Its first real run is on this pull request.
+
+**On detection being an incident.** The job's failure message requires rotation
+at the provider first, then a written record of the exposure, and only then
+history cleaning — because deleting the commit does not un-expose a credential
+that was already pushed to a remote.
 ### 2026-10-17 — Audit JSONB double-encoding repair
 
 - **Commit / PR.** `9f60d56` on `fix/audit-jsonb-double-encoding`, PR #58.
