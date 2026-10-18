@@ -110,8 +110,9 @@ sequence below.
 
 ### Option B — Separate runtime and migration credentials, keep a restricted mechanism
 
-Two roles. `manna_app` (runtime) owns nothing, holds DML on business tables and
-`INSERT, SELECT` only on the audit tables. `manna_migrator` owns the objects and
+Two roles. `manna_app` (runtime) owns nothing, holds DML on business tables,
+`INSERT, SELECT` only on the audit tables, and `USAGE, SELECT` on every
+sequence — without which inserts into `SERIAL`-keyed tables fail outright. `manna_migrator` owns the objects and
 is used *only* by a migration runner that is not publicly reachable. The narrow
 `auth-repair` allowlist is retained as a separately gated break-glass.
 
@@ -193,18 +194,69 @@ files in `migrations/` are already in that position.
 validated against a restored copy from Phase 0. The route still works at this
 point, so there is no window where neither mechanism functions.
 
-**Phase 4 — ownership and grants.** `REASSIGN OWNED` to `manna_migrator`, grant
-`manna_app` DML on business tables and `INSERT, SELECT` on audit tables, set
-`ALTER DEFAULT PRIVILEGES` so later objects inherit it. Rehearse on the restored
-copy and enumerate every grant the app needs by running the test suite against
-it. **Rollback requires restoring ownership, not only grants** —
+**Phase 4 — ownership and grants.** This phase has a strict internal order,
+because getting it wrong takes production down. An earlier draft of this record
+put `REASSIGN OWNED` first and the `DATABASE_URL` switch in Phase 5, which
+opens an outage window between them. Measured:
+
+```
+r_old owns t          → SELECT count(*) FROM t   → 1
+REASSIGN OWNED BY r_old TO r_new
+r_old (still the app's credential) → SELECT  → ERROR: permission denied for table t
+                                   → INSERT  → ERROR: permission denied for table t
+```
+
+Ownership was granting the application everything **implicitly**. The moment it
+moves, a role holding no explicit grants has no access at all — so the live
+application would start failing every query while still pointed at the old
+credential. The sub-steps therefore are:
+
+- **4a.** Grant the role `DATABASE_URL` currently uses the privileges it holds
+  only implicitly today: DML on business tables, `INSERT, SELECT` on audit
+  tables, **and sequence privileges** (below). Verify the application still
+  works. This is temporary scaffolding, revoked in 4e.
+- **4b.** Create `manna_app` and grant it the same set.
+- **4c.** `REASSIGN OWNED` to `manna_migrator`. Because of 4a the old
+  credential keeps working, so there is no window.
+- **4d.** `ALTER DEFAULT PRIVILEGES FOR ROLE manna_migrator IN SCHEMA public`
+  for both `TABLES` and `SEQUENCES`, so objects created later inherit the
+  grants instead of silently coming back inaccessible.
+- **4e.** After Phase 5 has succeeded, revoke 4a's temporary grants from the
+  old role.
+
+Alternatively 4c and Phase 5 can be run as one coordinated cutover with a
+maintenance window; 4a exists so that a window is not *required*.
+
+**Sequence privileges are not optional.** Every `SERIAL` column is backed by a
+sequence, and the application omits those `id` columns on insert, so it calls
+`nextval()`. Measured:
+
+```
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES ... TO r_app
+r_app: INSERT INTO t (v) VALUES (...)   → ERROR: permission denied for sequence t_id_seq
+GRANT USAGE, SELECT ON ALL SEQUENCES ... TO r_app
+r_app: INSERT INTO t (v) VALUES (...)   → INSERT 0 1
+```
+
+Table grants alone leave every insert failing. `GRANT USAGE, SELECT ON ALL
+SEQUENCES IN SCHEMA public` plus the default-privileges entry in 4d are both
+required.
+
+Rehearse the whole phase on the Phase 0 restored copy and enumerate every grant
+by running the test suite against it — the grant list above is derived from the
+schema, not from having watched the application fail, so treat it as a starting
+point rather than complete.
+
+**Rollback requires restoring ownership, not only grants** —
 `ALTER TABLE ... OWNER TO` or pointing `DATABASE_URL` back — because
 `ALTER TABLE` is owner-only and a grant-only rollback leaves the runner failing
 with `must be owner`, which reads as a new fault rather than an incomplete
 rollback.
 
 **Phase 5 — switch `DATABASE_URL`** to `manna_app`. Reversible by reverting the
-environment variable.
+environment variable, which is why 4a's grants must still be in place at this
+point: if they have already been revoked, reverting the variable restores a
+credential that no longer works.
 
 **Phase 6 — audit immutability**, per 0004: the two triggers first (independent
 of all the above, so they could in fact land at any point), then the

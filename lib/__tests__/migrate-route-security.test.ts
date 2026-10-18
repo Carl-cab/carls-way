@@ -20,6 +20,7 @@
  * See docs/decisions/0005-migration-privilege-separation.md.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { NextRequest } from 'next/server';
@@ -69,15 +70,30 @@ function request(headers: Record<string, string> = {}) {
   return new NextRequest('https://example.test/api/migrate', { headers });
 }
 
-beforeAll(() => {
+/**
+ * Highest `audit_logs.id` before this file ran. Cleanup is scoped to rows above
+ * it, so a concurrent or earlier file's audit evidence is never deleted — the
+ * same watermark approach as migrate-route-execution.test.ts. Matching on
+ * action plus a time window would reach another file's rows, which on an audit
+ * table is destroying exactly the evidence the suite exists to check.
+ */
+let auditWatermark = 0;
+
+beforeAll(async () => {
   currentAdmin = null;
   currentUser = null;
+  const [row] = await sql<{ max: number | null }[]>`SELECT MAX(id) AS max FROM audit_logs`;
+  auditWatermark = row?.max ?? 0;
 });
 
 afterAll(async () => {
-  await sql`DELETE FROM audit_logs WHERE action IN (
-    'schema_migration_run', 'schema_migration_bootstrap', 'money_precision_upgraded'
-  ) AND created_at > NOW() - INTERVAL '10 minutes'`;
+  await sql`
+    DELETE FROM audit_logs
+    WHERE id > ${auditWatermark}
+      AND action IN (
+        'schema_migration_run', 'schema_migration_bootstrap', 'money_precision_upgraded'
+      )
+  `;
 });
 
 // ─── The HTTP surface ────────────────────────────────────────────────────────
@@ -235,7 +251,11 @@ describe('failure behaviour', () => {
     const base = new URL(process.env.DATABASE_URL!);
     const adminUrl = new URL(base.toString());
     adminUrl.pathname = '/postgres';
-    const scratchName = 'manna_migrate_atomicity';
+    // Unique per invocation, and never dropped unless this run created it.
+    // A fixed name would let two invocations sharing DATABASE_URL destroy each
+    // other's scratch database, and would delete a developer database that
+    // happened to carry the same name.
+    const scratchName = `manna_migrate_atomicity_${randomUUID().replaceAll('-', '')}`;
     const scratchUrl = new URL(base.toString());
     scratchUrl.pathname = `/${scratchName}`;
 
@@ -244,9 +264,10 @@ describe('failure behaviour', () => {
 
     const adminConn = connect(adminUrl.toString());
     let scratch: ReturnType<typeof postgres> | null = null;
+    let created = false;
     try {
-      await adminConn.unsafe(`DROP DATABASE IF EXISTS ${scratchName}`);
       await adminConn.unsafe(`CREATE DATABASE ${scratchName}`);
+      created = true;
       scratch = connect(scratchUrl.toString());
 
       await initializeSchema(scratch);
@@ -282,7 +303,7 @@ describe('failure behaviour', () => {
       expect(probe).toHaveLength(0);
     } finally {
       if (scratch) await scratch.end();
-      await adminConn.unsafe(`DROP DATABASE IF EXISTS ${scratchName}`);
+      if (created) await adminConn.unsafe(`DROP DATABASE IF EXISTS ${scratchName}`);
       await adminConn.end();
     }
   }, 180000);
