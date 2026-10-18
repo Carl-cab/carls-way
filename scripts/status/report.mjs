@@ -22,34 +22,33 @@
  *
  * It prints no secrets, no customer data and no transaction detail: its inputs
  * are `git`, a committed JSON file, and optional numeric arguments.
+ *
+ * ── Why this is .mjs and not .ts ───────────────────────────────────────────
+ *
+ * A deliberate exception to CLAUDE.md's "all new files must be .ts" rule,
+ * recorded there too rather than left as a silent violation.
+ *
+ * The first version was `.ts` run via `tsx`, which failed in CI with
+ * `tsx: not found` — it worked locally only because `npx` fetches on demand,
+ * while CI installs `--frozen-lockfile` from declared dependencies. The two
+ * ways to keep `.ts` both cost something: adding `tsx` pulls a build toolchain
+ * into a payments repository that has an open supply-chain decision (0006)
+ * purely to render a Markdown table, and Node's native type stripping needs
+ * 22.6+ while CI pins Node 20 — that route would have passed locally and
+ * failed in CI again.
+ *
+ * This script has no meaningful type surface: its inputs are git output, a
+ * JSON file and argv strings. Plain ESM runs on Node 20 with no flags and no
+ * dependency, so that is what it is.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
-type Status = 'VERIFIED' | 'PARTIAL' | 'BLOCKED' | 'NOT RUN' | 'NOT APPLICABLE';
-
-interface Requirement {
-  name: string;
-  status: Status;
-  evidence: string;
-}
-interface Gate {
-  title: string;
-  requirements: Requirement[];
-}
-interface Readiness {
-  updated: string;
-  verifiedAgainstCommit: string;
-  gates: Record<string, Gate>;
-  operational: Requirement[];
-  ownerActions: { action: string; why: string }[];
-}
-
 const ROOT = process.cwd();
 const READINESS = path.join(ROOT, 'scripts/status/readiness.json');
 
-function git(...args: string[]): string {
+function git(...args) {
   try {
     return execFileSync('git', args, { encoding: 'utf8' }).trim();
   } catch {
@@ -58,12 +57,12 @@ function git(...args: string[]): string {
 }
 
 /** `--key=value` arguments, so CI can pass real results it actually observed. */
-function arg(name: string): string | undefined {
+function arg(name) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : undefined;
 }
 
-const ICON: Record<Status, string> = {
+const ICON = {
   VERIFIED: '✅',
   PARTIAL: '🟡',
   BLOCKED: '⛔',
@@ -71,27 +70,27 @@ const ICON: Record<Status, string> = {
   'NOT APPLICABLE': '—',
 };
 
-function requirementRows(reqs: Requirement[]): string {
+function requirementRows(reqs) {
   return reqs
     .map((r) => `| ${ICON[r.status]} ${r.status} | ${r.name} | ${r.evidence} |`)
     .join('\n');
 }
 
-function tally(reqs: Requirement[]): string {
-  const counts = new Map<Status, number>();
+function tally(reqs) {
+  const counts = new Map();
   for (const r of reqs) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
-  return (['VERIFIED', 'PARTIAL', 'NOT RUN', 'BLOCKED', 'NOT APPLICABLE'] as Status[])
+  return ['VERIFIED', 'PARTIAL', 'NOT RUN', 'BLOCKED', 'NOT APPLICABLE']
     .filter((s) => counts.get(s))
     .map((s) => `${counts.get(s)} ${s}`)
     .join(' · ');
 }
 
-function main(): void {
+function main() {
   if (!existsSync(READINESS)) {
     console.error(`Missing ${READINESS}`);
     process.exit(1);
   }
-  const r = JSON.parse(readFileSync(READINESS, 'utf8')) as Readiness;
+  const r = JSON.parse(readFileSync(READINESS, 'utf8'));
 
   const head = git('rev-parse', '--short', 'HEAD');
   const headFull = git('rev-parse', 'HEAD');
@@ -108,7 +107,7 @@ function main(): void {
   const audit = arg('audit');
 
   const notRun = '⬜ NOT RUN (not supplied to this run)';
-  const out: string[] = [];
+  const out = [];
 
   out.push('# Manna — Progress Report');
   out.push('');

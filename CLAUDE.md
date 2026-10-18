@@ -80,6 +80,16 @@ Client (React 19)
 
 **TypeScript** is used throughout. All new files must be `.ts` or `.tsx`. Avoid `any` types; define interfaces for all API request and response shapes.
 
+One documented exception: `scripts/status/report.mjs` is plain ESM. It was
+`.ts` run through `tsx` and failed CI with `tsx: not found` — `npx` fetches on
+demand locally, while CI installs `--frozen-lockfile` from declared
+dependencies only. Both ways to keep `.ts` cost something: adding `tsx` pulls a
+build toolchain in to render a Markdown table, and Node's native type stripping
+needs 22.6+ while **CI pins Node 20**, so that route passes locally and fails
+in CI. The script's inputs are git output, a JSON file and argv strings, so it
+has no type surface worth the dependency. A new **ops script** with no type
+surface may follow it; application code may not.
+
 **Styling** uses Tailwind CSS utility classes exclusively. Do not write custom CSS outside of `app/globals.css`. The design language uses `blue-700` as the primary brand color. Red is
 reserved for semantic meaning only — errors, failed and returned transfer
 states, insufficient-balance warnings — so a red element should mean
