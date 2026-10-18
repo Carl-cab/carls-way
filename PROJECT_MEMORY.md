@@ -276,10 +276,11 @@ architectural decision appends one under `docs/decisions/`.
 - **Next recommended action.** Task 4 — the focused security review of
   `app/api/migrate/route.ts`.
 
-### 2026-10-18 — Dead-letter queue JSONB double-encoding; PR #58 merged
+### 2026-10-18 — PR #59: dead-letter queue JSONB encoding (and PR #58 merged)
 
-- **Commit / PR.** PR #58 merged as `244c91e`. This entry's own change is on
-  `fix/dead-letter-jsonb-encoding`; SHA and PR appended on push.
+- **Commit / PR.** This entry's own change is **PR #59** on
+  `fix/dead-letter-jsonb-encoding`, commits `33cf1ed` and the review-fix commit
+  below. Separately recorded here: PR #58 merged as `244c91e`.
 - **Purpose and scope.** `markProviderEventFailed()` copies a dead-lettered
   payload from `provider_webhook_events.raw_payload` into
   `webhook_dead_letters.raw_payload`. Both columns are `jsonb` and **both
@@ -287,8 +288,8 @@ architectural decision appends one under `docs/decisions/`.
   `JSON.stringify(row.raw_payload)` then `${payload}::jsonb` — and a cast
   applied to text that is already a complete JSON document yields a jsonb
   **string scalar**. Correct writers at both ends, double-encoded destination
-  between them. Fixed with a new `normalizeJsonbDocument()` plus the existing
-  `jsonbParam()`.
+  between them. Fixed by binding the source value as is with the existing
+  `jsonbParam()` and dropping the cast.
 - **Financial/security behaviour affected.** No money path. `webhook_dead_letters`
   is the operator-review queue for events that exhausted their retries, and
   every SQL-side look into a dead-lettered payload (`raw_payload->>'id'`, a
@@ -313,8 +314,26 @@ architectural decision appends one under `docs/decisions/`.
   6.** Full suite 756 → **762 tests across 54 files**, all passing on a database
   created fresh for the run. Typecheck clean, lint 0 errors / 28 warnings, build
   clean. Mutation-checked: restoring `JSON.stringify` + `::jsonb` fails 4 of 6;
-  keeping `jsonbParam` but dropping `normalizeJsonbDocument` fails exactly 1 —
-  the legacy source case — so the two halves are independently guarded.
+  reintroducing the shape normalization described below fails 3 of 9, two of
+  them replay-equality cases.
+- **A regression I introduced and CodeRabbit caught.** The first version of this
+  fix also normalized a legacy string-scalar source into a document while
+  copying it into the queue — an apparently free repair of a historical row. It
+  is not free. `claimDeadLetterForReplay()` (`lib/webhooks/replay.ts:101`)
+  requires `dl.raw_payload IS NOT DISTINCT FROM e.raw_payload`, deliberately, so
+  a corrupt row cannot be replayed under another event, and that equality is
+  between the two **stored** representations. Normalising one side makes the
+  claim match nothing, so a legacy dead-lettered event becomes
+  **unreplayable** — `not_found_or_already_replayed` instead of recovery.
+  Measured: source `string` vs queue `object` gives `IS NOT DISTINCT FROM` =
+  false; preserving the shape gives true. Corrected to bind the source value as
+  is; `normalizeJsonbDocument()` was removed rather than left unused. Three new
+  cases now assert the replay-claim equality **directly** for document,
+  legacy-scalar and NULL payloads — the guard whose absence let the regression
+  be written, since the original tests asserted only the stored shape, which the
+  wrong behaviour satisfied. The general lesson, recorded in `CLAUDE.md`: fix
+  the encoding *mechanism*, never change the *value*, wherever two
+  representations are later compared.
 - **Migration impact.** None. No schema change, no `/api/migrate` change.
 - **Unresolved findings.** Audit immutability remains unenforced (no trigger,
   rule, RLS, `REVOKE` or hash chaining); both `verifyImmutability()`

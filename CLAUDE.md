@@ -144,8 +144,16 @@ fix.** `postgres.js` returns the source as an object, so the natural
 though both ends are correct. This is how `webhook_dead_letters.raw_payload`
 was double-encoded long after the `provider_webhook_events` writers had been
 fixed — and it silently turned a NULL payload into the jsonb `null` literal
-too. Use `normalizeJsonbDocument()` then `jsonbParam()`, which also repairs a
-legacy string-scalar source row instead of carrying it forward.
+too. Bind the source value as is with `jsonbParam()`.
+
+**Do not "repair" the source shape while copying.** It looks like a free fix
+and it is not. `lib/webhooks/replay.ts` claims a dead letter only when
+`dl.raw_payload IS NOT DISTINCT FROM e.raw_payload`, deliberately, so a corrupt
+row cannot be replayed under another event — and that equality is between the
+two *stored* representations. Normalising one side makes a legacy event
+**unreplayable**: the claim matches nothing and the caller sees
+`not_found_or_already_replayed` instead of reaching recovery. Measured. The
+same caution applies to any copy whose two sides are later compared.
 
 See `docs/decisions/0002-normalize-audit-jsonb-additively.md`.
 

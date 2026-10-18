@@ -66,49 +66,91 @@ was one table over. Both `CLAUDE.md` statements are corrected.
 
 ## Decision
 
-Add `normalizeJsonbDocument()` to `lib/jsonb.ts` and use it with `jsonbParam()`
-wherever a value read from one `jsonb` column is written to another:
+Bind the source value **as is** with `jsonbParam()` and drop the `::jsonb`
+cast:
 
 ```ts
-const payload = normalizeJsonbDocument(row.raw_payload);
+const payload = row.raw_payload;
 ... VALUES (..., ${jsonbParam(sql, payload)}, ...)
 ```
 
-It differs from `readJsonbRecord()` deliberately. `readJsonbRecord` is for
-metadata records and wraps anything non-object in `{ raw }`;
-`normalizeJsonbDocument` preserves arrays and scalars unchanged, because a
-webhook payload may legitimately be any JSON document. Text that does not parse
-is returned unchanged and therefore stored verbatim as a jsonb string: losing a
-dead-letter payload is worse than storing it awkwardly.
+A document source yields a document; a legacy string scalar yields the same
+scalar; NULL yields SQL NULL.
 
-It also **repairs** a legacy string-scalar source row on the way through,
-rather than carrying the double-encoding forward into the new table. This is
-not a rewrite of history — the source row is untouched; only the new
-`webhook_dead_letters` row is written correctly.
+### The first version of this fix normalized the shape, and that was wrong
+
+It also parsed a legacy string-scalar source into a document on the way into
+the queue — an apparently free repair of a historical row. CodeRabbit's review
+caught that it is not free, and the claim checked out:
+
+`claimDeadLetterForReplay()` (`lib/webhooks/replay.ts:101`) joins the queue row
+to its source row and requires
+
+```sql
+AND dl.raw_payload IS NOT DISTINCT FROM e.raw_payload
+```
+
+deliberately, so that a corrupt row cannot be replayed under another event. The
+equality is between the two **stored** representations. Transforming one side
+therefore breaks the claim: it matches no row, and the caller sees
+`not_found_or_already_replayed` rather than reaching recovery. A legacy
+dead-lettered event would have become **unreplayable** — a functional
+regression introduced by a fix for a querying defect.
+
+Measured directly, source scalar against both candidate queue shapes:
+
+| Queue row | source `jsonb_typeof` | queue `jsonb_typeof` | `IS NOT DISTINCT FROM` |
+|---|---|---|---|
+| normalized (first version) | `string` | `object` | **false** |
+| preserved (this decision) | `string` | `string` | `true` |
+
+So the repair is not available from this seat at all. Making historical rows
+uniform means changing the source too, which is a separately authorized
+migration — the same conclusion as 0002, reached here by a different route.
+
+`normalizeJsonbDocument()`, added for that first version, is **removed** rather
+than left exported and unused.
+
+### What this says about the general rule
+
+"Normalize on the way through" is safe only where nothing later compares the
+two representations. Here something does, and the comparison is a security
+control rather than an implementation detail. The lesson recorded in `CLAUDE.md`
+is the narrower one: fix the *encoding mechanism*, do not change the *value*.
 
 ## Consequences
 
-- An operator can query dead-lettered payloads by JSON path, containment and
-  index. 6 new cases in `lib/__tests__/dead-letter-jsonb-encoding.test.ts`.
-- A NULL payload is SQL NULL again rather than the jsonb `null` literal.
-- Mutation-checked. Restoring `JSON.stringify` + `::jsonb` fails 4 of 6.
-  Keeping `jsonbParam` but dropping `normalizeJsonbDocument` fails exactly 1 —
-  the legacy string-scalar source — which is precisely what the normalizer
-  adds, so the two halves are independently guarded.
+- An operator can query dead-lettered payloads written from a document source
+  by JSON path, containment and index.
+- A NULL payload is SQL NULL again rather than the jsonb `null` literal, so it
+  still satisfies `IS NOT DISTINCT FROM` and stays claimable. Plain `=` would
+  not; that operator choice is load-bearing and is now covered by a test.
+- Legacy string-scalar payloads keep their shape in the queue. They remain
+  awkward to query by path (`#>> '{}'` first) and fully replayable. Replay
+  itself was never broken, because `parseStoredStripeEvent()` accepts both.
+- 9 cases in `lib/__tests__/dead-letter-jsonb-encoding.test.ts`, including
+  three that assert the replay-claim equality **directly** for document,
+  legacy-scalar and NULL payloads. Those three are the guard whose absence
+  allowed the regression to be written: the original tests asserted only the
+  stored shape, which the wrong behaviour satisfied.
+- Mutation-checked. Restoring `JSON.stringify` + `::jsonb` fails 5 of 9;
+  reintroducing the normalization fails 3 of 9, two of them equality cases.
 - One case asserts the *source* column is still written correctly, so a
   regression in `recordProviderEvent` is caught here too.
-- Rollback is clean for this change, unlike 0002: no reader anywhere does a
-  bare `JSON.parse` on `webhook_dead_letters.raw_payload`.
-  `parseStoredStripeEvent()` already accepts both shapes, so reverting leaves
-  documents written during the window fully readable.
+- Rollback is clean: no reader does a bare `JSON.parse` on
+  `webhook_dead_letters.raw_payload`, and `parseStoredStripeEvent()` already
+  accepts both shapes.
 
 ## Alternatives considered
 
 **Normalize in SQL with `CASE WHEN jsonb_typeof(...) = 'string' THEN (... #>> '{}')::jsonb ELSE ... END`,**
 as `lib/external-settlement-reconciliation.ts` does on read. Rejected for the
-write path: it repeats a five-line conditional at each call site and does not
-fix the NULL-literal bug. The reconciliation query's version stays as it is —
-it reads historical rows and must keep doing so.
+write path twice over: it repeats a five-line conditional at each call site, it
+does not fix the NULL-literal bug, and — the decisive reason — it is the same
+shape change that breaks the replay claim above. The reconciliation query's
+version stays as it is: it normalises on **read**, where nothing compares the
+stored representations, which is exactly why that is safe and this would not
+be.
 
 **Leave it, since replay works.** Rejected. The queue exists for humans to
 inspect, and the reader tolerance that makes replay work is exactly what makes

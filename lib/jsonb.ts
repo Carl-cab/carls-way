@@ -40,34 +40,6 @@ export function jsonbParam(sql: Sql, value: unknown) {
 }
 
 /**
- * Normalise a value read from a `jsonb` column back into a document, so it can
- * be written to another `jsonb` column without double-encoding it.
- *
- * This exists for the copy-from-one-jsonb-column-to-another case, which is how
- * the dead-letter queue reintroduced the defect after both of its source
- * writers had been fixed: it took the document out, `JSON.stringify`d it, and
- * cast the text with `::jsonb`, which produces a string scalar.
- *
- * Unlike `readJsonbRecord`, this preserves non-object JSON (arrays, numbers)
- * and does not wrap anything in `{ raw }`, because the value may legitimately
- * be any JSON document rather than a metadata record. Text that does not parse
- * is returned unchanged, so it is stored verbatim as a jsonb string rather than
- * discarded — losing a dead-letter payload is worse than storing it awkwardly.
- */
-export function normalizeJsonbDocument(value: unknown): unknown {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'object') return value;
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
-    }
-  }
-  return value;
-}
-
-/**
  * Read a `jsonb` column that may hold either shape.
  *
  * Rows written before the writers were fixed hold a string scalar, which

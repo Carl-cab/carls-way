@@ -1,5 +1,5 @@
 import { getSql } from '@/lib/db';
-import { jsonbParam, normalizeJsonbDocument } from '@/lib/jsonb';
+import { jsonbParam } from '@/lib/jsonb';
 import type postgres from 'postgres';
 
 /**
@@ -157,7 +157,7 @@ export async function markProviderEventFailed(
     // Preserve the event in the dead-letter queue for operator review/replay.
     // Idempotent: a provider that keeps redelivering refreshes the entry
     // instead of duplicating it.
-    // Copying one jsonb column into another: bind the document, never
+    // Copying one jsonb column into another: bind the value, never
     // re-serialised text. `postgres.js` returns the source document as an
     // object, so the previous `JSON.stringify(...)` + `::jsonb` stored a jsonb
     // **string scalar** here — making every operator query over a dead-lettered
@@ -165,9 +165,18 @@ export async function markProviderEventFailed(
     // return NULL or no rows, silently. A `::jsonb` cast does not avoid that:
     // the cast is applied to text that is already a complete JSON document.
     // It also turned a NULL payload into the jsonb `null` literal.
-    // `normalizeJsonbDocument` additionally repairs a legacy string-scalar
-    // source row instead of carrying the double-encoding forward.
-    const payload = normalizeJsonbDocument(row.raw_payload);
+    //
+    // The source value is bound AS IS, deliberately not normalised. The replay
+    // claim in lib/webhooks/replay.ts requires
+    // `dl.raw_payload IS NOT DISTINCT FROM e.raw_payload` so a corrupt row
+    // cannot be replayed under another event, and that equality is between the
+    // two stored representations. "Repairing" a legacy string-scalar source
+    // into a document here would store a shape the source does not have, the
+    // claim would never match, and the event would become **unreplayable** —
+    // measured. Preserving the source shape keeps both halves equal, so a
+    // document source yields a document and a legacy scalar yields the same
+    // scalar.
+    const payload = row.raw_payload;
     await tx`
       INSERT INTO webhook_dead_letters
         (provider, provider_event_id, event_type, raw_payload, failure_count, last_error)

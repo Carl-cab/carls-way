@@ -118,10 +118,11 @@ describe('webhook_dead_letters.raw_payload', () => {
     expect(rows).toHaveLength(1);
   });
 
-  it('normalizes a legacy string-scalar source row into a document', async () => {
-    // A provider_webhook_events row in the shape an older writer could have
-    // produced. The dead-letter path must not carry the double-encoding
-    // forward.
+  it('PRESERVES a legacy string-scalar source shape rather than repairing it', async () => {
+    // The first version of this fix normalized a legacy string scalar into a
+    // document on the way into the queue, which seemed like a free repair. It
+    // is not: see the replay-equality test below. The source shape must be
+    // carried across unchanged.
     const eventId = `${RUN}-legacy`;
     const payload = { id: 'evt_4', data: { object: { id: 'pi_4' } } };
     await sql`
@@ -130,7 +131,7 @@ describe('webhook_dead_letters.raw_payload', () => {
       VALUES (${PROVIDER}, ${eventId}, 'legacy.event', ${JSON.stringify(payload)}, 'received')
     `;
 
-    // Confirm the fixture really is the broken shape, so this cannot pass by
+    // Confirm the fixture really is the legacy shape, so this cannot pass by
     // having accidentally written a correct row.
     const src = await sql`
       SELECT jsonb_typeof(raw_payload) AS typ FROM provider_webhook_events
@@ -141,11 +142,87 @@ describe('webhook_dead_letters.raw_payload', () => {
     await deadLetter(eventId);
 
     const rows = await sql`
-      SELECT jsonb_typeof(raw_payload) AS typ, raw_payload#>>'{data,object,id}' AS object_id
+      SELECT jsonb_typeof(raw_payload) AS typ, raw_payload #>> '{}' AS text
       FROM webhook_dead_letters WHERE provider_event_id = ${eventId}
     `;
-    expect(rows[0].typ).toBe('object');
-    expect(rows[0].object_id).toBe('pi_4');
+    // Same shape as the source, not 'object'.
+    expect(rows[0].typ).toBe('string');
+    expect(JSON.parse(rows[0].text as string)).toEqual(payload);
+  });
+});
+
+/**
+ * The invariant that makes the shape question non-cosmetic.
+ *
+ * `claimDeadLetterForReplay` joins the queue row to its source row and
+ * requires `dl.raw_payload IS NOT DISTINCT FROM e.raw_payload`
+ * (`lib/webhooks/replay.ts`), deliberately, so a corrupt row cannot be
+ * replayed under another event. That equality is between the two **stored**
+ * representations, so any transformation applied to only one side silently
+ * makes the event unreplayable — the claim returns no row and the caller sees
+ * `not_found_or_already_replayed` rather than reaching recovery.
+ *
+ * Measured: with the queue copy normalized and the source left alone,
+ * `IS NOT DISTINCT FROM` is false. These cases are the guard whose absence let
+ * that regression be written in the first place, so they assert the invariant
+ * directly rather than inferring it from the shape.
+ */
+describe('replay claim equality between the queue row and its source', () => {
+  it('holds for a document payload', async () => {
+    const eventId = `${RUN}-eq-doc`;
+    await recordProviderEvent(PROVIDER, eventId, 'payment_intent.succeeded', {
+      rawPayload: { id: 'evt_eq1', data: { object: { id: 'pi_eq1' } } },
+    });
+    await deadLetter(eventId);
+
+    const rows = await sql`
+      SELECT (dl.raw_payload IS NOT DISTINCT FROM e.raw_payload) AS matches
+      FROM webhook_dead_letters dl
+      JOIN provider_webhook_events e
+        ON e.provider = dl.provider AND e.provider_event_id = dl.provider_event_id
+      WHERE dl.provider_event_id = ${eventId}
+    `;
+    expect(rows[0].matches).toBe(true);
+  });
+
+  it('holds for a legacy string-scalar payload', async () => {
+    const eventId = `${RUN}-eq-legacy`;
+    await sql`
+      INSERT INTO provider_webhook_events
+        (provider, provider_event_id, event_type, raw_payload, processing_status)
+      VALUES (
+        ${PROVIDER}, ${eventId}, 'payment_intent.succeeded',
+        ${JSON.stringify({ id: 'evt_eq2' })}, 'received'
+      )
+    `;
+    await deadLetter(eventId);
+
+    const rows = await sql`
+      SELECT (dl.raw_payload IS NOT DISTINCT FROM e.raw_payload) AS matches
+      FROM webhook_dead_letters dl
+      JOIN provider_webhook_events e
+        ON e.provider = dl.provider AND e.provider_event_id = dl.provider_event_id
+      WHERE dl.provider_event_id = ${eventId}
+    `;
+    // False while the queue copy was being "repaired" into a document.
+    expect(rows[0].matches).toBe(true);
+  });
+
+  it('holds for a NULL payload', async () => {
+    const eventId = `${RUN}-eq-null`;
+    await recordProviderEvent(PROVIDER, eventId, 'payment_intent.succeeded');
+    await deadLetter(eventId);
+
+    // IS NOT DISTINCT FROM is the reason a NULL payload is still claimable;
+    // plain `=` would be NULL and the row would never match.
+    const rows = await sql`
+      SELECT (dl.raw_payload IS NOT DISTINCT FROM e.raw_payload) AS matches
+      FROM webhook_dead_letters dl
+      JOIN provider_webhook_events e
+        ON e.provider = dl.provider AND e.provider_event_id = dl.provider_event_id
+      WHERE dl.provider_event_id = ${eventId}
+    `;
+    expect(rows[0].matches).toBe(true);
   });
 
   it('preserves a legacy value that is not valid JSON rather than losing it', async () => {
