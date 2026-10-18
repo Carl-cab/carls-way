@@ -71,6 +71,8 @@ Client (React 19)
 | `lib/repositories/BaseRepository.ts` | Repository base. `exists()`/`count()` take a `sql` **fragment**, never a condition string — see the note under Coding Standards |
 | `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise |
 | `scripts/verify-migrate.sql` | Read-only check that `/api/migrate` applied everything code reads. Safe against production |
+| `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
+| `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
 
 ---
 
@@ -382,6 +384,29 @@ arbitrary end user.
   f` on both audit tables), no `REVOKE` in any schema source, no hash chaining.
   The application's single DB role can `UPDATE` and `DELETE` audit rows with no
   residue. Append-only is a convention here, so do not claim tamper resistance.
+  `docs/decisions/0004-append-only-audit-architecture.md` sets out what would
+  change that, with each layer's effect measured and its limits stated. Two
+  facts from it are worth carrying here because they are easy to get wrong: a
+  `BEFORE UPDATE OR DELETE` **row** trigger does not fire on `TRUNCATE`, so a
+  `BEFORE TRUNCATE ... FOR EACH STATEMENT` trigger is required as well (one
+  function serves both, since it raises for every `TG_OP`); and the application
+  must keep `INSERT`, so no proposed layer prevents a compromised application
+  **appending fabricated** rows — privilege separation protects the integrity
+  of existing rows, not the authenticity of new ones.
+- **`/api/migrate` has six measured security weaknesses, pinned as present
+  behaviour** in `lib/__tests__/migrate-route-security.test.ts`. The sharpest:
+  DDL is exposed on `GET` only, and the admin cookie is `sameSite: 'lax'`,
+  which *does* send on top-level cross-site GET navigation — so one link click
+  by an operations administrator runs the whole pipeline. Also: no
+  Origin/Referer/CSRF check, no rate limit on the operator path (the anonymous
+  path has 3/hour), no transaction across 103 statements, raw `String(err)` in
+  the 500, and the route needs table **ownership**. That last one is why audit
+  immutability is blocked: the app cannot become a non-owning role while this
+  route runs DDL on the same connection. See
+  `docs/decisions/0005-migration-privilege-separation.md` for the recommended
+  architecture and the phased sequence. Those tests assert the *current*
+  behaviour deliberately — fixing one means inverting its assertion in the same
+  change.
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
   `ProviderEventRepository` both use `sql.json`) — an earlier note here claimed

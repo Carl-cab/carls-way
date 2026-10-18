@@ -453,3 +453,60 @@ that was already pushed to a remote.
 - **Next recommended action.** Task 4 of the prior directive — the focused
   security review of `app/api/migrate/route.ts` — then the append-only audit
   architecture proposal (directive section 4).
+
+### 2026-10-18 — PRs #57, #59, #60, #61 merged; documentation reconciled
+
+- **Commit / PR.** Merge SHAs: #60 `57a601c`, #61 `909e546`, #57 `c8d708a`,
+  #59 `4e63bb9`. This entry's own change is on
+  `docs/post-merge-reconciliation`; SHA and PR appended on push.
+- **Purpose and scope.** Four approved PRs merged in a conflict-minimising
+  order (#60 and #61 touch no shared files; #57 then #59 both append to
+  `PROJECT_MEMORY.md`). The `PROJECT_MEMORY.md` overlap auto-merged cleanly
+  with all entries in chronological order, so no manual resolution was needed.
+  This entry then reconciles the three governance documents that were
+  deliberately left untouched while those PRs were open, to avoid conflicting
+  with them.
+- **Verified state.** Checked against `4e63bb9` **itself**, not a
+  near-identical tree: 55 files / **778 tests** pass on a database created
+  fresh for the run, typecheck clean, lint 0 errors / 28 warnings,
+  `pnpm audit --prod` no known vulnerabilities. The distinction matters because
+  the combined tree was first validated as a local test-merge, and claiming
+  that as verification of the merge commit would have been the kind of
+  near-enough assertion this record exists to prevent.
+- **Financial/security behaviour affected.** No money path, no schema change,
+  no migration, no credential or ownership change. What landed:
+  - **#57** secret scanning (Gitleaks 8.21.2, checksum-verified, full history)
+    and CodeQL `security-extended`. **Both are advisory, not enforcing** — a
+    detection fails the check but does not block a merge until the owner marks
+    four checks required under branch protection, which cannot be done from a
+    session. Recorded in `CURRENT_STATUS.md` as a signal rather than a gate, so
+    nobody mistakes the control for a guarantee.
+  - **#59** the dead-letter JSONB copy fix, preserving the source shape so the
+    replay claim's `IS NOT DISTINCT FROM` still matches.
+  - **#60** decision 0004, the append-only audit architecture proposal.
+  - **#61** decision 0005 plus 13 tests pinning `/api/migrate`'s six measured
+    weaknesses as present behaviour.
+- **Documentation corrected.** `CURRENT_STATUS.md` now names `4e63bb9` and
+  carries both the new CI controls (flagged advisory) and the six unfixed
+  `/api/migrate` weaknesses, so the file does not imply the route is sound.
+  `CLAUDE.md` gains the two new library entries, pointers to decisions 0004 and
+  0005, and two facts that are easy to get wrong: a row trigger does not fire
+  on `TRUNCATE`, and no proposed layer prevents a compromised application
+  appending fabricated audit rows.
+- **Migration impact.** None.
+- **Unresolved findings.** Branch protection is unset, so the new CI controls
+  do not block merges. SHA-pinning of third-party actions is an open owner
+  decision. All six `/api/migrate` weaknesses are unfixed by design — Phase 1
+  of 0005 is the remedy and needs no credential decision. Audit immutability
+  remains unenforced. Decision 0005's plan is **not rehearsed against
+  production data**, and two defects in its Phase 4 were found by review rather
+  than by me, which is the strongest available argument for performing Phase 0's
+  restore-and-rehearse before anyone executes it.
+- **Rollback.** Revert the documentation commit. The four merged PRs are
+  independently revertible; none changed runtime behaviour on a money path.
+- **Next recommended action.** Phase 1 of decision 0005 — `POST`-only, Origin
+  check, operator rate limit, redacted errors on `/api/migrate`. It flips four
+  of the six weaknesses, is reversible by revert, and depends on no credential
+  or ownership decision. Owner actions, which no engineering task can
+  substitute for: branch protection, the SHA-pinning decision, and Phase 0's
+  backup restore.
