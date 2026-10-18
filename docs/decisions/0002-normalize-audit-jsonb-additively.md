@@ -170,6 +170,49 @@ repair, and it is out of scope for this change.
 **No claim of cryptographic tamper resistance is made, because none is
 implemented.**
 
+## Rollback is NOT symmetric, and this is the one operational hazard
+
+An earlier draft of this record said rollback was clean — "revert the commit,
+nothing stateful changes". **That was wrong**, and it is worth stating plainly
+because it is the only way this change can hurt.
+
+The fix is forward-compatible but not backward-compatible. Rows written while it
+is deployed are jsonb documents, and the *old* reader does a bare
+`JSON.parse(row.changes)`. `postgres.js` hands a document back as a JS object,
+`JSON.parse` of an object stringifies it to `"[object Object]"` and throws
+`SyntaxError`. Measured.
+
+The blast radius is larger than one row, because four read paths map over a
+batch (`queryAuditLogs`, `findByCorrelationId`, `findByAdminUserId`,
+`getForExport`). A single document row in a result set throws inside the `.map`
+and is caught by the method's own catch, which raises `AUDIT_QUERY_FAILED` for
+the **whole query** — taking the legacy rows in that batch down with it. So
+after a rollback the admin audit viewer and the compliance export fail
+wholesale, not merely for the affected rows. Nothing is lost on disk; it becomes
+unreadable by the reverted code.
+
+Two scopes:
+
+- **`admin_audit_logs.changes` is affected.** It has the `JSON.parse` reader.
+- **`audit_logs.metadata` is not.** No application code parses it, so reverting
+  that writer is genuinely clean.
+
+**The rollback procedure is therefore: revert the writers, keep
+`readJsonbRecord()`.** Reverting `jsonbParam` at the two call sites restores the
+old encoding for new rows, while the tolerant reader keeps both the legacy rows
+and the documents written during the window readable. A revert of the whole
+commit is the unsafe option and should not be the reflex.
+
+The same asymmetry applies briefly during any rolling deploy, where old and new
+instances coexist and an old instance may read a row a new one just wrote.
+
+This is the textbook argument for landing a tolerant reader in one deploy and
+the writer change in the next, so that no single revert can produce unreadable
+rows. Both are in one commit here because the reader could not be fixed
+separately without the writer fix already being wrong in the other direction —
+but splitting them across two deploys is a legitimate call for the reviewer to
+make, and it is the safer sequencing.
+
 ## Consequences
 
 - Audit records written from now on are queryable by JSON path, containment

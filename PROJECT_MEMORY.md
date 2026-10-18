@@ -262,7 +262,16 @@ architectural decision appends one under `docs/decisions/`.
   creates without complaint — so a `WHERE jsonb_typeof(...) = 'object'`
   predicate is an optional optimization that skips indexing legacy scalar rows,
   not a requirement. No such index exists.
-- **Rollback.** Revert the commit. Nothing stateful changes, and no historical
-  row was modified, so there is nothing to restore.
+- **Rollback.** **Revert the writers, keep `readJsonbRecord()`.** Not a whole-
+  commit revert: the fix is forward- but not backward-compatible. Rows written
+  while it is deployed are documents, and the old reader's bare `JSON.parse`
+  throws `SyntaxError` on them. Four read paths map over a batch, so one such
+  row raises `AUDIT_QUERY_FAILED` for the entire query and takes the legacy rows
+  in it down too — the admin audit viewer and the compliance export would fail
+  wholesale. Nothing is lost on disk; it becomes unreadable by the reverted
+  code. Affects `admin_audit_logs.changes` only; `audit_logs.metadata` has no
+  `JSON.parse` reader, so reverting that writer is clean. The same asymmetry
+  applies briefly during any rolling deploy. An earlier draft of this entry
+  claimed rollback was clean, which was wrong; corrected before merge.
 - **Next recommended action.** Task 4 — the focused security review of
   `app/api/migrate/route.ts`.
