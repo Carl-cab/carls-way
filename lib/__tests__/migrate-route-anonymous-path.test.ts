@@ -56,6 +56,10 @@ import { POST } from '@/app/api/migrate/route';
 
 function request(adminSession?: string): NextRequest {
   return new NextRequest('https://manna.example.test/api/migrate', {
+    // POST, because that is the only method the route accepts. The handler
+    // does not inspect req.method, so a GET-shaped fixture passes anyway —
+    // which is precisely why it should not be left wrong.
+    method: 'POST',
     headers: adminSession ? { cookie: `admin_session=${adminSession}` } : {},
   });
 }

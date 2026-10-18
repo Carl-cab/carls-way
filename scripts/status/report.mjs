@@ -94,13 +94,26 @@ function main() {
 
   const head = git('rev-parse', '--short', 'HEAD');
   const headFull = git('rev-parse', 'HEAD');
-  const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+  // On a pull_request run the checkout is a detached merge commit, so
+  // `rev-parse --abbrev-ref HEAD` prints the literal `HEAD` — useless in a
+  // report whose whole purpose is telling the owner which branch this is.
+  // GITHUB_HEAD_REF carries the source branch on PR events and is empty
+  // elsewhere; GITHUB_REF_NAME covers push events; git covers local runs.
+  const branch =
+    process.env.GITHUB_HEAD_REF ||
+    process.env.GITHUB_REF_NAME ||
+    git('rev-parse', '--abbrev-ref', 'HEAD');
   const lastSubject = git('log', '-1', '--pretty=%s');
   const lastDate = git('log', '-1', '--pretty=%cI');
 
   const tests = arg('tests');
   const files = arg('files');
   const failures = arg('failures');
+  // CI runs `pnpm test` but does not parse vitest's output, so it can report
+  // the step's outcome without knowing the counts. Inventing a count would
+  // break rule 2 above; omitting the row entirely reported NOT RUN for a
+  // suite that demonstrably ran, which is just as misleading.
+  const testOutcome = arg('test-outcome');
   const typecheck = arg('typecheck');
   const lint = arg('lint');
   const build = arg('build');
@@ -130,8 +143,13 @@ function main() {
   out.push(`| Commit | \`${headFull}\` |`);
   out.push(`| Last commit | ${lastSubject} |`);
   out.push(`| Commit date | ${lastDate} |`);
-  out.push(`| Tests | ${tests ? `${tests} passing across ${files ?? '?'} files` : notRun} |`);
-  out.push(`| Test failures | ${failures ?? notRun} |`);
+  const testCell = tests
+    ? `${tests} passing across ${files ?? '?'} files`
+    : (testOutcome ?? notRun);
+  out.push(`| Tests | ${testCell} |`);
+  out.push(
+    `| Test failures | ${failures ?? (testOutcome ? '(count not parsed from this run)' : notRun)} |`,
+  );
   out.push(`| Typecheck | ${typecheck ?? notRun} |`);
   out.push(`| Lint | ${lint ?? notRun} |`);
   out.push(`| Build | ${build ?? notRun} |`);

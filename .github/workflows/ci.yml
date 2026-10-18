@@ -64,15 +64,19 @@ jobs:
           PGPASSWORD: postgres
 
       - name: Typecheck
+        id: typecheck
         run: pnpm run typecheck
 
       - name: Lint
+        id: lint
         run: pnpm run lint
 
       - name: Test
+        id: test
         run: pnpm test
 
       - name: Build
+        id: build
         run: pnpm run build
 
       - name: Assert no live provider flag is enabled
@@ -96,22 +100,38 @@ jobs:
       #
       # `if: always()` so the report still appears when an earlier step failed;
       # that is exactly when the owner most wants to see where things stand.
-      # The values below come from steps that actually ran in this job, so the
-      # report never claims a check it did not observe.
+      #
+      # Each check reports its OWN step outcome, not the job's. `job.status`
+      # was wrong in both directions: these steps are sequential and
+      # fail-fast, so a Typecheck failure leaves Lint, Test and Build
+      # *skipped* while the job reads failure — labelling all three "see job
+      # log" claims they ran. And a Build failure would mark Typecheck, which
+      # passed, with the same warning. A report that misattributes a failure
+      # is worse than one that says NOT RUN.
       - name: Progress report
         if: always()
         env:
-          # typecheck, lint, test and build all run earlier in this job and run
-          # sequentially, so a successful job means every one of them passed.
-          # Deriving all four from job.status is therefore accurate without
-          # parsing tool output — and when the job failed it points at the log
-          # rather than guessing which step broke.
-          OUTCOME: ${{ job.status == 'success' && '✅ clean' || '⚠️ see job log' }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
+          set -uo pipefail
+          # Map a step outcome onto report wording. An empty outcome means the
+          # step never reached (job cancelled earlier), which is also NOT RUN.
+          label() {
+            case "$1" in
+              success)  printf '✅ clean' ;;
+              failure)  printf '⚠️ failed — see job log' ;;
+              skipped|'') printf '⬜ NOT RUN (earlier step failed)' ;;
+              *)        printf '⬜ NOT RUN (%s)' "$1" ;;
+            esac
+          }
           pnpm run status -- \
-            --typecheck="$OUTCOME" \
-            --lint="$OUTCOME" \
-            --build="$OUTCOME" \
+            --typecheck="$(label "$TYPECHECK")" \
+            --lint="$(label "$LINT")" \
+            --test-outcome="$(label "$TEST")" \
+            --build="$(label "$BUILD")" \
             >> "$GITHUB_STEP_SUMMARY"
 
   audit:

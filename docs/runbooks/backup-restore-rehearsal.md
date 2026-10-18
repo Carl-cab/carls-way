@@ -58,9 +58,14 @@ pg_restore --no-owner --no-privileges \
 grants into a database whose roles differ, which otherwise produces a wall of
 errors that hides real ones.
 
-**Record the wall-clock time this takes.** That number is your recovery time
-objective, measured rather than assumed, and it is the single most useful thing
-this rehearsal produces.
+**Record the wall-clock time this takes.** It is *one input* to a recovery time
+objective, not the objective itself. An RTO is a target you commit to; this
+measurement is the restore step alone, and the real elapsed time during an
+incident also includes detecting the problem, deciding to restore, provisioning
+a target, repointing `DATABASE_URL`, redeploying and verifying. Treating the
+restore duration as the RTO understates recovery by however long those take —
+so record it as "restore duration", and set an RTO only once the other steps
+have been timed too.
 
 ### 2. Verify the schema the application actually reads
 
@@ -84,18 +89,49 @@ UNION ALL SELECT 'ledger_entries', count(*) FROM ledger_entries
 UNION ALL SELECT 'transfer_intents', count(*) FROM transfer_intents
 UNION ALL SELECT 'audit_logs', count(*) FROM audit_logs;
 
--- Money columns must be NUMERIC, not float. A restore that silently brought
--- back float4 balances would be a corrupt recovery that looks fine.
-SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
-FROM information_schema.columns
-WHERE table_schema = 'public'
-  AND column_name IN ('balance_cad','balance_usd','amount','total_amount')
-ORDER BY table_name, column_name;
-
--- The ledger should still reconcile against balances. This is the financial
--- invariant; a restore that breaks it is not a usable recovery.
--- Run the same check the cron route runs: lib/internal-reconciliation.ts
+-- Money columns: already covered by step 2. `scripts/verify-migrate.sql`
+-- section 5 checks users.balance, balance_cad, balance_usd,
+-- transactions.amount, sender_amount, receiver_amount and
+-- transfer_intents.amount, driven from a VALUES list so a column that is
+-- ABSENT reports ABSENT instead of dropping out of the result set. An
+-- `information_schema` query written here would be a weaker duplicate —
+-- it matched on column_name alone, so it missed `users.balance`,
+-- `transactions.sender_amount` and `transactions.receiver_amount`, and
+-- read clean on a column that was gone.
 ```
+
+The ledger must still reconcile against balances. This is the financial
+invariant: a restore that breaks it is not a usable recovery.
+`lib/internal-reconciliation.ts` has **no CLI entry point** — it is called by
+`/api/cron/internal-reconciliation`, which needs the application running and
+`CRON_SECRET`, and must not be pointed at this target. Run its strongest check,
+`user_wallets_exactly_match_ledger`, directly instead. Every row returned is a
+discrepancy; no rows is a pass:
+
+```bash
+psql "$RESTORE_TARGET_URL" <<'SQL'
+WITH wallets AS (
+  SELECT u.id AS user_id, 'CAD' AS currency, u.balance_cad AS wallet_balance,
+         COALESCE(SUM(le.credit - le.debit) FILTER (
+           WHERE le.currency = 'CAD' AND le.account_type = 'wallet'), 0) AS ledger_balance
+  FROM users u LEFT JOIN ledger_entries le ON le.user_id = u.id
+  GROUP BY u.id, u.balance_cad
+  UNION ALL
+  SELECT u.id, 'USD', u.balance_usd,
+         COALESCE(SUM(le.credit - le.debit) FILTER (
+           WHERE le.currency = 'USD' AND le.account_type = 'wallet'), 0)
+  FROM users u LEFT JOIN ledger_entries le ON le.user_id = u.id
+  GROUP BY u.id, u.balance_usd
+)
+SELECT user_id, currency, wallet_balance, ledger_balance
+FROM wallets
+WHERE wallet_balance IS DISTINCT FROM ledger_balance;
+SQL
+```
+
+Compare NUMERIC values directly, as the application does — no tolerance. If
+rows come back, confirm whether the same discrepancy exists in production
+before concluding the restore caused it.
 
 ### 4. Run the application's own test suite against the restore
 
@@ -103,12 +139,41 @@ ORDER BY table_name, column_name;
 DATABASE_URL="$RESTORE_TARGET_URL" pnpm test
 ```
 
-This is also the **grant enumeration** that decision 0005 Phase 4 depends on.
-A fresh database built by `initializeSchema()` cannot reproduce a missing
-`GRANT` on a pre-existing object; a restored copy can. Any permission failure
-here is a grant the Phase 4 list is missing — and 0005 states plainly that its
-grant list was derived from reading the schema, not from watching the
-application fail, so expect additions.
+That confirms the application's SQL matches the restored schema.
+
+**It does not enumerate grants, and an earlier version of this runbook claimed
+it did.** `pg_restore --no-owner` makes the *restoring* role the owner of every
+restored object, and an owner holds all privileges implicitly — so the suite
+would pass with no `GRANT` statements present at all, and report a clean
+grant list that is in fact empty. The same "ownership implies everything" fact
+that decision 0005 Phase 4 is built around invalidates using the owner's own
+connection as the test.
+
+To actually enumerate grants, connect as a role that owns nothing:
+
+```bash
+# As the restore target's owner, create a non-owner role standing in for the
+# application's future least-privilege role, and grant it nothing beyond
+# schema usage.
+# `GRANT ... ON DATABASE` needs a literal identifier, so name the restore
+# target's database explicitly rather than calling current_database().
+psql "$RESTORE_TARGET_URL" <<SQL
+CREATE ROLE manna_app_probe LOGIN PASSWORD '$(openssl rand -hex 16)';
+GRANT CONNECT ON DATABASE "$RESTORE_TARGET_DB" TO manna_app_probe;
+GRANT USAGE ON SCHEMA public TO manna_app_probe;
+SQL
+
+# Then apply ONLY the grant list decision 0005 Phase 4 proposes, and run the
+# suite as that role. Every permission failure is a grant the list is missing.
+DATABASE_URL="postgres://manna_app_probe:...@<host>/<db>?sslmode=require" pnpm test
+```
+
+Two things to expect. The grant list in 0005 was derived from reading the
+schema, not from watching the application fail, so additions are likely —
+`permission denied for sequence` on every `SERIAL` insert is the usual first
+one. And `CREATE ROLE` is a cluster-level change: do it on the restore target's
+cluster only, never production's, and drop the role when you destroy the
+target.
 
 ### 5. Destroy the restore target
 
@@ -123,13 +188,14 @@ hold**:
 
 | Finding | Why it matters |
 |---|---|
-| Restore completed, and how long it took | This is the measured RTO |
+| Restore completed, and how long it took | Measured restore duration — one input to an RTO, not the RTO |
 | `verify-migrate.sql` reported no ABSENT objects | The backup is current with the code |
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
 | Ledger reconciliation passes | The financial invariant survived |
-| Test suite result, and every permission failure seen | These are the Phase 4 grants |
-| Restore target destroyed | No stray copy of customer data |
+| Test suite result as the **owner** role | The application's SQL matches the restored schema |
+| Test suite result as the **non-owner probe** role, and every permission failure seen | These are the Phase 4 grants; the owner run cannot produce them |
+| Restore target destroyed, and `manna_app_probe` dropped | No stray copy of customer data, no leftover login role |
 
 If any row fails, Phase 0 stays **NOT RUN** and the failure is the next
 engineering task. A partial pass is not a pass: the purpose of this exercise is

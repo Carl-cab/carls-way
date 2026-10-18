@@ -97,14 +97,26 @@ function diagnosticReference(): string {
  * mid-incident deserves to be told what changed.
  */
 export async function GET() {
-  return NextResponse.json(
-    {
-      error:
-        'Schema migration requires POST. GET is refused because this endpoint executes DDL and a state-changing GET is reachable by cross-site request forgery.',
-      hint: 'curl -X POST -b <auth-cookie> https://<host>/api/migrate',
-    },
-    { status: 405, headers: { Allow: 'POST' } },
-  );
+  try {
+    return NextResponse.json(
+      {
+        error:
+          'Schema migration requires POST. GET is refused because this endpoint executes DDL and a state-changing GET is reachable by cross-site request forgery.',
+        hint: 'curl -X POST -b <auth-cookie> https://<host>/api/migrate',
+      },
+      { status: 405, headers: { Allow: 'POST' } },
+    );
+  } catch (err) {
+    // Nothing here can realistically throw, but CLAUDE.md requires every
+    // route handler to answer rather than surface a framework stack trace,
+    // and a handler exempted "because it is trivial" is how that rule erodes.
+    const ref = diagnosticReference();
+    console.error(`Migration GET error [ref=${ref}]:`, err);
+    return NextResponse.json(
+      { error: 'Unexpected error.', reference: ref },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(req: NextRequest) {
