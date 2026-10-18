@@ -32,7 +32,10 @@ nothing:
 - **T1 — Application defect.** A future `UPDATE audit_logs SET ...`, or a
   careless cleanup script, run with the app's own credential.
 - **T2 — Compromised application.** SQL injection or RCE in the app, giving an
-  attacker the app's credential and nothing more.
+  attacker the app's credential and nothing more. Note that this splits in two:
+  *altering* existing audit rows, which the layers below do address, and
+  *appending fabricated* ones, which none of them do — the app must keep
+  `INSERT` for auditing to work at all.
 - **T3 — Privileged operator.** Someone holding the owner credential: a rogue
   insider, a stolen `DATABASE_URL`, or a compromised CI secret. **This is the
   threat that "immutable audit log" claims usually quietly exclude.**
@@ -58,11 +61,24 @@ Measured, as a non-owner role against a table owned by `postgres`:
 | `DROP TRIGGER` | `ERROR: must be owner of relation` |
 | `TRUNCATE` | `ERROR: permission denied for table` |
 
-This is the layer that carries the weight. It defeats T1 and T2 completely for
-the audit tables: an attacker holding the app credential can add audit rows but
-cannot alter or remove one.
+This is the layer that carries the weight, and its guarantee is precisely:
+**existing audit rows cannot be modified, deleted or truncated using the
+application's credential.**
 
-It does **not** defeat T3, and nothing in this layer pretends to.
+It is **not** a guarantee that the rows are authentic. The app role keeps
+`INSERT` — it has to, or auditing stops — so under T2 a compromised
+application can still call `auditLog()` with a fabricated `userId`, `action` or
+`metadata` and have it stored like any other row. Layer 1 protects the
+*integrity of the record*, not the *truthfulness of what was appended*. An
+earlier draft of this document said it "defeats T1 and T2 completely", which
+was wrong in exactly that respect.
+
+Defending against forged entries is a different problem — it needs the writer
+to be authenticated to something the app cannot impersonate (a signing key held
+elsewhere, or a trusted ingestion path), and no layer below addresses it
+either. It is recorded here as out of scope rather than quietly covered.
+
+Layer 1 also does **not** defeat T3, and nothing in this layer pretends to.
 
 ### Layer 2 — Triggers. Defence in depth, and two are needed.
 
@@ -74,8 +90,13 @@ CREATE TRIGGER audit_logs_append_only BEFORE UPDATE OR DELETE ON audit_logs
   FOR EACH ROW EXECUTE FUNCTION audit_append_only();
 
 CREATE TRIGGER audit_logs_no_truncate BEFORE TRUNCATE ON audit_logs
-  FOR EACH STATEMENT EXECUTE FUNCTION audit_no_truncate();
+  FOR EACH STATEMENT EXECUTE FUNCTION audit_append_only();
 ```
+
+One function serves both triggers: it raises for every `TG_OP`, and `TG_OP`
+reports `TRUNCATE` in the statement-level case. Verified by executing the block
+above — `UPDATE`, `DELETE` and `TRUNCATE` were each refused and the row
+survived.
 
 **The `TRUNCATE` trigger is not optional, and this is the easy thing to get
 wrong.** Measured: with only the row trigger in place, the owner's `TRUNCATE`
@@ -95,6 +116,23 @@ Any alteration or removal of an interior row breaks verification from that point
 on, which is what the existing `verifyImmutability()` cannot do — it compares
 `COUNT(*)` to `MAX(id)`, so it detects gaps from deletes and cannot detect an
 update at all.
+
+**The cutover has to be decided explicitly, because both audit tables already
+hold rows.** Two options, and they differ in what can honestly be claimed:
+
+- **Chain from deployment.** New rows are chained from a genesis anchor; rows
+  written before it are outside the chain. Verification then covers only rows
+  from the cutover forward, and must say so — a clean verification result
+  proves nothing about earlier rows.
+- **Backfill the existing rows.** The chain covers everything, but the backfill
+  computes hashes from rows *as they are now*, so it anchors their current
+  state and **cannot attest that they were not already altered**. It converts
+  "unverifiable" into "unverifiable before the backfill, verified after", which
+  is worth having but must not be presented as retrospective assurance.
+
+Either way, the verification API must report the range it covers rather than a
+bare pass or fail. A verifier that answers "clean" without naming its scope is
+the same failure as the hardcoded `'clean'` it replaces.
 
 Two hard constraints:
 
@@ -132,9 +170,16 @@ change.
 
 ## What may and may not be claimed
 
-With Layers 1 and 2: **"audit rows cannot be modified or deleted using the
-application's credential, and accidental modification by an operator is
-refused."** That is true, useful, and provable.
+With Layers 1 and 2: **"existing audit rows cannot be modified, deleted or
+truncated using the application's credential, and accidental modification by an
+operator is refused."** That is true, useful, and provable.
+
+Not claimable, even with Layers 1 and 2 in place:
+
+- that stored entries are **authentic** — the app keeps `INSERT`, so a
+  compromised application can append fabricated rows
+- anything about rows outside the hash chain's covered range, once Layer 3
+  exists
 
 Not claimable without Layer 4, whatever is built in the database:
 
@@ -164,9 +209,16 @@ Other consequences:
 - `DATABASE_URL` changes, which is a production secret change.
 - `default_privileges` must be set, or tables created later come back owned and
   granted wrongly.
-- Reversibility: granting the privileges back restores the old behaviour, so
-  Layer 1 is reversible. Layer 3 adds columns and is additive. Nothing here
-  rewrites an existing audit row.
+- Reversibility: Layer 1 is reversible, but **granting DML privileges back is
+  not sufficient**. `ALTER TABLE`, `DISABLE TRIGGER` and the rest are
+  owner-only, so a rollback must also restore the original owner — either by
+  reassigning ownership (`ALTER TABLE ... OWNER TO`) or by pointing
+  `DATABASE_URL` back at the owning role. A rollback that restores grants
+  alone leaves `/api/migrate` still failing with `must be owner`, which would
+  look like a new fault rather than an incomplete rollback. The rollback
+  procedure must name both steps.
+- Layer 3 adds columns and is additive. Nothing here rewrites an existing audit
+  row.
 
 ## Recommended sequence
 
