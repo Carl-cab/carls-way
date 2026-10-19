@@ -266,6 +266,21 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
       ADD COLUMN IF NOT EXISTS dead_letter_at TIMESTAMPTZ
   `;
   await sql`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      checksum TEXT,
+      started_at TIMESTAMPTZ,
+      finished_at TIMESTAMPTZ,
+      duration_ms BIGINT,
+      applied_by TEXT,
+      error_reference TEXT,
+      detection_evidence TEXT,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`
     CREATE TABLE IF NOT EXISTS webhook_dead_letters (
       id SERIAL PRIMARY KEY,
       provider TEXT NOT NULL,
