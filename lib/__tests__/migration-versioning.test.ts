@@ -534,6 +534,48 @@ describe('migration versioning', () => {
       const state = await describeState(ROOT, exec);
       expect(state.drift).toEqual([]);
     });
+
+    it('treats a MISSING applied file as drift, and refuses to proceed', async () => {
+      /**
+       * The gap this covers: the guard was `current && current !== checksum`,
+       * so a file that had been deleted produced `null`, short-circuited, and
+       * reported no drift at all. The row stayed `applied`, nothing blocked,
+       * and `assertSafeToProceed()` returned successfully — a row claiming
+       * this mechanism applied a file that is no longer in the tree.
+       *
+       * Simulated by pointing describeState() at a repoRoot that has no
+       * migrations/ directory, which is exactly what `fileChecksum` sees when
+       * a file is gone, rather than by deleting a real migration.
+       */
+      const id = MIGRATIONS[0].id;
+      await beginMigration(id, 'operator:test', ROOT, exec);
+      await completeMigration(id, exec);
+      for (const migration of MIGRATIONS.slice(1)) {
+        await sql`
+          INSERT INTO schema_migrations (id, status, applied_by, updated_at)
+          VALUES (${migration.id}, 'baseline_detected', 'test', NOW())
+          ON CONFLICT (id) DO UPDATE SET status = 'baseline_detected'
+        `;
+      }
+
+      // Sanity: with the real tree, this database is current and proceeds.
+      await expect(assertSafeToProceed(ROOT, exec)).resolves.toBeUndefined();
+
+      const { mkdtempSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const nodePath = await import('node:path');
+      const emptyRoot = mkdtempSync(nodePath.join(tmpdir(), 'no-migrations-'));
+
+      const state = await describeState(emptyRoot, exec);
+      const drifted = state.drift.find((d) => d.id === id);
+
+      expect(drifted).toBeDefined();
+      expect(drifted?.currentChecksum).toBeNull();
+      expect(state.current).toBe(false);
+      await expect(assertSafeToProceed(emptyRoot, exec)).rejects.toThrow(
+        /changed or went missing/,
+      );
+    });
   });
 
   describe('is this database current?', () => {

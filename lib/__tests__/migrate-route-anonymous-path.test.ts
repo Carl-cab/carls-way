@@ -237,7 +237,7 @@ describe('convergence recording is scoped to runs that actually began', () => {
     // A Redis problem inside the rate limiter: nothing has touched the schema.
     getAuthUser.mockResolvedValue(null);
     resolveAdminBySessionId.mockResolvedValue(null);
-    anonymousRecoveryMode.mockResolvedValue('bootstrap');
+    anonymousRecoveryMode.mockResolvedValue('full-bootstrap');
     checkRateLimit.mockRejectedValue(new Error('redis unavailable'));
 
     const res = await POST(request());
@@ -265,7 +265,7 @@ describe('convergence recording is scoped to runs that actually began', () => {
   it('does record a failed run once the pipeline has started', async () => {
     getAuthUser.mockResolvedValue(null);
     resolveAdminBySessionId.mockResolvedValue(null);
-    anonymousRecoveryMode.mockResolvedValue('bootstrap');
+    anonymousRecoveryMode.mockResolvedValue('full-bootstrap');
     checkRateLimit.mockResolvedValue({ allowed: true, remaining: 2, limit: 3, resetAt: Date.now() });
     initializeSchema.mockRejectedValue(new Error('DDL blew up mid-pipeline'));
 
@@ -303,7 +303,7 @@ describe('convergence recording is scoped to runs that actually began', () => {
   it('attributes an anonymous bootstrap failure to the bootstrap path', async () => {
     getAuthUser.mockResolvedValue(null);
     resolveAdminBySessionId.mockResolvedValue(null);
-    anonymousRecoveryMode.mockResolvedValue('bootstrap');
+    anonymousRecoveryMode.mockResolvedValue('full-bootstrap');
     checkRateLimit.mockResolvedValue({ allowed: true, remaining: 2, limit: 3, resetAt: Date.now() });
     initializeSchema.mockRejectedValue(new Error('DDL blew up mid-pipeline'));
 

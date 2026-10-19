@@ -392,7 +392,13 @@ export async function describeState(
     }
     if (row.checksum) {
       const current = fileChecksum(repoRoot, migration.file);
-      if (current && current !== row.checksum) {
+      // `null` means the file is GONE, and that is drift too — arguably the
+      // more alarming kind. An earlier version short-circuited on `current &&`,
+      // so an `applied` row whose SQL file had been deleted reported no drift
+      // and passed assertSafeToProceed(): the row is satisfied and nothing
+      // blocks. A guard that covered "changed" but not "missing", described as
+      // drift detection.
+      if (current !== row.checksum) {
         drift.push({
           id: migration.id,
           recordedChecksum: row.checksum,
@@ -445,7 +451,7 @@ export async function assertSafeToProceed(
   }
   if (state.drift.length > 0) {
     throw new Error(
-      'Refusing: migration files changed after being recorded as applied (' +
+      'Refusing: migration files changed or went missing after being recorded as applied (' +
         state.drift.map((d) => d.id).join(', ') +
         '). Either the file was edited post-application or the row is from a different ' +
         'version of it; both need an operator to decide which.',

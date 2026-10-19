@@ -159,11 +159,17 @@ export interface MigrationRecord {
   updatedAt: Date;
 }
 
-/** A migration whose file has changed since the row recorded it. */
+/**
+ * A migration whose file no longer matches the row that recorded it.
+ *
+ * `currentChecksum` is `null` when the file is absent entirely. That is drift,
+ * not an absence of evidence: a row claims this mechanism applied a file that
+ * is no longer in the tree, so nothing can say what was applied.
+ */
 export interface MigrationDrift {
   id: string;
   recordedChecksum: string;
-  currentChecksum: string;
+  currentChecksum: string | null;
   status: MigrationStatus;
 }
 
