@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { MONEY_COLUMNS } from '@/lib/db';
+import { MONEY_MIGRATION_TARGETS } from '@/lib/db';
 import type {
   DetectionResult,
   MigrationDescriptor,
@@ -33,15 +33,26 @@ export function fileChecksum(repoRoot: string, relativePath: string): string | n
 /**
  * Are any money columns still a float type?
  *
- * Shares `MONEY_COLUMNS` with `lib/db.ts` rather than restating the list,
- * because a fourth copy of it is exactly how this repository has previously
- * drifted. A column absent from a deployment is skipped, matching
- * `detectLegacyMoneyColumns()`.
+ * Uses `MONEY_MIGRATION_TARGETS`, not `MONEY_COLUMNS`. The latter is the
+ * narrower list the application will automatically CONVERT, and it covers only
+ * 7 of this migration's 13 targets — so checking against it reported a
+ * database with `ledger_entries.debit` still `real` as fully converted. A
+ * partial check read as a complete one, which is the same defect class as
+ * matching an index on the word UNIQUE alone.
+ *
+ * `MONEY_COLUMNS` is deliberately NOT widened to fix this: the migrate route
+ * calls `upgradeLegacyMoneyColumns()`, which rewrites every float column in
+ * that list under `ACCESS EXCLUSIVE`, so adding the ledger and split columns
+ * there would let an operator's `POST /api/migrate` rewrite the ledger outside
+ * the authorized maintenance procedure.
+ *
+ * A column absent from a deployment is skipped, matching the migration, which
+ * tolerates missing historical columns.
  */
 async function detectMoneyColumnsConverted(
   sql: MigrationSqlExecutor,
 ): Promise<DetectionResult> {
-  const pairs = MONEY_COLUMNS.map(([table, column]) => `${table}.${column}`);
+  const pairs = MONEY_MIGRATION_TARGETS.map(([table, column]) => `${table}.${column}`);
 
   const rows = await sql<{ table_name: string; column_name: string; data_type: string }>`
     SELECT table_name, column_name, data_type

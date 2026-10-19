@@ -135,6 +135,62 @@ describe('migration versioning', () => {
       expect(fileChecksum(ROOT, 'migrations/does_not_exist.sql')).toBeNull();
     });
 
+    it('MONEY_MIGRATION_TARGETS matches the migration file it describes', async () => {
+      /**
+       * The detector needs the migration's complete target list, and that list
+       * lives in SQL. This parses the migration's own VALUES block and requires
+       * the TypeScript constant to match it exactly — which is what makes a
+       * second copy of the list safe. Without this, the constant could fall
+       * behind the SQL and the detector would silently resume reporting a
+       * partial check as a complete one, which is the bug it was added to fix.
+       */
+      const { readFileSync } = await import('node:fs');
+      const { MONEY_MIGRATION_TARGETS } = await import('@/lib/db');
+
+      const sqlText = readFileSync(
+        'migrations/20260907_money_real_to_numeric.sql',
+        'utf8',
+      );
+
+      // ('table', 'column') pairs from the migration's VALUES list.
+      const pairs = new Set<string>();
+      for (const match of sqlText.matchAll(
+        /\(\s*'([a-z_]+)'\s*,\s*'([a-z_]+)'\s*\)/g,
+      )) {
+        pairs.add(`${match[1]}.${match[2]}`);
+      }
+
+      // Sanity: the parse found something, so an empty regex result cannot
+      // make this assertion pass vacuously.
+      expect(pairs.size).toBeGreaterThan(10);
+
+      const declared = new Set(
+        MONEY_MIGRATION_TARGETS.map(([t, c]) => `${t}.${c}`),
+      );
+
+      expect([...declared].sort()).toEqual([...pairs].sort());
+    });
+
+    it('MONEY_COLUMNS stays a subset, so conversion is never widened by accident', async () => {
+      // MONEY_COLUMNS drives upgradeLegacyMoneyColumns(), which the migrate
+      // route calls and which rewrites tables under ACCESS EXCLUSIVE. Growing
+      // it to match the migration's targets would let POST /api/migrate
+      // rewrite the ledger outside the maintenance procedure, so the two lists
+      // must stay distinct and this one must stay the smaller.
+      const { MONEY_COLUMNS, MONEY_MIGRATION_TARGETS } = await import('@/lib/db');
+
+      const targets = new Set(MONEY_MIGRATION_TARGETS.map(([t, c]) => `${t}.${c}`));
+      for (const [table, column] of MONEY_COLUMNS) {
+        expect(targets.has(`${table}.${column}`)).toBe(true);
+      }
+      expect(MONEY_COLUMNS.length).toBeLessThan(MONEY_MIGRATION_TARGETS.length);
+
+      // And specifically: the ledger is not something this route converts.
+      const convertible = new Set(MONEY_COLUMNS.map(([t, c]) => `${t}.${c}`));
+      expect(convertible.has('ledger_entries.debit')).toBe(false);
+      expect(convertible.has('ledger_entries.credit')).toBe(false);
+    });
+
     it('refuses to record an id this repository cannot describe', async () => {
       await expect(
         beginMigration('20990101_invented', 'test', ROOT, exec),

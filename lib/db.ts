@@ -739,10 +739,23 @@ export async function repairAuthCriticalColumns(
 }
 
 /**
- * Money columns that must hold exact cent values.
+ * Money columns the application will CONVERT automatically.
  *
  * Shared by `upgradeLegacyMoneyColumns()` and the migrate endpoint so the two
  * cannot drift. Columns absent from a given deployment are skipped.
+ *
+ * **This list is deliberately narrower than the migration's target list.**
+ * `upgradeLegacyMoneyColumns()` issues `ALTER TABLE … TYPE` for every float
+ * column it finds here, and the migrate route calls it — so each entry is a
+ * table this route may rewrite under `ACCESS EXCLUSIVE` without going through
+ * the authorized maintenance procedure in `sql/README.md`. Widening it is
+ * therefore not a documentation change; it expands what an operator's
+ * `POST /api/migrate` can rewrite. Converting the ledger is exactly the kind
+ * of operation that was removed from `initializeSchema()` for this reason —
+ * see the note there.
+ *
+ * For *detecting* whether the money migration's end state is present, use
+ * `MONEY_MIGRATION_TARGETS` below, which is complete.
  */
 export const MONEY_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['users', 'balance'],
@@ -752,6 +765,44 @@ export const MONEY_COLUMNS: ReadonlyArray<readonly [table: string, column: strin
   ['transactions', 'sender_amount'],
   ['transactions', 'receiver_amount'],
   ['transfer_intents', 'amount'],
+] as const;
+
+/**
+ * Every column `migrations/20260907_money_real_to_numeric.sql` converts.
+ *
+ * Read-only in purpose: nothing converts from this list. It exists so
+ * `lib/migrations/registry.ts` can tell whether that migration's end state is
+ * actually present, which `MONEY_COLUMNS` cannot answer — it covers 7 of the
+ * migration's 13 targets, so a database with `ledger_entries.debit` still
+ * `real` would have read as fully converted and been recorded
+ * `baseline_detected`. A partial check reported as a complete one.
+ *
+ * Kept beside `MONEY_COLUMNS` rather than in the registry so both lists are in
+ * one file, and guarded against drift by
+ * `lib/__tests__/migration-versioning.test.ts`, which parses the migration's
+ * own `VALUES` block and requires it to match this constant exactly. That
+ * parity check is the reason two lists are safe here: the second source cannot
+ * silently fall behind the SQL it describes.
+ *
+ * Columns absent from a deployment are skipped by the detector, matching the
+ * migration, which explicitly tolerates missing historical columns.
+ */
+export const MONEY_MIGRATION_TARGETS: ReadonlyArray<
+  readonly [table: string, column: string]
+> = [
+  ['users', 'balance'],
+  ['users', 'balance_cad'],
+  ['users', 'balance_usd'],
+  ['transactions', 'amount'],
+  ['transactions', 'sender_amount'],
+  ['transactions', 'receiver_amount'],
+  ['transactions', 'fx_fee'],
+  ['transfer_intents', 'amount'],
+  ['splits', 'total_amount'],
+  ['split_participants', 'amount_owed'],
+  ['velocity_checks', 'total_amount'],
+  ['ledger_entries', 'debit'],
+  ['ledger_entries', 'credit'],
 ] as const;
 
 export interface MoneyColumnUpgrade {
