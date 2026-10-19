@@ -64,15 +64,19 @@ jobs:
           PGPASSWORD: postgres
 
       - name: Typecheck
+        id: typecheck
         run: pnpm run typecheck
 
       - name: Lint
+        id: lint
         run: pnpm run lint
 
       - name: Test
+        id: test
         run: pnpm test
 
       - name: Build
+        id: build
         run: pnpm run build
 
       - name: Assert no live provider flag is enabled
@@ -85,6 +89,50 @@ jobs:
             exit 1
           fi
           echo "No live provider flags enabled."
+
+      # Owner-facing progress report, rendered into this run's summary page.
+      #
+      # Deliberately not a web application: the GitHub Actions summary is
+      # already authenticated to people who can see the repository, needs no
+      # new credential or deployment, and cannot be reached by the public.
+      # The report prints no secrets, customer data or transaction detail —
+      # its inputs are git, a committed JSON file, and the values passed here.
+      #
+      # `if: always()` so the report still appears when an earlier step failed;
+      # that is exactly when the owner most wants to see where things stand.
+      #
+      # Each check reports its OWN step outcome, not the job's. `job.status`
+      # was wrong in both directions: these steps are sequential and
+      # fail-fast, so a Typecheck failure leaves Lint, Test and Build
+      # *skipped* while the job reads failure — labelling all three "see job
+      # log" claims they ran. And a Build failure would mark Typecheck, which
+      # passed, with the same warning. A report that misattributes a failure
+      # is worse than one that says NOT RUN.
+      - name: Progress report
+        if: always()
+        env:
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+        run: |
+          set -uo pipefail
+          # Map a step outcome onto report wording. An empty outcome means the
+          # step never reached (job cancelled earlier), which is also NOT RUN.
+          label() {
+            case "$1" in
+              success)  printf '✅ clean' ;;
+              failure)  printf '⚠️ failed — see job log' ;;
+              skipped|'') printf '⬜ NOT RUN (earlier step failed)' ;;
+              *)        printf '⬜ NOT RUN (%s)' "$1" ;;
+            esac
+          }
+          pnpm run status -- \
+            --typecheck="$(label "$TYPECHECK")" \
+            --lint="$(label "$LINT")" \
+            --test-outcome="$(label "$TEST")" \
+            --build="$(label "$BUILD")" \
+            >> "$GITHUB_STEP_SUMMARY"
 
   audit:
     name: dependency audit

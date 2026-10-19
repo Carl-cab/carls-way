@@ -24,7 +24,7 @@ import { handlePlaidTransferSettlement } from './handle-plaid-settlement';
  * unadvanced, so the next delivery retries it instead of skipping it.
  *
  * This function does not create the cursor table. That is an additive
- * migration in initializeSchema and GET /api/migrate. A missing table fails
+ * migration in initializeSchema and POST /api/migrate. A missing table fails
  * the sync and the webhook answers 500.
  */
 

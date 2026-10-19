@@ -8,6 +8,7 @@ import {
 } from '@/lib/db';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
+import { checkOrigin } from '@/lib/request-origin';
 import { resolveAdminBySessionId } from '@/lib/rbac/admin-middleware';
 import { canRunOperations } from '@/lib/rbac/types';
 
@@ -58,9 +59,93 @@ import { canRunOperations } from '@/lib/rbac/types';
  * administrator whose role can run operations (SuperAdmin or OperationsAdmin)
  * may run initializeSchema and the money-column conversion. A customer, or an
  * administrator in a read-only role, receives 403 and the pipeline does not run.
+ *
+ * ── Phase 1 hardening (decision 0005) ──────────────────────────────────────
+ *
+ * **POST, not GET.** This executes DDL, and a state-changing operation on a
+ * safe method was reachable by CSRF: the admin session cookie is
+ * `sameSite: 'lax'`, which deliberately *does* send on a top-level cross-site
+ * GET navigation, so one link click by an operations administrator ran the
+ * whole pipeline. `GET` now answers 405 with a pointer rather than 404ing, so
+ * an operator following the old runbook gets a diagnosis instead of silence.
+ *
+ * **Origin is validated, a CSRF token is not used.** There is no browser
+ * client for this route — no page fetches it; it is invoked by `curl`. A
+ * synchronizer token would therefore have nothing to supply it and would
+ * disable the recovery path entirely. Origin validation is the applicable
+ * control: see `lib/request-origin.ts` for why an absent header is allowed,
+ * which is what keeps the anonymous auth-repair break-glass usable.
+ *
+ * **The operator path is rate limited.** It previously was not; only the
+ * anonymous branch was.
+ *
+ * **Errors are redacted.** The 500 returned `String(err)`, which on a
+ * postgres.js error carries the server message and can name objects and
+ * constraints — to an anonymous caller on a fresh deployment. The full error
+ * is logged server-side with a short reference the response echoes, so
+ * incident diagnostics survive without the response disclosing schema detail.
  */
-export async function GET(req: NextRequest) {
+
+/**
+ * The 405 body for a GET. Typed because this is the response an operator
+ * mid-incident reads to find out that the runbook changed, so a careless edit
+ * to it should not typecheck.
+ */
+interface MigrateMethodNotAllowedResponse {
+  error: string;
+  hint: string;
+}
+
+/** Human-sized token tying a redacted 500 to its server-side log line. */
+function diagnosticReference(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * The migration pipeline was reachable by GET. Answer explicitly rather than
+ * letting Next.js 405 with no body: the old runbook said GET, and an operator
+ * mid-incident deserves to be told what changed.
+ */
+export async function GET() {
   try {
+    const body: MigrateMethodNotAllowedResponse = {
+      error:
+        'Schema migration requires POST. GET is refused because this endpoint executes DDL and a state-changing GET is reachable by cross-site request forgery.',
+      hint: 'curl -X POST -b <auth-cookie> https://<host>/api/migrate',
+    };
+    return NextResponse.json(body, {
+      status: 405,
+      headers: { Allow: 'POST' },
+    });
+  } catch (err) {
+    // Nothing here can realistically throw, but CLAUDE.md requires every
+    // route handler to answer rather than surface a framework stack trace,
+    // and a handler exempted "because it is trivial" is how that rule erodes.
+    const ref = diagnosticReference();
+    console.error(`Migration GET error [ref=${ref}]:`, err);
+    return NextResponse.json(
+      { error: 'Unexpected error.', reference: ref },
+      { status: 500 },
+    );
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    // CSRF: refuse a browser-originated request from anywhere but this
+    // deployment. Checked before anything else, including authentication, so
+    // a forged request never reaches a credential lookup or the database.
+    const origin = checkOrigin(req);
+    if (!origin.ok) {
+      console.warn(
+        `migrate: refused request with ${origin.reason} origin: ${origin.got}`,
+      );
+      return NextResponse.json(
+        { error: 'Request origin not allowed' },
+        { status: 403 },
+      );
+    }
+
     const user = await getAuthUser();
     const adminCredential =
       req.cookies.get('admin_session')?.value ||
@@ -112,6 +197,25 @@ export async function GET(req: NextRequest) {
       }
 
       bootstrap = true;
+    }
+
+    // Rate limit the operator path. The anonymous branch above has its own,
+    // tighter limit; this one previously did not exist, so an operator — or
+    // anything that could make an operator's browser issue the request — could
+    // run ~103 DDL statements in a loop. Keyed on the admin id rather than the
+    // client address, because the identity is what is being limited and an
+    // operator may legitimately move between networks.
+    if (operator && admin) {
+      const limit = await checkRateLimit('schema:migrate-operator', String(admin.id));
+      if (!limit.allowed) {
+        return NextResponse.json(
+          {
+            error:
+              'Too many schema migration runs. Please try again later. No schema change was made by this request.',
+          },
+          { status: 429, headers: rateLimitHeaders(limit) },
+        );
+      }
     }
 
     // On the bootstrap path audit_logs does not exist yet, so the bootstrap
@@ -635,7 +739,20 @@ export async function GET(req: NextRequest) {
       ...(warnings.length > 0 ? { warnings } : {}),
     });
   } catch (err) {
-    console.error('Migration error:', err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    // Redacted response, full detail in the log. `String(err)` on a
+    // postgres.js error carries the server message and can name tables,
+    // columns and constraints; it was returned to the caller, who on a fresh
+    // deployment may be anonymous. The reference ties the two together so an
+    // operator can quote it and an engineer can find the line, which is what
+    // keeps this a redaction rather than a loss of diagnostics.
+    const ref = diagnosticReference();
+    console.error(`Migration error [ref=${ref}]:`, err);
+    return NextResponse.json(
+      {
+        error: 'Schema migration failed. The error has been logged.',
+        reference: ref,
+      },
+      { status: 500 },
+    );
   }
 }

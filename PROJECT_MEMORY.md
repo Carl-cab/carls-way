@@ -510,3 +510,96 @@ that was already pushed to a remote.
   or ownership decision. Owner actions, which no engineering task can
   substitute for: branch protection, the SHA-pinning decision, and Phase 0's
   backup restore.
+
+### 2026-10-18 — Phase 1 migration hardening; progress report; access blockers recorded
+
+- **Commit / PR.** PR #62 merged as `59b798d`. This entry's own change is on
+  `security/migrate-phase1-hardening`; SHA and PR appended on push.
+- **Purpose and scope.** Decision 0005 Phase 1 on `app/api/migrate/route.ts`,
+  plus an owner-facing progress report and two runbooks for work that cannot be
+  done from an engineering session. No production credential, schema,
+  ownership or environment change. No live flag touched.
+- **What changed in the route.**
+  - **POST only.** `GET` answers 405 with `Allow: POST` and a `curl` hint
+    rather than failing silently, because six documented procedures said GET.
+    The CSRF path was real: the admin cookie is `sameSite: 'lax'`, which sends
+    on top-level cross-site GET navigation, so one link click by an operations
+    administrator ran ~103 DDL statements including a balance-table rewrite
+    under `ACCESS EXCLUSIVE`.
+  - **Origin validated before authentication**, so a forged request never
+    reaches a credential lookup or the database. New `lib/request-origin.ts`.
+  - **Operator path rate limited** — `schema:migrate-operator`, 6/hour keyed on
+    admin id. It previously had none; only the anonymous branch did.
+  - **Errors redacted** — generic message plus a short reference, with the full
+    error logged against that reference, so diagnostics survive without
+    disclosing table, column or constraint names to a possibly anonymous
+    caller.
+- **The lockout risk, and how it was avoided.** An absent `Origin` header is
+  **allowed** deliberately. A browser always sends `Origin` on POST, so a
+  request without one did not come from a browser and cannot be the cross-site
+  forgery this guards against — what it usually is, is `curl`. Requiring the
+  header would have disabled the anonymous auth-repair break-glass that exists
+  because Release 1.0 locked production out. A CSRF control that creates a
+  lockout is a worse trade than the one it prevents. No CSRF token was added
+  for the same reason: there is no browser client to supply one, so a token
+  would add nothing and break recovery. Mutation-checked — making the check
+  reject an absent header fails 5 of 19 cases.
+- **Callers verified before changing the method.** No code caller exists; the
+  endpoint is operator-invoked only. Six documented procedures said GET and
+  were updated: `CLAUDE.md` (x4), `GO_LIVE_RUNBOOK.md`, and
+  `scripts/bootstrap-admin.ts` — including a **runtime error message** an
+  operator reads when `admin_users` is missing, which would otherwise have
+  told them to run a request that now 405s. `PROJECT_MEMORY.md`'s historical
+  entries were deliberately left as written.
+- **Tests run.** Suite 778 → **784 tests across 55 files** on a database
+  created fresh for the run; typecheck clean, lint 0 errors / 28 warnings,
+  build clean, `pnpm audit --prod` clean, both workflow files parse.
+  `migrate-route-security.test.ts` grew 13 → 19 cases, with each weakness
+  assertion inverted into a control assertion in the same change. Mutation-
+  checked five ways: reverting to GET-only fails 11 of 19; removing the origin
+  check 4; removing the operator limit 13; restoring the raw error string 1;
+  and the lockout mutation above 5.
+- **A real test interaction, not masked.** The new 6/hour limit engaged inside
+  `migrate-route-execution.test.ts`, which legitimately runs the pipeline
+  repeatedly to assert idempotency, and which failed with an audit count of 6
+  instead of 7. Fixed by clearing the in-process counter in that file's run
+  helper — the limiter itself stays covered in the security test, which asserts
+  the 7th call is refused. The limiter was not weakened to make a test pass.
+- **Residual weaknesses, recorded rather than closed.** No transaction across
+  the pipeline, so a mid-pipeline failure still leaves the schema between
+  versions; the route still requires table ownership, which is the coupling
+  Phases 2–5 exist to resolve; and `clientIdentifier()` still trusts
+  `x-real-ip` first, whose spoofability remains **unverified** because this
+  environment cannot reach the deployment.
+- **Progress report (Task 4).** `pnpm run status` renders a Markdown report
+  from repository evidence, and CI appends it to the job summary with
+  `if: always()`. No new web application: the Actions summary is already
+  authenticated to whoever can see the repository, needs no credential or
+  deployment, and is not publicly reachable. Statuses come from
+  `scripts/status/readiness.json`, where each carries named evidence and a
+  change is a reviewable diff — the script never infers a status and never
+  reports a check it did not observe. No percentages, because there is no
+  defined denominator.
+- **Access blockers, verified not assumed.** Vercel is unreachable:
+  `api.vercel.com` and the deployment host both return `403 CONNECT` from the
+  egress proxy, no CLI is installed, no token or `.vercel/` exists. So the
+  production SHA, preview SHA, environment isolation, logs, health and cron
+  firing are **NOT RUN**, not passing. Branch protection: GitHub reports
+  `master` as `protected: false`, so **none** of the four checks is required
+  and the merged scanners remain advisory. The protection-detail endpoint 403s
+  for lack of admin scope, but the branch record is authoritative on whether
+  any protection exists.
+- **Migration impact.** None. No schema change and no `/api/migrate`
+  statement change — only the handler's guards.
+- **Unresolved findings.** Everything under residual weaknesses above, plus:
+  branch protection unset; third-party actions unpinned (proposal in decision
+  0006, unimplemented because tag-to-SHA resolution 403s here and a guessed
+  hash is worse than a tag); Phase 0 backup restore NOT RUN; CI's branch filter
+  excludes PRs not targeting `master` or `integration/**`, so such a PR runs no
+  checks at all.
+- **Rollback.** Revert the commit. The only behavioural change is the
+  endpoint's method and guards; reverting restores GET and the previous
+  posture. No stateful change to undo.
+- **Next recommended action.** Decision 0005 Phase 2 — migration versioning
+  (`schema_migrations`), which the three hand-run files in `migrations/` already
+  need and which Phase 3's runner depends on. It needs no production access.

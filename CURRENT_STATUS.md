@@ -126,23 +126,47 @@ misleading of the two failure modes.
   an owner decision.
 - SHA-pinning of the third-party actions remains an open owner decision.
 
-### `/api/migrate` — measured weaknesses, NOT yet fixed (PR #61)
+### `/api/migrate` — Phase 1 hardening applied
 
-`lib/__tests__/migrate-route-security.test.ts` pins these as present
-behaviour, so each is a live risk until the corresponding assertion is
-inverted. Full analysis in
-`docs/decisions/0005-migration-privilege-separation.md`.
+Five of the six measured weaknesses are fixed. The assertions in
+`lib/__tests__/migrate-route-security.test.ts` were inverted in the same
+change, which was the stated purpose of writing them as assertions. Full
+analysis in `docs/decisions/0005-migration-privilege-separation.md`.
 
-- **DDL on `GET`, reachable by CSRF.** Only `GET` is exported and the admin
-  session cookie is `sameSite: 'lax'`, which sends on top-level cross-site GET
-  navigation. One link click by an operations administrator runs 103
-  statements, including a balance-table rewrite under `ACCESS EXCLUSIVE`.
-- No `Origin`, `Referer` or CSRF-token check.
-- The authenticated operator path has **no rate limit** (the anonymous path
-  has 3/hour).
-- **No transaction** across the pipeline, so a failure leaves the schema
-  neither old nor new.
-- The 500 response returns raw `String(err)`.
+**Fixed:**
+
+- **POST only.** `GET` answers 405 with a pointer rather than failing
+  silently, because the old runbook said GET. This is a **breaking
+  operational change**: the command is now
+  `curl -X POST -b <auth-cookie> https://<host>/api/migrate`.
+- **Origin validated.** A browser request from another origin is refused
+  before authentication runs, so a forged request never reaches a credential
+  lookup or the database. An **absent** `Origin` is allowed deliberately — a
+  browser always sends it on POST, so a request without one is not a
+  cross-site forgery, and requiring it would disable the command-line
+  auth-repair break-glass. No CSRF token: there is no browser client to
+  supply one, so a token would add nothing and break recovery.
+- **Operator path rate limited** — `schema:migrate-operator`, 6/hour keyed on
+  admin id. Previously only the anonymous branch was limited.
+- **Errors redacted.** The 500 returns a generic message plus a short
+  reference; the full error is logged against that reference, so diagnostics
+  survive without disclosing schema detail to the caller.
+
+**Still present, by design:**
+
+- **No transaction across the pipeline.** A failure part-way still leaves the
+  schema neither old nor new. Wrapping ~103 statements in one transaction is
+  a larger change than Phase 1, and some statements (`CREATE INDEX`) have
+  their own locking consequences inside a long transaction. Unfixed and
+  recorded, not forgotten.
+- **The route requires table ownership.** This is the coupling that blocks
+  audit immutability, and it is what Phases 2–5 exist to resolve. Phase 1
+  does not touch it.
+- **`clientIdentifier()` trusts `x-real-ip` first.** Whether Vercel's proxy
+  overwrites a client-supplied header of that name is still **unverified**
+  from this environment. If it does not, the anonymous 3/hour limit is
+  bypassable by rotating one header. The operator limit is keyed on admin id
+  and is unaffected.
 
 ---
 

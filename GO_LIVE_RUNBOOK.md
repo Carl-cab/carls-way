@@ -145,7 +145,10 @@ Set these in the Vercel project (Production scope). **Add the two live flags LAS
 ## 6. Database Migration (🟡 ENGINEERING)
 
 - [ ] Deploy the code first (Vercel auto-deploys on push to `master`).
-- [ ] Call `GET /api/migrate` once, authenticated, to apply any `ALTER TABLE` changes
+- [ ] Call `POST /api/migrate` once, authenticated, to apply any `ALTER TABLE` changes
+      (`curl -X POST -b <auth-cookie> https://<host>/api/migrate`). It is POST,
+      not GET: a state-changing GET was reachable by cross-site request
+      forgery. GET now answers 405 with a pointer.
       to the production database (adds `provider_region`, `provider_name`,
       `execution_mode`, `consent_confirmed_at`, `idempotency_key`, `bank_account_id`,
       and any live-provider columns such as `plaid_account_id`).

@@ -1,5 +1,5 @@
 /**
- * Security properties of `GET /api/migrate`, the only mechanism by which the
+ * Security properties of `POST /api/migrate`, the only mechanism by which the
  * production schema changes.
  *
  * This file exists to make the route's security posture *measured* rather than
@@ -8,10 +8,12 @@
  * cannot silently regress, or records a present weakness so a later fix has
  * something to flip.
  *
- * Cases marked DOCUMENTS A WEAKNESS assert the current, undesirable behaviour
- * on purpose. They are not approval of it. When the behaviour is fixed these
- * assertions must be inverted in the same change — that is the point of
- * writing them down rather than describing them in prose.
+ * Phase 1 of decision 0005 fixed five of the six weaknesses this file
+ * originally pinned, and the assertions were inverted in that same change —
+ * which was the stated point of writing them as assertions rather than prose.
+ * What remains documented as present is the one Phase 1 does not address:
+ * the route still requires table ownership, which is what blocks audit
+ * immutability and needs the credential split (Phases 2-5).
  *
  * Nothing here touches production. The route runs against the test database,
  * and the one case that deliberately breaks a statement cleans up the object
@@ -67,7 +69,10 @@ function admin(role: string) {
 }
 
 function request(headers: Record<string, string> = {}) {
-  return new NextRequest('https://example.test/api/migrate', { headers });
+  return new NextRequest('https://example.test/api/migrate', {
+    method: 'POST',
+    headers,
+  });
 }
 
 /**
@@ -99,38 +104,93 @@ afterAll(async () => {
 // ─── The HTTP surface ────────────────────────────────────────────────────────
 
 describe('HTTP method surface', () => {
-  it('DOCUMENTS A WEAKNESS: the DDL operation is exposed on GET, and only GET', async () => {
+  it('exposes the DDL operation on POST, not GET', async () => {
     const mod = await import('@/app/api/migrate/route');
 
-    // GET is the whole API. A state-changing operation on a safe method is
-    // reachable by top-level navigation, which is what makes the SameSite=Lax
-    // cookie below insufficient.
-    expect(typeof mod.GET).toBe('function');
-    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
+    expect(typeof mod.POST).toBe('function');
+    for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
       expect((mod as Record<string, unknown>)[method]).toBeUndefined();
     }
   });
 
-  it('DOCUMENTS A WEAKNESS: the admin session cookie is SameSite=Lax', async () => {
-    // Lax is correct for a login cookie in general: it blocks cross-site POST,
-    // fetch, iframe and image loads. It deliberately DOES send the cookie on a
-    // top-level cross-site GET navigation — a link click or a redirect.
-    //
-    // Combined with the previous case that is a CSRF path: a logged-in
-    // operations administrator who follows a link to this endpoint from any
-    // other site runs the full pipeline, including the money-column type
-    // conversion, against whatever database the deployment points at.
-    //
-    // Asserted against the source rather than a live response because the
-    // attribute is what carries the risk, and it is set in one place.
+  it('answers GET with 405 and a pointer, not silence', async () => {
+    // The old runbook said GET. An operator following it mid-incident should
+    // be told what changed rather than left with an empty 405 or a 404.
+    const { GET } = await import('@/app/api/migrate/route');
+    const res = await GET();
+
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe('POST');
+    const body = await res.json();
+    expect(body.error).toMatch(/requires POST/i);
+    expect(body.hint).toMatch(/curl -X POST/);
+  });
+
+  it('the admin session cookie is still SameSite=Lax, which POST-only is what fixes', async () => {
+    // Lax is left as-is deliberately: it is correct for a login cookie, and it
+    // only became a CSRF path because the operation was on GET. Pinned so that
+    // a future change back to GET has to confront this.
     const source = readFileSync(ADMIN_AUTH, 'utf8');
     expect(source).toMatch(/sameSite:\s*'lax'/);
   });
+});
 
-  it('the route has no Origin, Referer or CSRF-token check', () => {
-    expect(routeSource).not.toMatch(/\borigin\b/i);
-    expect(routeSource).not.toMatch(/\breferer\b/i);
-    expect(routeSource).not.toMatch(/csrf/i);
+// ─── CSRF: Origin validation ────────────────────────────────────────────────
+
+describe('origin validation', () => {
+  it('refuses a browser request from another origin, before touching auth', async () => {
+    // Set up a credential that WOULD succeed, to prove the origin check runs
+    // first and the pipeline never starts.
+    currentUser = null;
+    currentAdmin = admin('SuperAdmin');
+    __resetInMemoryCounters();
+
+    const { POST } = await import('@/app/api/migrate/route');
+    const res = await POST(request({ origin: 'https://attacker.example' }));
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toMatch(/origin not allowed/i);
+  });
+
+  it('refuses an opaque origin', async () => {
+    currentUser = null;
+    currentAdmin = admin('SuperAdmin');
+    const { POST } = await import('@/app/api/migrate/route');
+    expect((await POST(request({ origin: 'null' }))).status).toBe(403);
+  });
+
+  it('refuses a malformed origin', async () => {
+    currentUser = null;
+    currentAdmin = admin('SuperAdmin');
+    const { POST } = await import('@/app/api/migrate/route');
+    expect((await POST(request({ origin: 'not-a-url' }))).status).toBe(403);
+  });
+
+  it('ALLOWS an absent origin, which is what keeps the recovery path usable', async () => {
+    // This is the deliberate shape of the control, not a gap. A browser always
+    // sends Origin on POST, so a request without one did not come from a
+    // browser and cannot be the cross-site forgery this guards against. What
+    // it usually is, is curl from an operator's terminal — and requiring the
+    // header would disable the anonymous auth-repair break-glass that exists
+    // because production was once locked out.
+    currentUser = null;
+    currentAdmin = admin('SuperAdmin');
+    __resetInMemoryCounters();
+
+    const { POST } = await import('@/app/api/migrate/route');
+    const res = await POST(request());
+
+    expect(res.status).toBe(200);
+  }, 180000);
+
+  it('the route checks origin before authentication', () => {
+    // Structural, because ordering is the property: a forged request must not
+    // reach a credential lookup or the database.
+    const originAt = routeSource.indexOf('checkOrigin(req)');
+    const authAt = routeSource.indexOf('await getAuthUser()');
+    expect(originAt).toBeGreaterThan(-1);
+    expect(authAt).toBeGreaterThan(-1);
+    expect(originAt).toBeLessThan(authAt);
   });
 });
 
@@ -142,8 +202,8 @@ describe('authorization', () => {
     currentUser = null;
     __resetInMemoryCounters();
 
-    const { GET } = await import('@/app/api/migrate/route');
-    const res = await GET(request());
+    const { POST } = await import('@/app/api/migrate/route');
+    const res = await POST(request());
 
     // The test database has rows, so anonymousRecoveryMode() is at most
     // 'auth-repair' — never the full pipeline.
@@ -163,8 +223,8 @@ describe('authorization', () => {
     currentAdmin = null;
     currentUser = { userId: 4242 };
 
-    const { GET } = await import('@/app/api/migrate/route');
-    const res = await GET(request());
+    const { POST } = await import('@/app/api/migrate/route');
+    const res = await POST(request());
 
     expect(res.status).toBe(403);
     expect((await res.json()).error).toMatch(/operations administrator/i);
@@ -174,8 +234,8 @@ describe('authorization', () => {
     currentUser = null;
     currentAdmin = admin('SupportAgent');
 
-    const { GET } = await import('@/app/api/migrate/route');
-    const res = await GET(request());
+    const { POST } = await import('@/app/api/migrate/route');
+    const res = await POST(request());
 
     expect(res.status).toBe(403);
   });
@@ -186,39 +246,50 @@ describe('authorization', () => {
     currentUser = { userId: 4242 };
     currentAdmin = admin('ComplianceOfficer');
 
-    const { GET } = await import('@/app/api/migrate/route');
-    expect((await GET(request())).status).toBe(403);
+    const { POST } = await import('@/app/api/migrate/route');
+    expect((await POST(request())).status).toBe(403);
   });
 });
 
 // ─── Rate limiting: present on one path, absent on the other ────────────────
 
 describe('rate limiting', () => {
-  it('DOCUMENTS A WEAKNESS: the authenticated operator path is not rate limited', async () => {
+  it('rate limits the authenticated operator path', async () => {
     currentUser = null;
     currentAdmin = admin('SuperAdmin');
     __resetInMemoryCounters();
 
-    const { GET } = await import('@/app/api/migrate/route');
+    const { POST } = await import('@/app/api/migrate/route');
 
-    // The anonymous branch is capped at 3/hour. The operator branch calls
-    // checkRateLimit nowhere, so an operator (or anything that can make an
-    // operator's browser issue a GET) can run the pipeline without limit.
+    // 6/hour keyed on the admin id. The 7th must be refused — previously the
+    // operator path called checkRateLimit nowhere and ran unbounded.
     const statuses: number[] = [];
-    for (let i = 0; i < 5; i++) {
-      statuses.push((await GET(request())).status);
+    for (let i = 0; i < 7; i++) {
+      statuses.push((await POST(request())).status);
     }
 
-    expect(statuses).toEqual([200, 200, 200, 200, 200]);
-    expect(statuses).not.toContain(429);
-  }, 180000);
+    expect(statuses.slice(0, 6)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(statuses[6]).toBe(429);
+  }, 300000);
 
-  it('the rate limiter is invoked on exactly one path in the route', () => {
-    // Structural, and deliberately so: it pins the asymmetry the case above
-    // demonstrates, so adding a limiter to the operator path changes this
-    // count and forces both to be updated together.
+  it('the 429 says plainly that no schema change was made', async () => {
+    currentUser = null;
+    currentAdmin = admin('SuperAdmin');
+    __resetInMemoryCounters();
+
+    const { POST } = await import('@/app/api/migrate/route');
+    let res = await POST(request());
+    for (let i = 0; i < 6 && res.status === 200; i++) res = await POST(request());
+
+    expect(res.status).toBe(429);
+    expect((await res.json()).error).toMatch(/no schema change was made/i);
+  }, 300000);
+
+  it('the rate limiter is invoked on both paths now', () => {
+    // Was exactly 1 — the anonymous branch only. Pinned at 2 so removing
+    // either limiter changes this count.
     const calls = routeSource.match(/checkRateLimit\(/g) ?? [];
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -308,11 +379,16 @@ describe('failure behaviour', () => {
     }
   }, 180000);
 
-  it('DOCUMENTS A WEAKNESS: the 500 response returns the raw error string', () => {
-    // `String(err)` on a postgres.js error carries the server message, and can
-    // name objects and constraints. It is returned to whoever called the
-    // endpoint — including, on a fresh deployment, an anonymous caller.
-    expect(routeSource).toMatch(/NextResponse\.json\(\{\s*error:\s*String\(err\)\s*\}/);
+  it('redacts the 500 response and keeps the detail in the log', () => {
+    // `String(err)` on a postgres.js error carries the server message and can
+    // name tables, columns and constraints — and on a fresh deployment the
+    // caller may be anonymous. The response now carries a reference instead,
+    // and the full error is logged against it, so this is a redaction rather
+    // than a loss of diagnostics.
+    expect(routeSource).not.toMatch(/error:\s*String\(err\)/);
+    expect(routeSource).toMatch(/Schema migration failed\. The error has been logged\./);
+    expect(routeSource).toMatch(/reference:\s*ref/);
+    expect(routeSource).toMatch(/console\.error\(`Migration error \[ref=/);
   });
 });
 

@@ -18,7 +18,7 @@
  * Three independent conditions must all hold, and each fails closed:
  *
  *   1. ADMIN_BOOTSTRAP_SECRET is set and at least 32 hex characters.
- *   2. The schema exists (run GET /api/migrate first) and admin_users is empty. One existing administrator, of any role or status,
+ *   2. The schema exists (run POST /api/migrate first) and admin_users is empty. One existing administrator, of any role or status,
  *      is enough to refuse — after that, accounts are created through the
  *      console by an administrator holding admins:create.
  *   3. A password is supplied on stdin, or generated here and printed once.
@@ -75,13 +75,13 @@ async function main() {
   // The admin tables are created by the migration, not by initializeSchema(),
   // so this refuses rather than half-creating a schema it does not own. On a
   // brand-new database — as production was after the Neon recovery — call
-  // GET /api/migrate first; it runs unauthenticated while no account exists.
+  // POST /api/migrate first; it runs unauthenticated while no account exists.
   const hasAdminTable = await sql<{ present: boolean }[]>`
     SELECT to_regclass('public.admin_users') IS NOT NULL AS present
   `;
   if (!hasAdminTable[0]?.present) {
     fail(
-      'admin_users does not exist. Run GET /api/migrate against this database ' +
+      'admin_users does not exist. Run POST /api/migrate against this database ' +
         'first, then re-run this command.',
     );
   }

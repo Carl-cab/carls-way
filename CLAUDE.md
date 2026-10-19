@@ -71,6 +71,7 @@ Client (React 19)
 | `lib/repositories/BaseRepository.ts` | Repository base. `exists()`/`count()` take a `sql` **fragment**, never a condition string — see the note under Coding Standards |
 | `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise |
 | `scripts/verify-migrate.sql` | Read-only check that `/api/migrate` applied everything code reads. Safe against production |
+| `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
 
@@ -79,6 +80,16 @@ Client (React 19)
 ## Coding Standards
 
 **TypeScript** is used throughout. All new files must be `.ts` or `.tsx`. Avoid `any` types; define interfaces for all API request and response shapes.
+
+One documented exception: `scripts/status/report.mjs` is plain ESM. It was
+`.ts` run through `tsx` and failed CI with `tsx: not found` — `npx` fetches on
+demand locally, while CI installs `--frozen-lockfile` from declared
+dependencies only. Both ways to keep `.ts` cost something: adding `tsx` pulls a
+build toolchain in to render a Markdown table, and Node's native type stripping
+needs 22.6+ while **CI pins Node 20**, so that route passes locally and fails
+in CI. The script's inputs are git output, a JSON file and argv strings, so it
+has no type surface worth the dependency. A new **ops script** with no type
+surface may follow it; application code may not.
 
 **Styling** uses Tailwind CSS utility classes exclusively. Do not write custom CSS outside of `app/globals.css`. The design language uses `blue-700` as the primary brand color. Red is
 reserved for semantic meaning only — errors, failed and returned transfer
@@ -209,7 +220,10 @@ tables absent from the test fixture, and 21 columns plus the whole admin RBAC
 surface absent from `lib/db.ts`. Add the object to `scripts/verify-migrate.sql`
 too if application code reads it unguarded.
 
-After deploying, call `GET /api/migrate` once (authenticated) to apply the migration to production.
+After deploying, call `POST /api/migrate` once (authenticated) to apply the
+migration to production. **It is POST, not GET** — a state-changing GET was
+reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
+`GET` answers 405 with a pointer rather than failing silently.
 
 **Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. 51 files /
 735 tests as of this writing, and the suite is expected to stay fully green.
@@ -223,7 +237,7 @@ has twice hidden a failure that CI then found on a clean one. Also available:
 warnings are tolerated).
 
 `lib/__tests__/migrate-route-execution.test.ts` runs the real
-`GET /api/migrate` handler with the real database layer, so the statements that
+`POST /api/migrate` handler with the real database layer, so the statements that
 production depends on are executed rather than only parsed. Before it existed,
 changing one statement to `ADD COLUM` left typecheck clean and all 735 tests
 passing — the failure would have surfaced only when an operator ran the endpoint
@@ -393,20 +407,36 @@ arbitrary end user.
   must keep `INSERT`, so no proposed layer prevents a compromised application
   **appending fabricated** rows — privilege separation protects the integrity
   of existing rows, not the authenticity of new ones.
-- **`/api/migrate` has six measured security weaknesses, pinned as present
-  behaviour** in `lib/__tests__/migrate-route-security.test.ts`. The sharpest:
-  DDL is exposed on `GET` only, and the admin cookie is `sameSite: 'lax'`,
-  which *does* send on top-level cross-site GET navigation — so one link click
-  by an operations administrator runs the whole pipeline. Also: no
-  Origin/Referer/CSRF check, no rate limit on the operator path (the anonymous
-  path has 3/hour), no transaction across 103 statements, raw `String(err)` in
-  the 500, and the route needs table **ownership**. That last one is why audit
-  immutability is blocked: the app cannot become a non-owning role while this
-  route runs DDL on the same connection. See
-  `docs/decisions/0005-migration-privilege-separation.md` for the recommended
-  architecture and the phased sequence. Those tests assert the *current*
-  behaviour deliberately — fixing one means inverting its assertion in the same
-  change.
+- **`/api/migrate`: Phase 1 hardening is applied; two weaknesses remain.**
+  Fixed, with the assertions in
+  `lib/__tests__/migrate-route-security.test.ts` inverted in the same change:
+  **POST only** (`GET` answers 405 with a pointer), **Origin validated before
+  authentication**, the **operator path rate limited**
+  (`schema:migrate-operator`, 6/hour on admin id), and **errors redacted** to a
+  reference that the log carries.
+  An absent `Origin` is **allowed on purpose** — a browser always sends it on
+  POST, so a request without one is not cross-site forgery, and requiring it
+  would disable the command-line auth-repair break-glass. No CSRF token, for
+  the same reason: no browser client exists to supply one. Changing either
+  would create the lockout Release 1.0 already suffered.
+  **Still open:** no transaction across the ~103 statements, so a failure
+  leaves the schema between versions; and the route still requires table
+  **ownership**, which is the coupling that blocks audit immutability and what
+  Phases 2-5 of
+  `docs/decisions/0005-migration-privilege-separation.md` exist to resolve.
+  `clientIdentifier()` trusting `x-real-ip` first remains **unverified**, not
+  cleared.
+  The operator limit is also **weaker than its number suggests**: without
+  `REDIS_URL` the counter is process-local, so on Vercel it is `6 × instances`
+  per hour and a cold start resets it. It is deliberately **not** fail-closed —
+  refusing the migration whenever Redis is absent would make an optional
+  variable a hard dependency of the only schema-migration path and of the
+  command-line break-glass, which is the Release 1.0 lockout shape. The threat
+  is an authenticated operator's runaway loop, not an anonymous attacker, so
+  degrading to a weaker limit beats denying schema repair. A counter in
+  PostgreSQL — which this endpoint always has, since it cannot run without
+  `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
+  the migration that it limits, so it belongs with Phase 2.
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
   `ProviderEventRepository` both use `sql.json`) — an earlier note here claimed
@@ -441,7 +471,7 @@ pnpm run build
 pnpm run lint
 
 # Run schema migration on production (call this after deploying schema changes)
-curl -b <auth-cookie> https://carloscab74.vercel.app/api/migrate
+curl -X POST -b <auth-cookie> https://carloscab74.vercel.app/api/migrate
 
 # Test the FX quote endpoint
 curl -s -X POST https://carloscab74.vercel.app/api/fx/quote \
@@ -517,6 +547,6 @@ The authoritative list is whatever `initializeSchema()` builds; `scripts/verify-
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |
 | `CA_EFT_LIVE` | `true` enables live CA EFT. Any other value, including unset, is sandbox |
 
-**After any schema change:** Deploy first, then call `GET /api/migrate` once with a valid auth cookie to apply `ALTER TABLE` changes to the live database.
+**After any schema change:** Deploy first, then call `POST /api/migrate` once with a valid auth cookie to apply `ALTER TABLE` changes to the live database. A command-line call sends no `Origin` header, which the route deliberately allows; a browser-originated request from another site is refused.
 
 **Rollback:** Vercel keeps a full deployment history. To roll back, navigate to the Vercel project dashboard → Deployments → select a prior deployment → Promote to Production.
