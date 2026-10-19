@@ -132,6 +132,18 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // Tracked outside the try so the catch can tell whether the reconciler ever
+  // began. The outer catch sees EVERY error in this handler, including ones
+  // raised before any DDL runs — the auth lookup, the admin session lookup,
+  // the recovery-mode check, the rate limiter (which can fail on a Redis
+  // problem) — and the anonymous auth-repair path, which returns without
+  // running the pipeline at all. Recording 'failed' for those would be false,
+  // and worse than false: 'failed' is in BLOCKING_STATUSES, so a transient
+  // Redis error would make assertSafeToProceed() refuse every financial
+  // migration until someone reran this route successfully.
+  let convergenceStarted = false;
+  let convergenceActor: string | undefined;
+
   try {
     // CSRF: refuse a browser-originated request from anywhere but this
     // deployment. Checked before anything else, including authentication, so
@@ -229,6 +241,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Run full schema initialization (creates missing tables)
+    convergenceStarted = true;
     await initializeSchema();
 
     const sql = getSql();
@@ -749,8 +762,9 @@ export async function POST(req: NextRequest) {
     // construction, so a per-statement version would be meaningless; see
     // lib/migrations/registry.ts. Failure to record must not fail a migration
     // that already succeeded, so this is advisory and logged if it throws.
+    convergenceActor = operator && admin ? `admin:${admin.id}` : 'anonymous-bootstrap';
     try {
-      await recordConvergenceRun('applied', operator && admin ? `admin:${admin.id}` : 'anonymous-bootstrap');
+      await recordConvergenceRun('applied', convergenceActor);
     } catch (recordErr) {
       console.warn(
         'migrate: schema reconciled but recording the run failed:',
@@ -784,10 +798,12 @@ export async function POST(req: NextRequest) {
     // shows a run that did not complete rather than staying silent — the
     // schema may be between versions, which is the open gap this phase
     // cannot close on its own.
-    try {
-      await recordConvergenceRun('failed', 'migrate-route', ref);
-    } catch {
-      // Already failing; a second failure here must not replace the response.
+    if (convergenceStarted) {
+      try {
+        await recordConvergenceRun('failed', convergenceActor ?? 'migrate-route', ref);
+      } catch {
+        // Already failing; a second failure here must not replace the response.
+      }
     }
     return NextResponse.json(
       {

@@ -658,7 +658,7 @@ rather than review.**
    ClientRead` on that exact statement. Beyond the hang it would have created
    `webhook_dead_letters` outside the advisory-locked transaction in
    production, defeating the race-safety that lock exists for. Verified after
-   the fix: zero `await db\`` inside the transaction body, 62 `await sql\``.
+   the fix: zero statements using the pool handle inside the transaction body, and 62 using the transaction handle.
 
 **A third defect, in the new test rather than the code.** The detection tests
 dropped `idx_transfer_intents_correlation_id` from the shared database and
@@ -675,6 +675,10 @@ work, refusal to re-begin an applied or failed migration, concurrency refusal
 and lock release, `pg_locks` assertions on both paths, baseline adoption
 against fresh and populated databases, drift, and the "is this current?"
 question. No scratch databases leak.
+
+**Commit / PR.** PR #64, branch `phase2/schema-migration-versioning`, initial
+commit `4349bf4`; review fixes follow it on the same branch. The preceding
+Phase 1 work merged to `master` as `6d8861c` (PR #63).
 
 **Migration impact.** One new table, added to all three schema sources
 (`lib/db.ts`, `app/api/migrate/route.ts`, `lib/__tests__/helpers/test-schema.sql`)

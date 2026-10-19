@@ -22,6 +22,7 @@ const initializeSchema = vi.hoisted(() => vi.fn());
 const upgradeLegacyMoneyColumns = vi.hoisted(() => vi.fn());
 const checkRateLimit = vi.hoisted(() => vi.fn());
 const resolveAdminBySessionId = vi.hoisted(() => vi.fn());
+const recordConvergenceRun = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/db', () => ({
   anonymousRecoveryMode,
@@ -52,6 +53,10 @@ vi.mock('@/lib/rbac/admin-middleware', () => ({
   resolveAdminBySessionId,
 }));
 
+vi.mock('@/lib/migrations/tracking', () => ({
+  recordConvergenceRun,
+}));
+
 import { POST } from '@/app/api/migrate/route';
 
 function request(adminSession?: string): NextRequest {
@@ -68,6 +73,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   checkRateLimit.mockResolvedValue({ allowed: true, remaining: 2, limit: 3, resetAt: Date.now() });
   repairAuthCriticalColumns.mockResolvedValue(['token_version']);
+  recordConvergenceRun.mockResolvedValue(undefined);
   initializeSchema.mockResolvedValue(undefined);
   upgradeLegacyMoneyColumns.mockResolvedValue([]);
   resolveAdminBySessionId.mockResolvedValue(null);
@@ -214,5 +220,63 @@ describe('administrator', () => {
     expect(res.status).toBe(403);
     expect(initializeSchema).not.toHaveBeenCalled();
     expect(upgradeLegacyMoneyColumns).not.toHaveBeenCalled();
+  });
+});
+
+describe('convergence recording is scoped to runs that actually began', () => {
+  /**
+   * `recordConvergenceRun('failed', …)` writes status 'failed' on the fixed id
+   * `convergent_api_migrate`, and 'failed' is in BLOCKING_STATUSES — so
+   * `assertSafeToProceed()` would refuse every financial migration until
+   * someone reran this route successfully. Recording it for an error that
+   * never reached the pipeline turns an unrelated transient fault into a
+   * migration freeze. These assert the flag that prevents that.
+   */
+
+  it('does not record a failed run when the error precedes the pipeline', async () => {
+    // A Redis problem inside the rate limiter: nothing has touched the schema.
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue(null);
+    anonymousRecoveryMode.mockResolvedValue('bootstrap');
+    checkRateLimit.mockRejectedValue(new Error('redis unavailable'));
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(500);
+    expect(initializeSchema).not.toHaveBeenCalled();
+    expect(recordConvergenceRun).not.toHaveBeenCalled();
+  });
+
+  it('does not record a failed run when the anonymous repair path fails', async () => {
+    // The repair path returns without running the reconciler at all, so a
+    // failure in it says nothing about whether the schema is converged.
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue(null);
+    anonymousRecoveryMode.mockResolvedValue('auth-repair');
+    repairAuthCriticalColumns.mockRejectedValue(new Error('column repair failed'));
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(500);
+    expect(initializeSchema).not.toHaveBeenCalled();
+    expect(recordConvergenceRun).not.toHaveBeenCalled();
+  });
+
+  it('does record a failed run once the pipeline has started', async () => {
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue(null);
+    anonymousRecoveryMode.mockResolvedValue('bootstrap');
+    checkRateLimit.mockResolvedValue({ allowed: true, remaining: 2, limit: 3, resetAt: Date.now() });
+    initializeSchema.mockRejectedValue(new Error('DDL blew up mid-pipeline'));
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(500);
+    expect(initializeSchema).toHaveBeenCalled();
+    expect(recordConvergenceRun).toHaveBeenCalledWith(
+      'failed',
+      expect.any(String),
+      expect.any(String),
+    );
   });
 });

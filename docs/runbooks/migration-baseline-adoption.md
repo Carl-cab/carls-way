@@ -81,19 +81,31 @@ node --input-type=module -e '…await import("./lib/migrations/tracking.ts")'
                                     stripping is even reached
 ```
 
-What **does** work today is the test runner, which is a declared dependency and
-resolves the alias through the vitest config:
+**Do not point `lib/__tests__/migration-versioning.test.ts` at a target
+database.** An earlier version of this runbook told you to, as the thing that
+"does work today". It does not work — it damages the database it is pointed at:
 
-```bash
-# In a checkout at the deployed commit, with DATABASE_URL pointing at the
-# database being adopted — NOT production, without separate authorization.
-DATABASE_URL="postgres://…" npx vitest run lib/__tests__/migration-versioning.test.ts
-```
+- `beforeAll` calls `initializeSchema()`, which runs DDL on the target. That
+  directly contradicts this runbook's own claim to issue no `ALTER` and no
+  `CREATE INDEX`.
+- `beforeEach` runs `DELETE FROM schema_migrations`, destroying **every**
+  existing tracking row — including genuine `applied` rows and the
+  `convergent_api_migrate` marker. On a restored production copy that is the
+  loss of exactly the evidence adoption exists to establish.
+- Several cases write invented history: `applied` rows attributed to
+  `operator:test`, rows forced to `failed` and `baseline_unknown`.
+- One case inserts into and deletes from `users` and `transactions`,
+  contradicting "touches no customer data".
+- It needs `CREATE DATABASE` on the target cluster for its scratch databases.
 
-That exercises adoption against the target database and asserts what each probe
-concluded. It is a test file doing an operator's job, which is not where this
-should end up — a first-class entry point belongs with **Phase 3's runner**,
-and that is the right place for it rather than a hand-written script here.
+Whatever rows survived would be adoption results only by accident of test
+ordering.
+
+**So adoption has no supported entry point today.** That is the honest state:
+`pnpm tsx` fails, plain `node` fails on the path alias, and the test runner is
+destructive. A first-class entry point — one that calls `adoptBaseline()` and
+nothing else — belongs with **Phase 3's runner**. Until it exists, do not adopt
+a database you care about.
 
 A `psql`-only path is deliberately **not** offered. It would mean hand-copying
 the three detection probes out of `lib/migrations/registry.ts` into SQL, which
@@ -152,9 +164,16 @@ made rather than taking it on trust.
 
 ## Concurrency
 
-Adoption and any future runner take a PostgreSQL advisory lock via
-`withMigrationLock()`. It uses `pg_try_advisory_lock`, so a second runner is
-**refused immediately** rather than queueing. That is deliberate: a blocking
+**`adoptBaseline()` does not itself take the advisory lock** — an earlier
+version of this section claimed it did. It calls `ensureMigrationTable()`, the
+detection probes and its `INSERT` on whatever executor it is given, and nothing
+more. Two concurrent adoptions are safe today only because that `INSERT` is
+`ON CONFLICT (id) DO NOTHING`, so the loser writes nothing rather than
+overwriting the winner. Mutual exclusion comes only from a *caller* that wraps
+adoption in `withMigrationLock()`, which Phase 3's runner should do.
+
+`withMigrationLock()` itself uses `pg_try_advisory_lock` on a reserved
+connection, so a second holder is **refused immediately** rather than queueing. That is deliberate: a blocking
 wait with no timeout holds a connection open, and on serverless that turns one
 slow migration into exhausted pool capacity — the same reasoning already
 recorded in `lib/db.ts` for the boot-time money upgrade.
