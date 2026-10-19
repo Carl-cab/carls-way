@@ -241,6 +241,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Run full schema initialization (creates missing tables)
+    // Both of these are resolved by now: the operator/admin lookup happens
+    // before any branch, and the anonymous path sets `bootstrap` above. Capture
+    // the identity HERE rather than after the pipeline, so a failure *during*
+    // the pipeline still records who ran it — an earlier version assigned it
+    // only on the success path, which meant exactly the runs worth attributing
+    // fell back to a generic label.
+    convergenceActor = operator && admin ? `admin:${admin.id}` : 'anonymous-bootstrap';
     convergenceStarted = true;
     await initializeSchema();
 
@@ -762,9 +769,8 @@ export async function POST(req: NextRequest) {
     // construction, so a per-statement version would be meaningless; see
     // lib/migrations/registry.ts. Failure to record must not fail a migration
     // that already succeeded, so this is advisory and logged if it throws.
-    convergenceActor = operator && admin ? `admin:${admin.id}` : 'anonymous-bootstrap';
     try {
-      await recordConvergenceRun('applied', convergenceActor);
+      await recordConvergenceRun('applied', convergenceActor ?? 'migrate-route');
     } catch (recordErr) {
       console.warn(
         'migrate: schema reconciled but recording the run failed:',

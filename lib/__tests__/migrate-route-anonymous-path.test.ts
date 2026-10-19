@@ -279,4 +279,41 @@ describe('convergence recording is scoped to runs that actually began', () => {
       expect.any(String),
     );
   });
+
+  it('attributes a mid-pipeline failure to the operator, not a generic label', async () => {
+    // The identity is resolved long before the pipeline but was previously
+    // assigned only on the success path, so a failure *during* the pipeline —
+    // precisely the run worth attributing — fell back to 'migrate-route'.
+    const admin = { id: 42, role: 'OperationsAdmin' };
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue(admin);
+    checkRateLimit.mockResolvedValue({ allowed: true, remaining: 5, limit: 6, resetAt: Date.now() });
+    initializeSchema.mockRejectedValue(new Error('DDL blew up mid-pipeline'));
+
+    const res = await POST(request('admin-session-token'));
+
+    expect(res.status).toBe(500);
+    expect(recordConvergenceRun).toHaveBeenCalledWith(
+      'failed',
+      'admin:42',
+      expect.any(String),
+    );
+  });
+
+  it('attributes an anonymous bootstrap failure to the bootstrap path', async () => {
+    getAuthUser.mockResolvedValue(null);
+    resolveAdminBySessionId.mockResolvedValue(null);
+    anonymousRecoveryMode.mockResolvedValue('bootstrap');
+    checkRateLimit.mockResolvedValue({ allowed: true, remaining: 2, limit: 3, resetAt: Date.now() });
+    initializeSchema.mockRejectedValue(new Error('DDL blew up mid-pipeline'));
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(500);
+    expect(recordConvergenceRun).toHaveBeenCalledWith(
+      'failed',
+      'anonymous-bootstrap',
+      expect.any(String),
+    );
+  });
 });
