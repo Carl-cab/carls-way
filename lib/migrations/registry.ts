@@ -151,12 +151,49 @@ async function detectCorrelationIndex(
     };
   }
 
-  const rows = await sql<{ indexname: string; indexdef: string }>`
-    SELECT indexname, indexdef
-    FROM pg_indexes
-    WHERE schemaname = 'public'
-      AND tablename = 'transfer_intents'
-      AND indexname = 'idx_transfer_intents_correlation_id'
+  // Read the index from the catalogue rather than matching on `indexdef`
+  // text. An earlier version tested `/UNIQUE/i` against `pg_indexes.indexdef`,
+  // which is too weak: measured on PostgreSQL 16, a UNIQUE index of this same
+  // name on a DIFFERENT column, or without the partial predicate, also
+  // contains the word UNIQUE and so read as `present`. That is a false
+  // baseline — worse than `baseline_unknown`, because it records the migration
+  // as satisfied while the uniqueness guarantee it exists to create is absent.
+  // That guarantee is what stops one verified Stripe metadata value resolving
+  // to more than one local transfer, so a false positive here is a
+  // financial-correctness hole, not a cosmetic one.
+  //
+  // `correlation` is LEFT JOINed so a database missing the column yields NULL
+  // rather than dropping the row, which would otherwise read as "no index".
+  const rows = await sql<{
+    indexname: string;
+    indexdef: string;
+    is_unique: boolean;
+    key_atts: number;
+    total_atts: number;
+    first_key: number;
+    correlation_attnum: number | null;
+    predicate: string | null;
+  }>`
+    SELECT
+      idx.relname AS indexname,
+      pg_get_indexdef(i.indexrelid) AS indexdef,
+      i.indisunique AS is_unique,
+      i.indnkeyatts AS key_atts,
+      i.indnatts AS total_atts,
+      i.indkey[0] AS first_key,
+      correlation.attnum AS correlation_attnum,
+      pg_get_expr(i.indpred, i.indrelid) AS predicate
+    FROM pg_index AS i
+    JOIN pg_class AS idx ON idx.oid = i.indexrelid
+    JOIN pg_class AS tbl ON tbl.oid = i.indrelid
+    JOIN pg_namespace AS ns ON ns.oid = tbl.relnamespace
+    LEFT JOIN pg_attribute AS correlation
+      ON correlation.attrelid = tbl.oid
+     AND correlation.attname = 'correlation_id'
+     AND NOT correlation.attisdropped
+    WHERE ns.nspname = 'public'
+      AND tbl.relname = 'transfer_intents'
+      AND idx.relname = 'idx_transfer_intents_correlation_id'
   `;
 
   if (rows.length === 0) {
@@ -166,19 +203,36 @@ async function detectCorrelationIndex(
     };
   }
 
-  const def = rows[0].indexdef;
-  // The migration creates a UNIQUE partial index. A non-unique index of the
-  // same name is a different object and must not read as this migration's end
-  // state — it would leave the uniqueness guarantee absent while claiming the
-  // migration was done.
-  if (!/UNIQUE/i.test(def)) {
+  const row = rows[0];
+
+  if (row.correlation_attnum === null) {
     return {
       outcome: 'unknown',
-      evidence: `index exists but is not UNIQUE: ${def}`,
+      evidence:
+        'transfer_intents has no correlation_id column, so an index of this name indexes something else',
     };
   }
 
-  return { outcome: 'present', evidence: def };
+  // Every clause of the migration's definition, not just the word UNIQUE:
+  // unique, exactly one key column and no INCLUDEd columns, that column being
+  // correlation_id, and the partial predicate it is created with. The
+  // predicate string is compared against what PostgreSQL itself renders —
+  // measured as `(correlation_id IS NOT NULL)` on 16.
+  const matches =
+    row.is_unique &&
+    Number(row.key_atts) === 1 &&
+    Number(row.total_atts) === 1 &&
+    Number(row.first_key) === Number(row.correlation_attnum) &&
+    row.predicate === '(correlation_id IS NOT NULL)';
+
+  if (!matches) {
+    return {
+      outcome: 'unknown',
+      evidence: `index exists but its definition is not the one this migration creates: ${row.indexdef}`,
+    };
+  }
+
+  return { outcome: 'present', evidence: row.indexdef };
 }
 
 export const MIGRATIONS: ReadonlyArray<MigrationDescriptor> = [

@@ -372,7 +372,7 @@ describe('migration versioning', () => {
           )!.detect(scratch);
 
           expect(detection.outcome).toBe('unknown');
-          expect(detection.evidence).toMatch(/not UNIQUE/);
+          expect(detection.evidence).toMatch(/not the one this migration creates/);
         });
       });
 
@@ -392,6 +392,68 @@ describe('migration versioning', () => {
 
           expect(detection.outcome).toBe('present');
           expect(detection.evidence).toMatch(/UNIQUE/);
+        });
+      });
+
+      /**
+       * A false `present` is worse than `baseline_unknown`: it records the
+       * migration as satisfied while the uniqueness guarantee it exists to
+       * create is absent, and that guarantee is what stops one verified Stripe
+       * metadata value resolving to more than one local transfer.
+       *
+       * The earlier check tested `/UNIQUE/i` against `pg_indexes.indexdef`,
+       * which both of these would have passed.
+       */
+      it('rejects a UNIQUE index of the right name on the WRONG column', async () => {
+        await withScratchDatabase(async (scratch) => {
+          await scratch`
+            CREATE UNIQUE INDEX idx_transfer_intents_correlation_id
+              ON public.transfer_intents(provider_reference_id)
+              WHERE provider_reference_id IS NOT NULL
+          `;
+
+          const detection = await findMigration(
+            '20261004_early_webhook_metadata_correlation',
+          )!.detect(scratch);
+
+          expect(detection.outcome).toBe('unknown');
+          expect(detection.evidence).toMatch(/not the one this migration creates/);
+        });
+      });
+
+      it('rejects a UNIQUE index on the right column but WITHOUT the partial predicate', async () => {
+        await withScratchDatabase(async (scratch) => {
+          await scratch`
+            CREATE UNIQUE INDEX idx_transfer_intents_correlation_id
+              ON public.transfer_intents(correlation_id)
+          `;
+
+          const detection = await findMigration(
+            '20261004_early_webhook_metadata_correlation',
+          )!.detect(scratch);
+
+          // Conservative on purpose. A full unique index may well deliver the
+          // same guarantee for non-null values, but it is not what the
+          // migration creates, so a human should decide rather than tracking
+          // silently recording it as done.
+          expect(detection.outcome).toBe('unknown');
+          expect(detection.evidence).toMatch(/not the one this migration creates/);
+        });
+      });
+
+      it('rejects a multi-column UNIQUE index of the right name', async () => {
+        await withScratchDatabase(async (scratch) => {
+          await scratch`
+            CREATE UNIQUE INDEX idx_transfer_intents_correlation_id
+              ON public.transfer_intents(correlation_id, provider_reference_id)
+              WHERE correlation_id IS NOT NULL
+          `;
+
+          const detection = await findMigration(
+            '20261004_early_webhook_metadata_correlation',
+          )!.detect(scratch);
+
+          expect(detection.outcome).toBe('unknown');
         });
       });
     });
