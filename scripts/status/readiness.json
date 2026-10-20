@@ -17,7 +17,7 @@
     "percentage would be invented."
   ],
   "updated": "2026-10-20",
-  "verifiedAgainstCommit": "1d4d783 (master, PR #64 merged)",
+  "verifiedAgainstCommit": "PR #65 on ops/redis-configuration-confirmed, which descends from 7a149d9 (the Phase 2 branch tip). NOTE: master's Phase 2 merge commit 1d4d783 is NOT an ancestor of this branch — the branch was cut from the pre-merge tip, so the trees are identical but the lineage differs. An earlier value here cited 1d4d783, which this branch does not contain.",
   "gates": {
     "A": {
       "title": "Bank linking",
@@ -179,7 +179,7 @@
     {
       "name": "Redis-backed rate limiting in production",
       "status": "PARTIAL",
-      "evidence": "CONFIGURATION CONFIRMED, OPERATION NOT VERIFIED. The owner reports REDIS_URL is set for production (2026-10-20, name only; no value requested or held by this session). That is not the same claim as \"limits are shared\": lib/rate-limit.ts falls back to in-process counters on any Redis client or command failure, sets redisUnavailable=true, and deliberately does not log the error because it can embed the credential-bearing URL. The degradation itself IS caller-visible — allowed and remaining change, and a caller spreading requests across instances can exceed the nominal limit; what is missing is an explicit backend-failure signal. The flag LATCHES — the only resets are test-only — so a degraded instance stays degraded until it recycles, with one generic stderr line as the sole signal. Operational proof needs POST /api/admin/operations/redis-rate-limit run against production with an authenticated admin session holding the exceptions:manage permission — SuperAdmin or OperationsAdmin; a lesser admin role gets 403, which is easy to misread as Redis being down. That route performs an isolated set/get/delete and is already implemented and audited. Until that runs, treat shared limiting as configured but unproven."
+      "evidence": "CONFIGURATION CONFIRMED, OPERATION NOT VERIFIED. The owner reports REDIS_URL is set for production (2026-10-20, name only; no value requested or held by this session). That is not the same claim as \"limits are shared\": lib/rate-limit.ts falls back to in-process counters on any Redis client or command failure, sets redisUnavailable=true, and deliberately does not log the RAW EXCEPTION because it can embed the credential-bearing URL — a generic degradation line is emitted to stderr, so a signal exists but carries no detail. The degradation itself IS caller-visible — allowed and remaining change, and a caller spreading requests across instances can exceed the nominal limit; what is missing is an explicit backend-failure signal. The flag LATCHES — the only resets are test-only — so a degraded instance stays degraded until it recycles, with one generic stderr line as the sole signal. Operational proof needs POST /api/admin/operations/redis-rate-limit run against production with an authenticated admin session holding the exceptions:manage permission — SuperAdmin or OperationsAdmin; a lesser admin role gets 403, which is easy to misread as Redis being down. That route performs an isolated set/get/delete and is already implemented and audited. Until that runs, treat shared limiting as configured but unproven."
     },
     {
       "name": "Production cron and CRON_SECRET",

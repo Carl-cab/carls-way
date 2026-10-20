@@ -732,16 +732,29 @@ set" is not "limits are shared". Measured in `lib/rate-limit.ts`:
   in-process counters.
 - `checkRateLimit()` catches any command failure and does the same
   (line ~298), as does `verifyRateLimitBackend()` (line ~246).
-- The error is deliberately **not** logged, because a Redis client error can
-  embed its credential-bearing connection URL. The only signal is one generic
-  stderr line.
+- The **raw exception** is deliberately not logged, because a Redis client
+  error can embed its credential-bearing connection URL. A generic degradation
+  line *is* emitted to stderr (`Rate limiter: Redis unavailable, falling back
+  to in-process counters.` / `Rate limiter: Redis command failed, using
+  in-process counter.`), so the signal exists but carries no detail and is
+  easy not to recognise as the diagnostic for a latched per-instance
+  fallback.
 - **The flag latches.** The only resets are `__setRedisClientForTests()` and
   `__resetRateLimitBackendForTests()`, both test-only. There is no production
   retry, so a degraded instance keeps counting in-process until it recycles.
 
-So a configured Redis that stops answering silently converts every limit from
-shared to `limit × instances`, invisibly to any caller. On serverless the
-latch is bounded by instance lifetime, which mitigates but does not remove it.
+So a configured Redis that stops answering makes each instance enforce the
+limit locally. The aggregate allowance can reach `limit × instances`, and
+callers *can* observe changed `allowed`, `remaining` and `limit` results —
+what they do not receive is an explicit backend-failure signal. On serverless
+the latch is bounded by instance lifetime, which mitigates but does not remove
+it.
+
+(This sentence said "invisibly to any caller" in the first draft. Review
+caught the same overstatement in `CLAUDE.md`, I corrected it there and in
+`readiness.json`, and missed this copy — a partial sweep of a claim that
+appears in three files, which is the recurring shape of my errors on this
+work.)
 
 **Financial or security behaviour affected.** None changed. The correction
 matters because the operator limit on `/api/migrate` and the auth-endpoint
