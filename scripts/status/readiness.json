@@ -17,7 +17,7 @@
     "percentage would be invented."
   ],
   "updated": "2026-10-20",
-  "verifiedAgainstCommit": "PR #65 on ops/redis-configuration-confirmed, which descends from 7a149d9 (the Phase 2 branch tip). NOTE: master's Phase 2 merge commit 1d4d783 is NOT an ancestor of this branch — the branch was cut from the pre-merge tip, so the trees are identical but the lineage differs. An earlier value here cited 1d4d783, which this branch does not contain.",
+  "verifiedAgainstCommit": "PR #65 on ops/redis-configuration-confirmed, which descends from 7a149d9 (the Phase 2 branch tip). NOTE: master's Phase 2 merge commit 1d4d783 is NOT an ancestor of this branch — the branch was cut from the pre-merge tip. The 7a149d9 and 1d4d783 trees are identical (cf87279) but the lineage differs; the reviewed head af1bc9d adds documentation commits and so has its own tree (bc95228). An earlier value here cited 1d4d783, which this branch does not contain.",
   "gates": {
     "A": {
       "title": "Bank linking",

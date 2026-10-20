@@ -745,7 +745,9 @@ set" is not "limits are shared". Measured in `lib/rate-limit.ts`:
 
 So a configured Redis that stops answering makes each instance enforce the
 limit locally. The aggregate allowance can reach `limit × instances`, and
-callers *can* observe changed `allowed`, `remaining` and `limit` results —
+callers *can* observe changed `allowed` and `remaining` results — `limit` is
+`rule.limit` on both paths (`lib/rate-limit.ts:113` and `:291`) and never
+changes —
 what they do not receive is an explicit backend-failure signal. On serverless
 the latch is bounded by instance lifetime, which mitigates but does not remove
 it.
