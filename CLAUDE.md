@@ -440,9 +440,20 @@ arbitrary end user.
   `docs/decisions/0005-migration-privilege-separation.md` exist to resolve.
   `clientIdentifier()` trusting `x-real-ip` first remains **unverified**, not
   cleared.
-  The operator limit is also **weaker than its number suggests**: without
-  `REDIS_URL` the counter is process-local, so on Vercel it is `6 × instances`
-  per hour and a cold start resets it. It is deliberately **not** fail-closed —
+  The operator limit's strength depends on a backend that can degrade
+  silently. `REDIS_URL` **is set in production** (owner-reported 2026-10-20,
+  name only), so the counter is nominally the shared 6/hour. But
+  `lib/rate-limit.ts` falls back to in-process counters on any Redis client or
+  command failure, which makes it `6 × instances` with no change in behaviour
+  that a caller could see — and the fallback **latches**: `redisUnavailable`
+  has no production reset path (both resets are test-only), so a degraded
+  instance stays degraded until it recycles. The error is deliberately not
+  logged, because a Redis client error can embed the credential-bearing URL,
+  so the only signal is one generic stderr line. Read "6/hour" as "6/hour
+  while Redis is answering", and prove the backend with
+  `POST /api/admin/operations/redis-rate-limit` rather than inferring it from
+  the variable being set. Without `REDIS_URL` at all it is `6 × instances` by
+  construction. It is deliberately **not** fail-closed —
   refusing the migration whenever Redis is absent would make an optional
   variable a hard dependency of the only schema-migration path and of the
   command-line break-glass, which is the Release 1.0 lockout shape. The threat
@@ -576,7 +587,7 @@ which a balance-rewriting migration gets applied twice.
 | `NEXT_PUBLIC_APP_URL` | Full origin URL without trailing slash, e.g. `https://carloscab74.vercel.app` |
 | `MANNA_ENV` | `sandbox`, spelled exactly, declares a sandbox deployment. `VERCEL_ENV=production` overrides it, so no value here can weaken a production deploy |
 | `CRON_SECRET` | Required by the reconciliation cron route; unset means the route refuses |
-| `REDIS_URL` | Optional. Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint |
+| `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting, the flag latches until the instance recycles, and the error is unlogged by design. Prove it with `POST /api/admin/operations/redis-rate-limit` |
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |
 | `CA_EFT_LIVE` | `true` enables live CA EFT. Any other value, including unset, is sandbox |
 

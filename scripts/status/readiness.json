@@ -16,8 +16,8 @@
     "NOT APPLICABLE. No percentages — there is no defined denominator, so a",
     "percentage would be invented."
   ],
-  "updated": "2026-10-19",
-  "verifiedAgainstCommit": "6d8861c (master) + this branch",
+  "updated": "2026-10-20",
+  "verifiedAgainstCommit": "1d4d783 (master, PR #64 merged)",
   "gates": {
     "A": {
       "title": "Bank linking",
@@ -178,8 +178,8 @@
     },
     {
       "name": "Redis-backed rate limiting in production",
-      "status": "BLOCKED",
-      "evidence": "Code path verified by lib/__tests__/rate-limit-redis-verification.test.ts; an audited admin route already exists at POST /api/admin/operations/redis-rate-limit. Whether REDIS_URL is set in production is UNVERIFIABLE from the engineering environment (egress proxy refuses Vercel), so the production fact stays BLOCKED pending an owner run of that route. Without it the schema:migrate-operator limit is 6 x instances."
+      "status": "PARTIAL",
+      "evidence": "CONFIGURATION CONFIRMED, OPERATION NOT VERIFIED. The owner reports REDIS_URL is set for production (2026-10-20, name only; no value requested or held by this session). That is not the same claim as \"limits are shared\": lib/rate-limit.ts falls back to in-process counters on any Redis client or command failure, sets redisUnavailable=true, and deliberately does not log the error because it can embed the credential-bearing URL. The flag LATCHES — the only resets are test-only — so a degraded instance stays degraded until it recycles, with one generic stderr line as the sole signal. Operational proof needs POST /api/admin/operations/redis-rate-limit run against production with an admin session; that route performs an isolated set/get/delete and is already implemented and audited. Until that runs, treat shared limiting as configured but unproven."
     },
     {
       "name": "Production cron and CRON_SECRET",

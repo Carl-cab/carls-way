@@ -711,3 +711,68 @@ shared rate-limit backend question, and set branch protection — `master` is
 still `protected: false`, so none of the six green checks is enforced.
 Engineering: Phase 3's `workflow_dispatch` runner, which is where adoption and
 execution both get a real entry point.
+
+---
+
+## 2026-10-20 — REDIS_URL confirmed set in production (configuration, not operation)
+
+**Purpose and scope.** Record an owner-reported configuration fact and correct
+two documentation claims that were narrower than the code's behaviour. No code
+change.
+
+**What is now known.** The owner reports `REDIS_URL` is set for production
+(2026-10-20). Name only — no value was requested, supplied, or held by the
+engineering session, and the session still cannot reach Vercel (`403 CONNECT`).
+
+**What is still NOT known, and why the distinction matters.** "The variable is
+set" is not "limits are shared". Measured in `lib/rate-limit.ts`:
+
+- `getRedis()` catches client construction failure, sets
+  `redisUnavailable = true`, and returns null — the limiter then uses
+  in-process counters.
+- `checkRateLimit()` catches any command failure and does the same
+  (line ~298), as does `verifyRateLimitBackend()` (line ~246).
+- The error is deliberately **not** logged, because a Redis client error can
+  embed its credential-bearing connection URL. The only signal is one generic
+  stderr line.
+- **The flag latches.** The only resets are `__setRedisClientForTests()` and
+  `__resetRateLimitBackendForTests()`, both test-only. There is no production
+  retry, so a degraded instance keeps counting in-process until it recycles.
+
+So a configured Redis that stops answering silently converts every limit from
+shared to `limit × instances`, invisibly to any caller. On serverless the
+latch is bounded by instance lifetime, which mitigates but does not remove it.
+
+**Financial or security behaviour affected.** None changed. The correction
+matters because the operator limit on `/api/migrate` and the auth-endpoint
+limits were documented as stronger than the code guarantees.
+
+**Readiness impact.** `Redis-backed rate limiting in production` moves from
+BLOCKED to **PARTIAL**, not VERIFIED: configuration confirmed, operation
+unproven. Proof requires `POST /api/admin/operations/redis-rate-limit` run
+against production with an admin session — already implemented and audited,
+performing an isolated set/get/delete. That remains an owner action.
+
+**Tests run and results.** Documentation and readiness data only; full suite
+re-run to confirm nothing regressed — see the commit for counts.
+
+**Commit / PR.** PR to be opened from `ops/redis-configuration-confirmed`;
+preceding work merged as `6d8861c` (PR #63, Phase 1) and `1d4d783`
+(PR #64, Phase 2).
+
+**Migration impact.** None.
+
+**Unresolved findings.** The latching fallback has no production retry or
+alarm. Worth considering a bounded retry, or surfacing
+`activeBackend` from `verifyRateLimitBackend()` through a monitored path, so a
+silent degradation is detectable without an operator running the route by
+hand. Not built here — it is a behaviour change to a security control and
+belongs in its own reviewed change.
+
+**Rollback requirement.** Revert the commit; it is documentation and readiness
+data only.
+
+**Next recommended action.** Owner: run the verification route and report the
+outcome (pass/fail only, no values), which moves the row to VERIFIED with
+named evidence. Then branch protection, which is still absent — `master` is
+`protected: false` and two PRs have merged on unenforced checks.
