@@ -71,6 +71,9 @@ Client (React 19)
 | `lib/repositories/BaseRepository.ts` | Repository base. `exists()`/`count()` take a `sql` **fragment**, never a condition string — see the note under Coding Standards |
 | `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise |
 | `scripts/verify-migrate.sql` | Read-only check that `/api/migrate` applied everything code reads. Safe against production |
+| `lib/migrations/types.ts` | Migration versioning types. Carries the distinction the whole mechanism rests on: **detecting an end state is not knowing it ran**, which is why `baseline_detected` and `applied` are different statuses |
+| `lib/migrations/registry.ts` | The three authorization-gated `migrations/*.sql` files, each with a read-only catalogue probe for its end state. Reuses `MONEY_COLUMNS` from `lib/db.ts` rather than restating it. The ~103 statements in the migrate route are deliberately **not** entries — they are a convergent reconciler, not versioned migrations |
+| `lib/migrations/tracking.ts` | `schema_migrations` reads and writes: advisory-lock concurrency (`pg_try_advisory_lock`, refuses rather than queues), `partial`-before-work so a crash leaves evidence, drift detection by checksum, `adoptBaseline()`, and `describeState()` which answers "is this database current?". **Contains no `apply()` — executing migrations is Phase 3** |
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
@@ -225,14 +228,25 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. 51 files /
-735 tests as of this writing, and the suite is expected to stay fully green.
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **57 files /
+821 tests** as of this writing, and the suite is expected to stay fully green.
+That count was stale at "51 files / 735 tests" for several changes; it is a
+number worth keeping current precisely because it is the thing a reader checks
+a run against.
 Several files run against a real PostgreSQL instance rather than a mock,
 because the defects they cover were mismatches between SQL in the app and the
 actual schema — exactly what a hand-written fake cannot catch. Set
 `DATABASE_URL` to a scratch database before running them, and prefer a
 genuinely fresh one: reusing a database that an earlier run already migrated
-has twice hidden a failure that CI then found on a clean one. Also available:
+has twice hidden a failure that CI then found on a clean one. A test that
+**mutates schema** must use a disposable database, not the shared one, and
+restoring the object afterwards is not good enough: vitest runs files in
+parallel, so the window where the object is missing is a race, not an ordering
+problem. Measured — dropping `idx_transfer_intents_correlation_id` from the
+shared database to exercise a detection probe broke
+`stripe-settlement.test.ts`, which depends on that uniqueness guarantee.
+`migrate-route-security.test.ts` and `migration-versioning.test.ts` both carry
+the pattern: a uniquely named database, created and dropped per invocation. Also available:
 `pnpm run typecheck` and `pnpm run lint` (0 errors; ~28 unused-variable
 warnings are tolerated).
 
@@ -516,7 +530,26 @@ The authoritative list is whatever `initializeSchema()` builds; `scripts/verify-
 
 **Critical column rule:** The `users` table has a legacy `balance` column from before the dual-currency migration. **Never use it in new code.** Always use `balance_cad` and `balance_usd`. The legacy column exists only because dropping it requires a coordinated migration.
 
-**Migration system:** Ad-hoc. New columns are added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `app/api/migrate/route.ts`. There is no versioned migration history.
+**Migration system:** Two distinct mechanisms, and conflating them is a mistake.
+
+1. **A convergent reconciler** — the ~103 `ADD COLUMN IF NOT EXISTS` /
+   `CREATE TABLE IF NOT EXISTS` statements in `app/api/migrate/route.ts`.
+   Re-running is the designed behaviour, so per-statement versions are
+   meaningless. It now records *that it ran* in `schema_migrations` under the
+   fixed id `convergent_api_migrate`.
+2. **Three authorization-gated financial migrations** in `migrations/`, run by
+   hand under `sql/README.md`'s procedure. These are versioned in
+   `schema_migrations` (decision 0005 Phase 2).
+
+`schema_migrations` answers "is this database current?" — `describeState()` —
+and fails closed via `assertSafeToProceed()` on anything blocking, drifted, or
+unadopted. **An empty tracking table means "not adopted into tracking", not
+"no migrations applied."** Adopt an existing database with
+`docs/runbooks/migration-baseline-adoption.md`, which probes each migration's
+end state and records `baseline_detected` / `baseline_pending` /
+`baseline_unknown` — **never `applied`**, because no execution was observed.
+`baseline_unknown` blocks on purpose: an unanswered question is the state in
+which a balance-rewriting migration gets applied twice.
 
 ---
 

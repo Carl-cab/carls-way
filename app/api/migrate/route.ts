@@ -6,6 +6,7 @@ import {
   repairAuthCriticalColumns,
   upgradeLegacyMoneyColumns,
 } from '@/lib/db';
+import { recordConvergenceRun } from '@/lib/migrations/tracking';
 import { getAuthUser, auditLog } from '@/lib/auth';
 import { checkRateLimit, clientIdentifier, rateLimitHeaders } from '@/lib/rate-limit';
 import { checkOrigin } from '@/lib/request-origin';
@@ -131,6 +132,18 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // Tracked outside the try so the catch can tell whether the reconciler ever
+  // began. The outer catch sees EVERY error in this handler, including ones
+  // raised before any DDL runs — the auth lookup, the admin session lookup,
+  // the recovery-mode check, the rate limiter (which can fail on a Redis
+  // problem) — and the anonymous auth-repair path, which returns without
+  // running the pipeline at all. Recording 'failed' for those would be false,
+  // and worse than false: 'failed' is in BLOCKING_STATUSES, so a transient
+  // Redis error would make assertSafeToProceed() refuse every financial
+  // migration until someone reran this route successfully.
+  let convergenceStarted = false;
+  let convergenceActor: string | undefined;
+
   try {
     // CSRF: refuse a browser-originated request from anywhere but this
     // deployment. Checked before anything else, including authentication, so
@@ -228,6 +241,14 @@ export async function POST(req: NextRequest) {
     }
 
     // Run full schema initialization (creates missing tables)
+    // Both of these are resolved by now: the operator/admin lookup happens
+    // before any branch, and the anonymous path sets `bootstrap` above. Capture
+    // the identity HERE rather than after the pipeline, so a failure *during*
+    // the pipeline still records who ran it — an earlier version assigned it
+    // only on the success path, which meant exactly the runs worth attributing
+    // fell back to a generic label.
+    convergenceActor = operator && admin ? `admin:${admin.id}` : 'anonymous-bootstrap';
+    convergenceStarted = true;
     await initializeSchema();
 
     const sql = getSql();
@@ -559,6 +580,22 @@ export async function POST(req: NextRequest) {
     // upserts against it so a provider that keeps redelivering refreshes one
     // entry rather than appending a row per delivery.
     await sql`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        checksum TEXT,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ,
+        duration_ms BIGINT,
+        applied_by TEXT,
+        error_reference TEXT,
+        detection_evidence TEXT,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
       CREATE TABLE IF NOT EXISTS webhook_dead_letters (
         id SERIAL PRIMARY KEY,
         provider TEXT NOT NULL,
@@ -725,6 +762,22 @@ export async function POST(req: NextRequest) {
       await auditLog(null, 'schema_migration_bootstrap', { client: clientIdentifier(req) });
     }
 
+    // Record that the convergent reconciler ran against this database.
+    // Decision 0005 Phase 2: previously nothing could answer "when did this
+    // database last have the schema reconciled, and did it succeed?". Not a
+    // versioned migration — the ~103 statements are idempotent by
+    // construction, so a per-statement version would be meaningless; see
+    // lib/migrations/registry.ts. Failure to record must not fail a migration
+    // that already succeeded, so this is advisory and logged if it throws.
+    try {
+      await recordConvergenceRun('applied', convergenceActor ?? 'migrate-route');
+    } catch (recordErr) {
+      console.warn(
+        'migrate: schema reconciled but recording the run failed:',
+        recordErr instanceof Error ? recordErr.message : String(recordErr),
+      );
+    }
+
     const warnings = [velocityIndexNote, fxIndexNote].filter(
       (w): w is string => typeof w === 'string',
     );
@@ -747,6 +800,17 @@ export async function POST(req: NextRequest) {
     // keeps this a redaction rather than a loss of diagnostics.
     const ref = diagnosticReference();
     console.error(`Migration error [ref=${ref}]:`, err);
+    // Record the failure against the same reference, so the tracking table
+    // shows a run that did not complete rather than staying silent — the
+    // schema may be between versions, which is the open gap this phase
+    // cannot close on its own.
+    if (convergenceStarted) {
+      try {
+        await recordConvergenceRun('failed', convergenceActor ?? 'migrate-route', ref);
+      } catch {
+        // Already failing; a second failure here must not replace the response.
+      }
+    }
     return NextResponse.json(
       {
         error: 'Schema migration failed. The error has been logged.',

@@ -1,13 +1,23 @@
 # Manna — Current Status
 
-Last updated: 2026-10-18 — verified against commit `4e63bb9` (PRs #57, #59,
-#60, #61 merged).
+Last updated: 2026-10-19 — verified against commit `6d8861c` on `master`
+(PR #63 merged: decision 0005 Phase 1 hardening of `/api/migrate`), plus the
+Phase 2 migration-versioning branch described below.
 Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`.
 
-Verified on `4e63bb9` itself, not on a near-identical tree: 55 files / 778
-tests pass on a database created fresh for the run, typecheck clean, lint 0
-errors / 28 warnings, `pnpm audit --prod` reports no known vulnerabilities.
+Verified on the Phase 2 tree, on a database created fresh for the run:
+**57 files / 821 tests** pass, typecheck clean, lint 0 errors / 28 warnings,
+build clean. Earlier baselines on this file: 55 files / 778 tests at
+`4e63bb9`, 56 / 788 at `42dbba6`.
+
+**What is NOT verified, stated here because the rest of this file reads as
+confirmation:** nothing about the deployment. `api.vercel.com` and the
+production host both return `403 CONNECT` from this environment's egress
+proxy, so the production SHA, whether `REDIS_URL` or `CRON_SECRET` is set,
+whether the cron fires, and deployment health are all unverified rather than
+passing. `master` is also still `protected: false`, so none of the six
+passing CI checks is enforced.
 
 The header previously read "2026-06-28 (Phase B3.2b Settlement Balance
 Executor complete)" while the body had been revised as recently as

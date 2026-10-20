@@ -603,3 +603,111 @@ that was already pushed to a remote.
 - **Next recommended action.** Decision 0005 Phase 2 — migration versioning
   (`schema_migrations`), which the three hand-run files in `migrations/` already
   need and which Phase 3's runner depends on. It needs no production access.
+
+---
+
+## 2026-10-19 — Decision 0005 Phase 2: schema migration versioning
+
+**Purpose and scope.** Give this codebase an answer to "is this database
+current?", which it previously did not have. Adds `schema_migrations`, a
+registry of the three authorization-gated files in `migrations/`, read-only
+end-state detection per migration, drift detection by checksum, advisory-lock
+concurrency protection, and a baseline adoption procedure for databases that
+predate tracking. Adds no migration execution path — executing is Phase 3.
+
+**Financial or security behaviour affected.** No balance, ledger, transfer or
+auth behaviour changes. No schema statement in `app/api/migrate/route.ts` was
+added, changed or removed other than creating the new tracking table. No live
+flag touched. The migrate route now records that it ran, under the fixed id
+`convergent_api_migrate`; that write is advisory and wrapped, so a recording
+failure cannot fail a migration that already succeeded.
+
+**The design decision that shapes everything else.** Detecting a migration's
+end state is **not** knowing it ran. `upgradeLegacyMoneyColumns()` issues the
+same `ALTER COLUMN … TYPE NUMERIC(14,2)` as
+`migrations/20260907_money_real_to_numeric.sql`, and the migrate route calls
+it — so a database with `numeric` money columns may have arrived there by the
+authorized migration, by the route's convergence, or by being created that way,
+and the catalogue cannot distinguish them. Adoption therefore records
+`baseline_detected`, never `applied`. `baseline_unknown` blocks deliberately:
+an unanswered question is the state in which a balance-rewriting migration gets
+applied twice.
+
+**Two defects found in my own work during this change, both by measurement
+rather than review.**
+
+1. *Session-scoped advisory lock over a connection pool.*
+   `withMigrationLock()` took `pg_try_advisory_lock` on the pool handle.
+   `postgres.js` is a pool, so the lock and the unlock can land on different
+   backends, leaving the first holding it until recycled — a leaked lock that
+   would block every later migration run with no visible cause. Fixed by
+   reserving a connection (`sql.reserve()`), verified against `pg_locks`: one
+   advisory row while held, zero after release, on both the success and the
+   throw path. `initializeSchema()` avoids this with `pg_advisory_xact_lock`,
+   which is pool-safe but unusable here because a runner must hold the lock
+   across files that manage their own `BEGIN`/`COMMIT`.
+
+2. *A statement moved out of the DDL transaction.* Inserting the new
+   `CREATE TABLE` into `initializeSchema()` left the following statement using
+   `db` (the pool) instead of `sql` (the transaction handle from
+   `db.begin(...)`). Typecheck passed and the targeted test file passed; it
+   surfaced as the **full suite hanging**, because
+   `migrate-route-security.test.ts` connects with `max: 1` and the open
+   transaction holds the only connection, so the pool request could never be
+   served. Diagnosed from `pg_stat_activity` showing `idle in transaction /
+   ClientRead` on that exact statement. Beyond the hang it would have created
+   `webhook_dead_letters` outside the advisory-locked transaction in
+   production, defeating the race-safety that lock exists for. Verified after
+   the fix: zero statements using the pool handle inside the transaction body, and 62 using the transaction handle.
+
+**A third defect, in the new test rather than the code.** The detection tests
+dropped `idx_transfer_intents_correlation_id` from the shared database and
+recreated it, which broke `stripe-settlement.test.ts`. Recreating in `afterAll`
+would not have fixed it — vitest runs files in parallel, so the gap is a race.
+Moved onto a uniquely named disposable database, following
+`migrate-route-security.test.ts`. Recorded in CLAUDE.md as a rule.
+
+**Tests run and results.** On a genuinely fresh PostgreSQL 16 database:
+**57 files / 821 tests passing** (up from 56 / 788), typecheck clean, lint 0
+errors / 28 warnings, build clean. `migration-versioning.test.ts` contributes
+33 cases covering identifiers, checksums, outcome recording, `partial`-before-
+work, refusal to re-begin an applied or failed migration, concurrency refusal
+and lock release, `pg_locks` assertions on both paths, baseline adoption
+against fresh and populated databases, drift, and the "is this current?"
+question. No scratch databases leak.
+
+**Commit / PR.** PR #64, branch `phase2/schema-migration-versioning`, initial
+commit `4349bf4`; review fixes follow it on the same branch. The preceding
+Phase 1 work merged to `master` as `6d8861c` (PR #63).
+
+**Migration impact.** One new table, added to all three schema sources
+(`lib/db.ts`, `app/api/migrate/route.ts`, `lib/__tests__/helpers/test-schema.sql`)
+and to `scripts/verify-migrate.sql`. Existing databases get it on the next
+`POST /api/migrate`. **An empty tracking table means "not adopted", not "no
+migrations applied"** — adoption is `docs/runbooks/migration-baseline-adoption.md`
+and has NOT been run against production.
+
+**Unresolved findings.**
+- Adoption has no first-class entry point. Measured: `pnpm tsx` fails (`tsx` is
+  not a declared dependency) and `node --input-type=module` fails with
+  `ERR_MODULE_NOT_FOUND: Cannot find package '@/lib'` because Node does not
+  resolve this repository's path alias. The working path today is the test
+  runner, which is a test file doing an operator's job; a real entry point
+  belongs with Phase 3.
+- The no-transaction gap in `/api/migrate` is unchanged. The route now records
+  a `failed` convergence row, so the state is visible, but visibility is not
+  atomicity.
+- Whether any of the three migrations was ever executed against production
+  remains **unknown** and this phase does not change that. It establishes the
+  current end state, which is the question that governs whether to apply again.
+
+**Rollback requirement.** Revert the commit. The table is additive and unread
+by any money path, so leaving it in place is also safe; the only behavioural
+addition is the advisory convergence record.
+
+**Next recommended action.** Owner: run the existing audited
+`POST /api/admin/operations/redis-rate-limit` against production to settle the
+shared rate-limit backend question, and set branch protection — `master` is
+still `protected: false`, so none of the six green checks is enforced.
+Engineering: Phase 3's `workflow_dispatch` runner, which is where adoption and
+execution both get a real entry point.

@@ -16,72 +16,237 @@
     "NOT APPLICABLE. No percentages — there is no defined denominator, so a",
     "percentage would be invented."
   ],
-  "updated": "2026-10-18",
-  "verifiedAgainstCommit": "59b798d",
-
+  "updated": "2026-10-19",
+  "verifiedAgainstCommit": "6d8861c (master) + this branch",
   "gates": {
     "A": {
       "title": "Bank linking",
       "requirements": [
-        { "name": "Plaid link token creation", "status": "VERIFIED", "evidence": "POST /api/plaid/create-link-token implemented; lib/plaid.ts; covered by suite" },
-        { "name": "Access tokens encrypted at rest", "status": "VERIFIED", "evidence": "AES-256-GCM via lib/encryption.ts; bank_accounts.plaid_access_token_enc; requireEncryptedBankToken() refuses legacy plaintext rows" },
-        { "name": "Plaid host resolution fails closed", "status": "VERIFIED", "evidence": "lib/plaid-env.ts; unset or unrecognised PLAID_ENV resolves to sandbox; client and webhook verifier share one resolver" },
-        { "name": "Credential redaction in provider logs", "status": "VERIFIED", "evidence": "lib/plaid-error.ts builds an allowlist object, so PLAID-SECRET headers on an Axios error cannot reach a log" },
-        { "name": "Account ownership / consent capture where supported", "status": "NOT RUN", "evidence": "No test or production exercise of ownership validation" },
-        { "name": "Account disconnection and lifecycle", "status": "PARTIAL", "evidence": "relink_required flag exists; no verified disconnect flow" },
-        { "name": "Production provider authorization", "status": "BLOCKED", "evidence": "Commercial — requires Plaid production approval. Not an engineering task" }
+        {
+          "name": "Plaid link token creation",
+          "status": "VERIFIED",
+          "evidence": "POST /api/plaid/create-link-token implemented; lib/plaid.ts; covered by suite"
+        },
+        {
+          "name": "Access tokens encrypted at rest",
+          "status": "VERIFIED",
+          "evidence": "AES-256-GCM via lib/encryption.ts; bank_accounts.plaid_access_token_enc; requireEncryptedBankToken() refuses legacy plaintext rows"
+        },
+        {
+          "name": "Plaid host resolution fails closed",
+          "status": "VERIFIED",
+          "evidence": "lib/plaid-env.ts; unset or unrecognised PLAID_ENV resolves to sandbox; client and webhook verifier share one resolver"
+        },
+        {
+          "name": "Credential redaction in provider logs",
+          "status": "VERIFIED",
+          "evidence": "lib/plaid-error.ts builds an allowlist object, so PLAID-SECRET headers on an Axios error cannot reach a log"
+        },
+        {
+          "name": "Account ownership / consent capture where supported",
+          "status": "NOT RUN",
+          "evidence": "No test or production exercise of ownership validation"
+        },
+        {
+          "name": "Account disconnection and lifecycle",
+          "status": "PARTIAL",
+          "evidence": "relink_required flag exists; no verified disconnect flow"
+        },
+        {
+          "name": "Production provider authorization",
+          "status": "BLOCKED",
+          "evidence": "Commercial — requires Plaid production approval. Not an engineering task"
+        }
       ]
     },
     "B": {
       "title": "Domestic real-money transfers",
       "requirements": [
-        { "name": "Provider abstraction and gated selection", "status": "VERIFIED", "evidence": "lib/providers/TransferProviderFactory.ts; every live-flag read is a strict === 'true'; CI asserts no live flag is enabled in committed code" },
-        { "name": "PlaidTransferProvider implemented", "status": "VERIFIED", "evidence": "lib/providers/PlaidTransferProvider.ts; gated behind PLAID_TRANSFER_LIVE, default off" },
-        { "name": "Idempotency key persisted before provider call", "status": "VERIFIED", "evidence": "Key derived from transfer_intents.id and written before transferCreate; claim serialised with SELECT ... FOR UPDATE" },
-        { "name": "submitting state is recoverable", "status": "VERIFIED", "evidence": "settlement-rules.ts permits submitting -> settled|failed|cancelled for webhook actors; reconcileTransfer() returns a never-submitted intent to ready" },
-        { "name": "Execute endpoint rate limited", "status": "VERIFIED", "evidence": "money:transfer-execute, 10/hour keyed on user id; mutation-checked" },
-        { "name": "Ledger and settlement integrity", "status": "PARTIAL", "evidence": "lib/ledger.ts and the settlement engine exist with tests; never exercised against a real rail" },
-        { "name": "Live rail execution", "status": "NOT RUN", "evidence": "Deliberate. No live flag has been enabled and no payment submitted" },
-        { "name": "Reconciliation and exception handling drills", "status": "NOT RUN", "evidence": "Requires production; this environment cannot reach it" },
-        { "name": "Fraud / KYC / AML / sanctions controls", "status": "BLOCKED", "evidence": "Compliance programme, not engineering" },
-        { "name": "Customer-funds safeguarding (FBO, reserves)", "status": "BLOCKED", "evidence": "Requires sponsor bank and treasury arrangement" },
-        { "name": "Regulatory authorization", "status": "BLOCKED", "evidence": "Legal. Money transmission authorization is outside engineering" }
+        {
+          "name": "Provider abstraction and gated selection",
+          "status": "VERIFIED",
+          "evidence": "lib/providers/TransferProviderFactory.ts; every live-flag read is a strict === 'true'; CI asserts no live flag is enabled in committed code"
+        },
+        {
+          "name": "PlaidTransferProvider implemented",
+          "status": "VERIFIED",
+          "evidence": "lib/providers/PlaidTransferProvider.ts; gated behind PLAID_TRANSFER_LIVE, default off"
+        },
+        {
+          "name": "Idempotency key persisted before provider call",
+          "status": "VERIFIED",
+          "evidence": "Key derived from transfer_intents.id and written before transferCreate; claim serialised with SELECT ... FOR UPDATE"
+        },
+        {
+          "name": "submitting state is recoverable",
+          "status": "VERIFIED",
+          "evidence": "settlement-rules.ts permits submitting -> settled|failed|cancelled for webhook actors; reconcileTransfer() returns a never-submitted intent to ready"
+        },
+        {
+          "name": "Execute endpoint rate limited",
+          "status": "VERIFIED",
+          "evidence": "money:transfer-execute, 10/hour keyed on user id; mutation-checked"
+        },
+        {
+          "name": "Ledger and settlement integrity",
+          "status": "PARTIAL",
+          "evidence": "lib/ledger.ts and the settlement engine exist with tests; never exercised against a real rail"
+        },
+        {
+          "name": "Live rail execution",
+          "status": "NOT RUN",
+          "evidence": "Deliberate. No live flag has been enabled and no payment submitted"
+        },
+        {
+          "name": "Reconciliation and exception handling drills",
+          "status": "NOT RUN",
+          "evidence": "Requires production; this environment cannot reach it"
+        },
+        {
+          "name": "Fraud / KYC / AML / sanctions controls",
+          "status": "BLOCKED",
+          "evidence": "Compliance programme, not engineering"
+        },
+        {
+          "name": "Customer-funds safeguarding (FBO, reserves)",
+          "status": "BLOCKED",
+          "evidence": "Requires sponsor bank and treasury arrangement"
+        },
+        {
+          "name": "Regulatory authorization",
+          "status": "BLOCKED",
+          "evidence": "Legal. Money transmission authorization is outside engineering"
+        }
       ]
     },
     "C": {
       "title": "Canada-US cross-border transfers",
       "requirements": [
-        { "name": "FX quote sourcing", "status": "VERIFIED", "evidence": "lib/fx.ts against the Wise API with caching; buildFxQuote(); POST /api/fx/quote" },
-        { "name": "Dual-currency balances", "status": "VERIFIED", "evidence": "users.balance_cad / balance_usd as NUMERIC; currency derived from users.country, never assumed" },
-        { "name": "CanadianEFTProvider implemented", "status": "VERIFIED", "evidence": "lib/providers/CanadianEFTProvider.ts via Stripe ACSS; gated behind CA_EFT_LIVE, default off" },
-        { "name": "Region-appropriate consent language", "status": "VERIFIED", "evidence": "CA users see Canadian transfer simulation language, never ACH" },
-        { "name": "FX execution controls (slippage, quote expiry)", "status": "NOT RUN", "evidence": "No verified control over quote-to-execution drift" },
-        { "name": "Cross-border settlement across both rails", "status": "NOT RUN", "evidence": "Neither live rail has been exercised" },
-        { "name": "Liquidity and provider obligations", "status": "BLOCKED", "evidence": "Commercial — funding both currencies requires treasury arrangement" },
-        { "name": "US and Canadian regulatory requirements", "status": "BLOCKED", "evidence": "Legal, both jurisdictions" },
-        { "name": "Cash-out / disbursement architecture", "status": "BLOCKED", "evidence": "Design-only by decision. Must not be built on the platform payout scaffold; stripe.payouts.create is never a payment to an end user" }
+        {
+          "name": "FX quote sourcing",
+          "status": "VERIFIED",
+          "evidence": "lib/fx.ts against the Wise API with caching; buildFxQuote(); POST /api/fx/quote"
+        },
+        {
+          "name": "Dual-currency balances",
+          "status": "VERIFIED",
+          "evidence": "users.balance_cad / balance_usd as NUMERIC; currency derived from users.country, never assumed"
+        },
+        {
+          "name": "CanadianEFTProvider implemented",
+          "status": "VERIFIED",
+          "evidence": "lib/providers/CanadianEFTProvider.ts via Stripe ACSS; gated behind CA_EFT_LIVE, default off"
+        },
+        {
+          "name": "Region-appropriate consent language",
+          "status": "VERIFIED",
+          "evidence": "CA users see Canadian transfer simulation language, never ACH"
+        },
+        {
+          "name": "FX execution controls (slippage, quote expiry)",
+          "status": "NOT RUN",
+          "evidence": "No verified control over quote-to-execution drift"
+        },
+        {
+          "name": "Cross-border settlement across both rails",
+          "status": "NOT RUN",
+          "evidence": "Neither live rail has been exercised"
+        },
+        {
+          "name": "Liquidity and provider obligations",
+          "status": "BLOCKED",
+          "evidence": "Commercial — funding both currencies requires treasury arrangement"
+        },
+        {
+          "name": "US and Canadian regulatory requirements",
+          "status": "BLOCKED",
+          "evidence": "Legal, both jurisdictions"
+        },
+        {
+          "name": "Cash-out / disbursement architecture",
+          "status": "BLOCKED",
+          "evidence": "Design-only by decision. Must not be built on the platform payout scaffold; stripe.payouts.create is never a payment to an end user"
+        }
       ]
     }
   },
-
   "operational": [
-    { "name": "Database backup and restore verification", "status": "NOT RUN", "evidence": "Decision 0005 Phase 0. A backup that has never been restored is not a backup. Procedure drafted at docs/runbooks/backup-restore-rehearsal.md; requires owner action" },
-    { "name": "Redis-backed rate limiting in production", "status": "NOT RUN", "evidence": "REDIS_URL unset falls back to in-process counters, so the effective limit is limit x instances on serverless" },
-    { "name": "Production cron and CRON_SECRET", "status": "NOT RUN", "evidence": "vercel.json declares the cron; CRON_SECRET presence and a real firing are unverified from this environment" },
-    { "name": "Dead-letter replay exercise", "status": "NOT RUN", "evidence": "Replay code and tests exist; no production drill" },
-    { "name": "Unknown-outcome reconciliation drill", "status": "NOT RUN", "evidence": "Requires production data" },
-    { "name": "Audit immutability controls", "status": "BLOCKED", "evidence": "No trigger, rule, RLS, REVOKE or hash chaining exists. Blocked behind decision 0005 Phases 0-5; the two triggers alone could land sooner" },
-    { "name": "Monitoring and incident response", "status": "NOT RUN", "evidence": "No named alert ownership or escalation evidence" },
-    { "name": "Secret scanning in CI", "status": "PARTIAL", "evidence": "Gitleaks merged and running, but advisory: no branch protection makes it blocking, and the branch filter excludes PRs not targeting master or integration/**" },
-    { "name": "Static analysis (CodeQL) in CI", "status": "PARTIAL", "evidence": "Merged and running, same two caveats as secret scanning" },
-    { "name": "Branch protection enforcing required checks", "status": "NOT RUN", "evidence": "GitHub reports master as protected: false, so no check is required. Owner action" }
+    {
+      "name": "Database backup and restore verification",
+      "status": "NOT RUN",
+      "evidence": "Decision 0005 Phase 0. A backup that has never been restored is not a backup. Procedure drafted at docs/runbooks/backup-restore-rehearsal.md; requires owner action"
+    },
+    {
+      "name": "Redis-backed rate limiting in production",
+      "status": "BLOCKED",
+      "evidence": "Code path verified by lib/__tests__/rate-limit-redis-verification.test.ts; an audited admin route already exists at POST /api/admin/operations/redis-rate-limit. Whether REDIS_URL is set in production is UNVERIFIABLE from the engineering environment (egress proxy refuses Vercel), so the production fact stays BLOCKED pending an owner run of that route. Without it the schema:migrate-operator limit is 6 x instances."
+    },
+    {
+      "name": "Production cron and CRON_SECRET",
+      "status": "NOT RUN",
+      "evidence": "vercel.json declares the cron; CRON_SECRET presence and a real firing are unverified from this environment"
+    },
+    {
+      "name": "Dead-letter replay exercise",
+      "status": "NOT RUN",
+      "evidence": "Replay code and tests exist; no production drill"
+    },
+    {
+      "name": "Unknown-outcome reconciliation drill",
+      "status": "NOT RUN",
+      "evidence": "Requires production data"
+    },
+    {
+      "name": "Audit immutability controls",
+      "status": "BLOCKED",
+      "evidence": "No trigger, rule, RLS, REVOKE or hash chaining exists. Blocked behind decision 0005 Phases 0-5; the two triggers alone could land sooner"
+    },
+    {
+      "name": "Monitoring and incident response",
+      "status": "NOT RUN",
+      "evidence": "No named alert ownership or escalation evidence"
+    },
+    {
+      "name": "Secret scanning in CI",
+      "status": "PARTIAL",
+      "evidence": "Gitleaks merged and running, but advisory: no branch protection makes it blocking, and the branch filter excludes PRs not targeting master or integration/**"
+    },
+    {
+      "name": "Static analysis (CodeQL) in CI",
+      "status": "PARTIAL",
+      "evidence": "Merged and running, same two caveats as secret scanning"
+    },
+    {
+      "name": "Branch protection enforcing required checks",
+      "status": "BLOCKED",
+      "evidence": "Re-verified 2026-10-19 after merging #63: GitHub reports master as protected:false, so NONE of the six passing checks is required. The protection-detail endpoint 403s for scope, but the branch record is authoritative on whether any protection exists. Passing != enforced."
+    },
+    {
+      "name": "Schema migration versioning (decision 0005 Phase 2)",
+      "status": "PARTIAL",
+      "evidence": "schema_migrations plus registry, detection, drift and advisory-lock concurrency implemented and covered by 33 cases in lib/__tests__/migration-versioning.test.ts against fresh and populated PostgreSQL 16 databases. PARTIAL because baseline adoption has NOT been run against production and has no first-class entry point (measured: pnpm tsx and plain node both fail); and because whether the three migrations/ files were ever executed against production remains unknown by design."
+    }
   ],
-
   "ownerActions": [
-    { "action": "Mark four checks required under branch protection", "why": "Until then secret scanning and CodeQL fail the check but do not block a merge" },
-    { "action": "Decide on SHA-pinning third-party GitHub Actions", "why": "Proposal in docs/decisions/0006-pin-third-party-actions.md; cannot be verified from this environment" },
-    { "action": "Authorize a backup-restore rehearsal", "why": "Decision 0005 Phase 0 blocks the credential split and therefore audit immutability" },
-    { "action": "Decide whether CI should run on all base branches", "why": "A PR targeting a feature branch currently runs no CI at all" },
-    { "action": "Grant Vercel read access or run the CLI steps", "why": "Deployment facts cannot be verified from this environment; see docs/runbooks/vercel-access.md" }
+    {
+      "action": "Mark four checks required under branch protection",
+      "why": "Until then secret scanning and CodeQL fail the check but do not block a merge"
+    },
+    {
+      "action": "Decide on SHA-pinning third-party GitHub Actions",
+      "why": "Proposal in docs/decisions/0006-pin-third-party-actions.md; cannot be verified from this environment"
+    },
+    {
+      "action": "Authorize a backup-restore rehearsal",
+      "why": "Decision 0005 Phase 0 blocks the credential split and therefore audit immutability"
+    },
+    {
+      "action": "Decide whether CI should run on all base branches",
+      "why": "A PR targeting a feature branch currently runs no CI at all"
+    },
+    {
+      "action": "Grant Vercel read access or run the CLI steps",
+      "why": "Deployment facts cannot be verified from this environment; see docs/runbooks/vercel-access.md"
+    }
   ]
 }

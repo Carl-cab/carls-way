@@ -378,6 +378,20 @@ CREATE TABLE IF NOT EXISTS provider_webhook_events (
 -- Dead-letter queue for events that exhausted their retries; preserves the
 -- payload so it can be requeued. Declared in lib/db.ts only — it is absent
 -- from app/api/migrate/route.ts, so the live database has never been given it.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  checksum TEXT,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  duration_ms BIGINT,
+  applied_by TEXT,
+  error_reference TEXT,
+  detection_evidence TEXT,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS webhook_dead_letters (
   id SERIAL PRIMARY KEY,
   provider TEXT NOT NULL,

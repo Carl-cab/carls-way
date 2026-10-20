@@ -15,7 +15,11 @@ FROM (VALUES
   ('password_reset_tokens'),
   -- TRANSFER_EVENTS_UPDATE cursor. Missing means the real Plaid Transfer
   -- webhook cannot persist its sync position and answers 500.
-  ('plaid_transfer_event_cursors')
+  ('plaid_transfer_event_cursors'),
+  -- Migration versioning (decision 0005 Phase 2). Missing means nothing can
+  -- say whether this database is current, and an empty table means "not
+  -- adopted into tracking", NOT "no migrations applied".
+  ('schema_migrations')
 ) AS t(name)
 LEFT JOIN information_schema.tables c
   ON c.table_schema = 'public' AND c.table_name = t.name
