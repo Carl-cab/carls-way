@@ -754,15 +754,32 @@ against production with an admin session — already implemented and audited,
 performing an isolated set/get/delete. That remains an owner action.
 
 **Tests run and results.** Documentation and readiness data only; full suite
-re-run to confirm nothing regressed — see the commit for counts.
+re-run on a fresh PostgreSQL 16 database to confirm nothing regressed:
+**57 files / 832 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
 
-**Commit / PR.** PR to be opened from `ops/redis-configuration-confirmed`;
-preceding work merged as `6d8861c` (PR #63, Phase 1) and `1d4d783`
-(PR #64, Phase 2).
+**Commit / PR.** **PR #65**, branch `ops/redis-configuration-confirmed`,
+initial commit `baf3dc9`; review fixes follow it on the same branch. Preceding
+work merged as `6d8861c` (PR #63, Phase 1) and `1d4d783` (PR #64, Phase 2),
+the latter confirmed 4/4 green on `master` post-merge.
+
+(These fields were written as pending in the first draft of this entry, before
+the PR existed and before the suite had been re-run. Filling them in is
+completing an entry that has never been merged, not editing history — the
+append-only rule governs the committed record, and this follows the Phase 1
+entry's precedent of recording the SHA and PR after the push.)
 
 **Migration impact.** None.
 
-**Unresolved findings.** The latching fallback has no production retry or
+**Unresolved findings.** Two corrections review caught in the first draft of
+this entry, both overstating how invisible the fallback is: it said callers
+could see no behaviour change, when `limit × instances` changes `allowed` and
+`remaining` and lets a caller spread requests across instances to exceed the
+nominal limit — only the *failure signal* is absent; and it cited "an admin
+session" for the verification route when that route requires the
+`exceptions:manage` permission, i.e. SuperAdmin or OperationsAdmin, so a lesser
+admin role gets a 403 that reads like a Redis outage.
+
+The latching fallback has no production retry or
 alarm. Worth considering a bounded retry, or surfacing
 `activeBackend` from `verifyRateLimitBackend()` through a monitored path, so a
 silent degradation is detectable without an operator running the route by
