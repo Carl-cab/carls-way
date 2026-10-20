@@ -762,13 +762,36 @@ limits were documented as stronger than the code guarantees.
 
 **Readiness impact.** `Redis-backed rate limiting in production` moves from
 BLOCKED to **PARTIAL**, not VERIFIED: configuration confirmed, operation
-unproven. Proof requires `POST /api/admin/operations/redis-rate-limit` run
-against production with an admin session — already implemented and audited,
-performing an isolated set/get/delete. That remains an owner action.
+unproven. `POST /api/admin/operations/redis-rate-limit` run against production
+with a session holding `exceptions:manage` (SuperAdmin or OperationsAdmin) is
+the available evidence — already implemented and audited, performing an
+isolated set/get/delete — but **it proves only the instance that served it.**
+`redisUnavailable`, `redisClient` and `memoryCounters` are module-level
+(`lib/rate-limit.ts:138`, `:137`, `:95`), so they are per serverless instance,
+and another live instance can be latched into in-process counting while this
+one answers pass. Serverless instances cannot be addressed individually, so
+repeated POSTs give sampling confidence, not coverage. VERIFIED requires
+evidence covering every live instance, or equivalent deployment-wide evidence —
+which means monitoring the degradation signal, the unresolved finding recorded
+below. The row stays PARTIAL on a passing POST. The POST remains an owner
+action.
 
 **Tests run and results.** Documentation and readiness data only; full suite
-re-run on a fresh PostgreSQL 16 database to confirm nothing regressed:
-**57 files / 832 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+re-run to confirm nothing regressed: **57 files / 832 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+(A correction to how that run was described earlier in this entry's drafting:
+"a fresh PostgreSQL 16 database" was not a sufficient instruction. A genuinely
+empty database fails four files — `audit.test.ts`, `splits.test.ts`,
+`stripe-settlement.test.ts`, `transfer-execution-safety.test.ts` — on rows
+they do not create, because `.github/workflows/ci.yml` applies
+`lib/__tests__/helpers/test-schema.sql` before running the suite and the
+instruction in `CLAUDE.md` did not mention that step. A local URL also needs
+`?sslmode=disable`, since `resolveSslMode()` defaults to `'require'`. Both
+were hit while validating this change, and both are now written into the
+testing section of `CLAUDE.md` with the failure each one produces. Same shape
+as the rest of this round: an instruction that worked in the environment where
+it was written, recorded as if it were general.)
 
 **Commit / PR.** **PR #65**, branch `ops/redis-configuration-confirmed`,
 initial commit `baf3dc9`; review fixes follow it on the same branch. Preceding
@@ -792,6 +815,18 @@ session" for the verification route when that route requires the
 `exceptions:manage` permission, i.e. SuperAdmin or OperationsAdmin, so a lesser
 admin role gets a 403 that reads like a Redis outage.
 
+A third correction, caught in the same review round: every place I wrote the
+verification instruction — `CLAUDE.md`, `scripts/status/readiness.json`, this
+entry, and the pre-flight step in
+`docs/STAFF_ONLY_REAL_RAIL_TEST_MATRIX.md` — told the reader that running the
+route once settles the question. It cannot. The backend state is module-level,
+so one POST samples one serverless instance, and Vercel gives no way to
+address the others. This supersedes the "Next recommended action" of the
+Phase 2 entry above, which said to run the route to *settle* the shared
+rate-limit backend question; running it is still worth doing, but it narrows
+the question rather than closing it. Corrected by appending, not by editing
+that entry.
+
 The latching fallback has no production retry or
 alarm. Worth considering a bounded retry, or surfacing
 `activeBackend` from `verifyRateLimitBackend()` through a monitored path, so a
@@ -803,6 +838,9 @@ belongs in its own reviewed change.
 data only.
 
 **Next recommended action.** Owner: run the verification route and report the
-outcome (pass/fail only, no values), which moves the row to VERIFIED with
-named evidence. Then branch protection, which is still absent — `master` is
+outcome (pass/fail only, no values). That does **not** move the row to
+VERIFIED — it samples one serverless instance, and the per-instance module
+state above means a pass says nothing about the others. The row reaches
+VERIFIED only on deployment-wide evidence, i.e. the monitored degradation
+signal in the unresolved finding above. Then branch protection, which is still absent — `master` is
 `protected: false` and two PRs have merged on unenforced checks.
