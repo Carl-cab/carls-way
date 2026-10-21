@@ -946,8 +946,8 @@ Mutation-checked: restoring the permanent latch (`redisDownUntil > 0` instead
 of `Date.now() < redisDownUntil`) fails three cases, including "retries once
 the cooldown has elapsed, and recovers".
 
-**Commit / PR.** Branch `ops/redis-degradation-recovery`, opened against
-`c2859f6` (the PR #65 merge). Not merged.
+**Commit / PR.** Commit `487b789` on branch `ops/redis-degradation-recovery`,
+PR **#67**, opened against `c2859f6` (the PR #65 merge). Not merged.
 
 **Migration impact.** None.
 
@@ -1044,7 +1044,8 @@ Mutation-checked individually: discarding the client on every stage fails
 removing the in-flight promise fails "constructs the Redis client once under a
 concurrent cold start" — one test each, neither failing for the other's reason.
 
-**Commit / PR.** Branch `ops/redis-degradation-recovery`, PR **#67**. Not merged.
+**Commit / PR.** Commit `6b4433a` on branch `ops/redis-degradation-recovery`,
+PR **#67**. Not merged.
 
 **Migration impact.** None.
 
@@ -1103,7 +1104,8 @@ Mutation-checked in both directions: removing the two new calls fails exactly
 the two new branch tests, and adding the call to the collision branch fails the
 asymmetry test. Neither mutation is caught by the other's test.
 
-**Commit / PR.** Branch `ops/redis-degradation-recovery`, PR **#67**. Not merged.
+**Commit / PR.** Commit `c753907` on branch `ops/redis-degradation-recovery`,
+PR **#67**. Not merged.
 
 **Migration impact.** None.
 
@@ -1118,3 +1120,55 @@ owner decision, and `clientIdentifier()` still prefers an unvalidated
 
 **Next recommended action.** Unchanged: merge #66 first, then branch
 protection, then this PR.
+
+---
+
+## 2026-10-21 — corrections: missing commit SHAs, and two now-stale merge notes
+
+**Purpose and scope.** Review of `69ee273` noted that the entry for the
+verification-path fix recorded PR #67 but no implementing commit SHA, which the
+governance rule in `CLAUDE.md` requires for every material change ("commit SHA
+and PR"). Correct, and it applied to more than the flagged entry: **three** of
+this branch's entries named only the branch and PR. Each now carries its SHA —
+`487b789` (the cooldown), `6b4433a` (the three review corrections), `c753907`
+(the verification path) — filled in on entries that have never been merged,
+which completes them rather than editing history, the same precedent as the
+Phase 1 entry.
+
+**Two notes that the merges made stale, corrected here by appending rather
+than edited in place, because both are now history:**
+
+- The `follow-redirects` entry reads "Branch `sec/follow-redirects-advisory`,
+  cut from `c2859f6`. Not merged." It **is** merged: commit `939bb91`, PR #66,
+  merged as **`6927ebd`**. Post-merge CI on `master` was 4/4 green and
+  `pnpm audit --prod` reports no known vulnerabilities.
+- The Phase 2 and Phase 1 references elsewhere stand as written.
+
+**This branch's own state**, so the record is not left implying otherwise:
+`69ee273` merges `master` after #66 landed, resolving an append-only conflict
+in this file by keeping both sides; `207eb66` adds docstrings to
+`rateLimitBackendHealth()` and `getRedis()` after a docstring-coverage check
+reported 66.67% against an 80% threshold on the functions this diff touches.
+`checkInMemory` predates the PR and was deliberately left alone rather than
+widening the diff.
+
+**Financial or security behaviour affected.** None. Documentation only.
+
+**Tests run and results.** 58 files / 850 tests passing, typecheck clean,
+lint 0 errors / 28 warnings.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/redis-degradation-recovery`, PR **#67**. Recorded in the commit message,
+since an entry cannot name the SHA of the commit that introduces it — which is
+why the three SHAs above were added one commit later rather than at the time.
+
+**Migration impact.** None.
+
+**Unresolved findings.** None new. The open items on this PR are unchanged:
+nothing consumes `rateLimitBackendHealth()`, fail-open versus fail-closed by
+risk class is an owner decision, and `clientIdentifier()` still prefers an
+unvalidated `x-real-ip`.
+
+**Rollback requirement.** Revert the commit; documentation only.
+
+**Next recommended action.** Owner: branch protection, then #67.
