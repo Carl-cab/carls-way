@@ -1172,3 +1172,72 @@ unvalidated `x-real-ip`.
 **Rollback requirement.** Revert the commit; documentation only.
 
 **Next recommended action.** Owner: branch protection, then #67.
+
+---
+
+## 2026-10-21 — health reported Redis on a timer rather than an observation
+
+**Purpose and scope.** `rateLimitBackendHealth()` computed
+`activeBackend: redisClient && !inCooldown ? 'redis' : …`. Once the 30s
+cooldown elapsed it reported `redis` — but the retained client is the one that
+just failed, and nothing had yet proved it works, so the very next
+`checkRateLimit()` could fall straight back to in-process counting while the
+health snapshot claimed shared limiting. The claim rested on a clock expiring,
+not on an observation. `degraded` is now part of the condition, and it clears
+only when a real Redis operation succeeds.
+
+**Second half, needed for the first to be usable.** `markRedisHealthy()` was
+called from exactly one place — the `checkRateLimit` success path — so a
+*passing operator verification* did not clear the flag. With `!degraded` added,
+that would have left health reporting the fallback indefinitely after the
+verification route said the backend was fine: the route and the health report
+disagreeing about one backend, which is the defect this same function already
+had once in the other direction. A completed set/get/delete round trip is proof
+the backend works, so it now clears the flag too.
+
+**The asymmetry holds, and is tested.** Neither an `NX` collision nor a failed
+cleanup reaches the clearing call, and neither should: `NX` refusing is not a
+backend failure, but it is not evidence of health either, so it must neither
+record nor clear a degradation.
+
+**Why this one is a fair catch rather than a regression.** It is the third
+finding in this PR of a single shape — *a state report disagreeing with what
+the code will actually do next* — and each has been in a different direction:
+the verification path recording nothing, health lying pessimistically about a
+retained client, and now health lying optimistically after a timer. Worth
+naming because the shape, not the instance, is what to look for here.
+
+**Financial or security behaviour affected.** Reporting only. No limit
+decision changes. Still fails open; raw exception still never logged. The
+direction is conservative: health now under-claims until recovery is observed.
+
+**Also corrected:** the docstring added one commit earlier said health
+"reports the fallback whenever a cooldown is open", which is now too narrow —
+it reports the fallback until a success is observed. Rewritten rather than left
+to go stale, since that is the error this PR has already corrected twice.
+
+**Tests run and results.** 21 cases in
+`lib/__tests__/rate-limit-degradation-recovery.test.ts` (3 new). Full suite
+**58 files / 853 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+Mutation-checked both halves: dropping `!degraded` fails three cases including
+the new post-cooldown one; removing `markRedisHealthy()` from the verification
+success path fails exactly one, and not the others.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/redis-degradation-recovery`, PR **#67**; the SHA is in the commit message,
+per the note in the preceding entry.
+
+**Migration impact.** None.
+
+**Readiness impact.** Unchanged: **PARTIAL**. If anything this strengthens the
+case for the row staying there — the health signal is now honest about not
+knowing, which is what a monitored path needs.
+
+**Unresolved findings.** Unchanged: nothing consumes
+`rateLimitBackendHealth()`, fail-open versus fail-closed by risk class is an
+owner decision, `clientIdentifier()` still prefers an unvalidated `x-real-ip`.
+
+**Rollback requirement.** Revert the commit; the prior state over-reports
+backend health in a bounded window.
+
+**Next recommended action.** Owner: branch protection, then #67.

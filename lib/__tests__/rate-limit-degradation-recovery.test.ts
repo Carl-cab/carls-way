@@ -183,6 +183,24 @@ describe('the cooldown bounds the degradation instead of latching it', () => {
     expect(rateLimitBackendHealth().inCooldown).toBe(false);
   });
 
+  it('still reports the fallback after the cooldown expires, until a success', async () => {
+    // The window the cooldown alone does not cover: the timer has run out but
+    // the retained client is the one that just failed, and nothing has proved
+    // it works. Claiming `redis` here would assert shared limiting on the
+    // strength of a clock rather than an observation.
+    vi.useFakeTimers();
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    __setRedisClientForTests(redisDouble({ incr: vi.fn().mockRejectedValue(new Error('down')) }));
+
+    await checkRateLimit('auth:login', 'post-cooldown');
+    vi.advanceTimersByTime(30_001);
+
+    const health = rateLimitBackendHealth();
+    expect(health.inCooldown).toBe(false);
+    expect(health.cooldownRemainingMs).toBe(0);
+    expect(health.activeBackend).toBe('in_memory_fallback');
+  });
+
   it('reports the remaining cooldown so it can be monitored', async () => {
     vi.useFakeTimers();
     process.env.REDIS_URL = TEST_REDIS_URL;
@@ -353,6 +371,51 @@ describe('the verification route shares the same degradation accounting', () => 
     expect(result.cleanup).toBe('not_required');
     expect(rateLimitBackendHealth().degradations).toBe(0);
     expect(rateLimitBackendHealth().inCooldown).toBe(false);
+  });
+
+  it('a completed set/get/delete clears a degradation', async () => {
+    // The route and the health report must agree. Without this, an operator's
+    // passing verification would leave health reporting the fallback.
+    vi.useFakeTimers();
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    __setRedisClientForTests(redisDouble({ incr: vi.fn().mockRejectedValue(new Error('down')) }));
+    await checkRateLimit('auth:login', 'verify-clears');
+    vi.advanceTimersByTime(30_001);
+    expect(rateLimitBackendHealth().activeBackend).toBe('in_memory_fallback');
+
+    const values = new Map<string, string>();
+    __setRedisClientForTests(
+      redisDouble({
+        set: vi.fn(async (k: string, v: string) => {
+          values.set(k, v);
+          return 'OK';
+        }),
+        get: vi.fn(async (k: string) => values.get(k) ?? null),
+        del: vi.fn(async (k: string) => (values.delete(k) ? 1 : 0)),
+      }),
+    );
+
+    const result = await verifyRateLimitBackend();
+
+    expect(result.verification).toBe('set_get_delete');
+    expect(result.activeBackend).toBe('redis');
+    expect(rateLimitBackendHealth().activeBackend).toBe('redis');
+  });
+
+  it('an NX collision does not clear an existing degradation', async () => {
+    // Same asymmetry as the counter: NX refusing is not a backend failure, but
+    // nor is it proof the backend works, so it must neither record nor clear.
+    vi.useFakeTimers();
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    __setRedisClientForTests(redisDouble({ incr: vi.fn().mockRejectedValue(new Error('down')) }));
+    await checkRateLimit('auth:login', 'nx-no-clear');
+    vi.advanceTimersByTime(30_001);
+
+    __setRedisClientForTests(redisDouble({ set: vi.fn().mockResolvedValue(null) }));
+    await verifyRateLimitBackend();
+
+    expect(rateLimitBackendHealth().activeBackend).toBe('in_memory_fallback');
+    expect(rateLimitBackendHealth().degradations).toBe(1);
   });
 
   it('leaves health untouched when Redis is simply not configured', async () => {

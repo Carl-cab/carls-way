@@ -236,15 +236,26 @@ export interface RateLimitBackendHealth {
 /**
  * Read this instance's backend health. Pure — no Redis contact, no side
  * effects, unlike `verifyRateLimitBackend()`, so a monitored path can poll it
- * freely. `activeBackend` reports the fallback whenever a cooldown is open,
- * even though the client is retained for the retry.
+ * freely.
+ *
+ * `activeBackend` is `'redis'` only on an *observation*: a client exists, no
+ * cooldown is open, and some Redis operation has succeeded since the last
+ * degradation. A retained client whose cooldown has merely elapsed still
+ * reports the fallback, because a timer expiring is not evidence the backend
+ * recovered.
  */
 export function rateLimitBackendHealth(): RateLimitBackendHealth {
   const now = Date.now();
   const inCooldown = now < redisDownUntil;
   return {
     configured: Boolean(process.env.REDIS_URL),
-    activeBackend: redisClient && !inCooldown ? 'redis' : 'in_memory_fallback',
+    // `!degraded` matters as much as `!inCooldown`. When the cooldown expires
+    // the client is still the one that just failed, and nothing has yet proved
+    // it works — the next command may fall straight back to in-process
+    // counting. Reporting `redis` in that window would claim shared limiting
+    // on the strength of a timer rather than an observation. `degraded` clears
+    // only when a real Redis operation succeeds.
+    activeBackend: redisClient && !inCooldown && !degraded ? 'redis' : 'in_memory_fallback',
     inCooldown,
     cooldownRemainingMs: inCooldown ? redisDownUntil - now : 0,
     degradations: redisDegradations,
@@ -380,6 +391,16 @@ export async function verifyRateLimitBackend(): Promise<RateLimitBackendVerifica
       return inMemoryVerification(true, 'failed', 'ttl_fallback');
     }
 
+    // A completed set/get/delete round trip is proof the backend works, so it
+    // clears the degraded flag exactly as a successful rate-limit command
+    // does. Without this, `rateLimitBackendHealth()` would keep reporting the
+    // fallback after an operator's verification passed — the route and the
+    // health report disagreeing about the same backend, which is the defect
+    // this function already had once in the other direction.
+    //
+    // Placed after the delete check on purpose: neither an `NX` collision nor
+    // a failed cleanup reaches here, and neither should clear a degradation.
+    markRedisHealthy();
     return {
       configured: true,
       reachable: true,
