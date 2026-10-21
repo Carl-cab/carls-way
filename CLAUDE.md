@@ -69,7 +69,7 @@ Client (React 19)
 | `lib/webhooks/dlq.ts` | Dead-letter queue reads and requeue |
 | `lib/internal-reconciliation.ts` | Balance/ledger reconciliation checks, run by the cron route |
 | `lib/repositories/BaseRepository.ts` | Repository base. `exists()`/`count()` take a `sql` **fragment**, never a condition string — see the note under Coding Standards |
-| `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise |
+| `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise. A Redis failure degrades that instance for a **30s cooldown**, then retries — it is not the permanent latch it once was. `rateLimitBackendHealth()` reports the active backend and a cumulative degradation count, with no credential in it |
 | `scripts/verify-migrate.sql` | Read-only check that `/api/migrate` applied everything code reads. Safe against production |
 | `lib/migrations/types.ts` | Migration versioning types. Carries the distinction the whole mechanism rests on: **detecting an end state is not knowing it ran**, which is why `baseline_detected` and `applied` are different statuses |
 | `lib/migrations/registry.ts` | The three authorization-gated `migrations/*.sql` files, each with a read-only catalogue probe for its end state. Reuses `MONEY_COLUMNS` from `lib/db.ts` rather than restating it. The ~103 statements in the migrate route are deliberately **not** entries — they are a convergent reconciler, not versioned migrations |
@@ -228,8 +228,10 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **57 files /
-821 tests** as of this writing, and the suite is expected to stay fully green.
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **58 files /
+844 tests** as of this writing, and the suite is expected to stay fully green.
+(This line read "57 files / 821 tests" while the suite was actually at 832 —
+the count drifts whenever someone updates the code and not this sentence.)
 That count was stale at "51 files / 735 tests" for several changes; it is a
 number worth keeping current precisely because it is the thing a reader checks
 a run against.
@@ -464,13 +466,16 @@ arbitrary end user.
   command failure, which makes it `6 × instances`. That difference IS
   caller-visible — `allowed` and `remaining` change, and a caller spreading
   requests across instances can exceed the nominal limit; what the fallback
-  provides is **no explicit signal that the backend failed**. And it
-  **latches**: `redisUnavailable`
-  has no production reset path (both resets are test-only), so a degraded
-  instance stays degraded until it recycles. The **raw exception** is deliberately
-  not logged, because a Redis client error can embed the credential-bearing
-  URL; a generic degradation line *is* emitted to stderr, so a signal exists
-  but carries no detail. Read "6/hour" as "6/hour
+  provides is **no explicit signal that the backend failed**. It no longer
+  **latches**: a failure now opens a 30s cooldown and then retries, so an
+  instance recovers on its own rather than staying degraded until it recycles.
+  (It did latch — `redisUnavailable` had no production reset path, and because
+  ioredis connects lazily the *command* catch was the one that fired, so a
+  single dropped connection permanently demoted an instance.) The **raw
+  exception** is still deliberately not logged, because a Redis client error
+  can embed the credential-bearing URL; the degradation line names the stage
+  and a cumulative count, and `rateLimitBackendHealth()` exposes the same
+  facts for a monitored path. Read "6/hour" as "6/hour
   while Redis is answering", and prove the backend with
   `POST /api/admin/operations/redis-rate-limit` rather than inferring it from
   the variable being set — bearing in mind that a pass covers only the
@@ -610,7 +615,7 @@ which a balance-rewriting migration gets applied twice.
 | `NEXT_PUBLIC_APP_URL` | Full origin URL without trailing slash, e.g. `https://carloscab74.vercel.app` |
 | `MANNA_ENV` | `sandbox`, spelled exactly, declares a sandbox deployment. `VERCEL_ENV=production` overrides it, so no value here can weaken a production deploy |
 | `CRON_SECRET` | Required by the reconciliation cron route; unset means the route refuses |
-| `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit — the flag latches until the instance recycles, the **raw exception** is unlogged by design while a generic degradation line is emitted to stderr, so callers get no explicit failure signal and operators get one undetailed line. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** `redisUnavailable`, `redisClient` and `memoryCounters` are module-level (`lib/rate-limit.ts:138`, `:137`, `:95`), so they are per serverless instance: another live instance can be latched into in-process counting while this one answers pass. Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
+| `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit. A failure opens a **30s cooldown** (`redisDownUntil`) and then retries, so it no longer latches until the instance recycles; the **raw exception** is unlogged by design, while a degradation line naming the stage and a cumulative count goes to stderr, so callers get no explicit failure signal and operators get one line with no connection detail. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** The backend state (`redisClient`, `redisDownUntil`) and the in-process counters are module-level, so they are per serverless instance: another live instance can be counting in-process while this one answers pass. (Line numbers are deliberately not cited here — they went stale within a day of being written.) Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |
 | `CA_EFT_LIVE` | `true` enables live CA EFT. Any other value, including unset, is sandbox |
 
