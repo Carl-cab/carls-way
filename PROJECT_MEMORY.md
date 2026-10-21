@@ -846,3 +846,88 @@ state above means a pass says nothing about the others. The row reaches
 VERIFIED only on deployment-wide evidence, i.e. the monitored degradation
 signal in the unresolved finding above. Then branch protection, which is still absent — `master` is
 `protected: false` and two PRs have merged on unenforced checks.
+
+---
+
+## 2026-10-21 — Redis degradation recovery: the latch is now a cooldown
+
+**Purpose and scope.** `lib/rate-limit.ts` held `let redisUnavailable = false`,
+set on the first Redis failure and cleared only by two test-only helpers. There
+was no production reset path, so the flag latched: an instance that saw one
+transient error counted in-process for the rest of its life, including after
+Redis recovered. Replaced with a 30s cooldown that retries, plus non-secret
+degradation accounting.
+
+**Why it was worse than it reads.** `new Redis(url)` almost never throws —
+ioredis connects lazily — so the construction `catch` was not the path that
+fired during an outage. The *command* catch in `checkRateLimit()` was. One
+dropped connection was therefore enough to convert every shared limit on that
+instance to `limit × instances` permanently, `money:send` and
+`money:transfer-execute` included. That is the "high-risk financial operations
+must not silently lose their intended shared velocity protection" case.
+
+**Financial or security behaviour affected.** Rate limiting is a security
+control, so this is a deliberate behaviour change. Fail-open is **preserved**:
+a Redis outage still yields a decision rather than a refusal, and a test
+asserts it for `schema:bootstrap` specifically, because refusing there would
+make `REDIS_URL` a hard dependency of the only schema-migration path — the
+Release 1.0 lockout shape. Fail-closed by risk class was considered and **not**
+implemented: refusing `money:send` during a Redis outage blocks customer
+payments, which is a policy decision for the owner, not a change to slip into
+a hardening commit. No balance, ledger, provider or credential path is touched.
+No live-money flag changed.
+
+Three further properties kept deliberately: the raw exception is still never
+logged (a Redis client error can embed its credential-bearing URL — asserted by
+a test that the line contains neither the password nor the host); construction
+is now serialised through one in-flight promise, because N concurrent cold
+requests each ran `new Redis(url)` and leaked all but the last; and
+`__setRedisClientForTests()` no longer clears the degraded flag, since nothing
+in production clears it as a side effect of acquiring a client and a helper
+that did would hide the transition the new tests exist to observe.
+
+**Tests run and results.** `lib/__tests__/rate-limit-degradation-recovery.test.ts`,
+12 new cases across degradation recording, cooldown bounding, recovery,
+concurrency, shared accounting with the verification route, and preserved
+fail-open. Full suite **58 files / 844 tests passing** on a fresh database with
+the CI fixture applied; typecheck clean; lint 0 errors / 28 warnings.
+Mutation-checked: restoring the permanent latch (`redisDownUntil > 0` instead
+of `Date.now() < redisDownUntil`) fails three cases, including "retries once
+the cooldown has elapsed, and recovers".
+
+**Commit / PR.** Branch `ops/redis-degradation-recovery`, opened against
+`c2859f6` (the PR #65 merge). Not merged.
+
+**Migration impact.** None.
+
+**Readiness impact.** `Redis-backed rate limiting in production` stays
+**PARTIAL**, per the owner's instruction and on the merits: the never-recovers
+failure mode is gone and a fallback is now locally observable, but the counters
+are still per serverless instance and nothing external scrapes the signal. A
+passing verification POST still samples one instance.
+
+**Unresolved findings.**
+
+- Nothing *consumes* `rateLimitBackendHealth()` yet. The signal exists; the
+  alerting does not. That is the next step and it is an operations change, not
+  a code one.
+- Fail-closed-versus-fail-open by endpoint risk class remains an open owner
+  decision, recorded above.
+- `clientIdentifier()` still prefers an unvalidated `x-real-ip`. Untouched
+  here on purpose — see the header findings; it needs its own change.
+- Separately and more urgently: `pnpm audit --prod` began failing on `master`
+  at `c2859f6` with two newly published **high** advisories in
+  `follow-redirects` 1.16.0 (GHSA-q3jh-wrc6-jgq8, GHSA-8r9p-f939-6h3c), reached
+  via `plaid > axios > follow-redirects`. Both concern credential-header
+  exposure across a cross-origin redirect, and Plaid requests carry
+  `PLAID-SECRET` and `PLAID-CLIENT-ID`. Patched in 1.16.1. Handled in its own
+  change ahead of this one.
+
+**Rollback requirement.** Revert the commit. The previous behaviour was the
+latch, so a rollback reinstates a known defect rather than a neutral state —
+prefer fixing forward.
+
+**Next recommended action.** Owner: decide fail-open versus fail-closed by risk
+class, and whether `rateLimitBackendHealth()` should be surfaced on an
+authenticated operations route for scraping. Engineering: the
+`follow-redirects` advisory first, then header-trust boundaries.

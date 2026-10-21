@@ -135,28 +135,133 @@ export type RateLimitRedisClient = {
 };
 
 let redisClient: RateLimitRedisClient | null = null;
-let redisUnavailable = false;
+
+/**
+ * ## Why this is a cooldown and not a boolean
+ *
+ * This was `let redisUnavailable = false`, set on the first failure and reset
+ * only by two test-only helpers. There was no production reset path, so the
+ * flag **latched**: one transient command error demoted that instance to
+ * in-process counting permanently, and it stayed demoted after Redis recovered
+ * — until the instance happened to recycle.
+ *
+ * That is worse than it sounds, because `new Redis(url)` almost never throws.
+ * ioredis connects lazily, so the construction `catch` below is not the path
+ * that fires in an outage; the *command* catch in `checkRateLimit` is. A single
+ * dropped connection was therefore enough to turn every shared limit on that
+ * instance into `limit × instances` for the rest of its life, including
+ * `money:send` and `money:transfer-execute`.
+ *
+ * A timestamp instead of a boolean gives the same protection against hammering
+ * a dead backend — no attempt while in cooldown — and then retries. Recovery
+ * becomes automatic rather than dependent on instance churn.
+ */
+let redisDownUntil = 0;
+const REDIS_RETRY_COOLDOWN_MS = 30_000;
+
+/** Non-secret degradation accounting, so a silent fallback becomes observable. */
+let redisDegradations = 0;
+let lastDegradationAt: number | null = null;
+let degraded = false;
+
+/**
+ * Serialises client construction.
+ *
+ * Without this, N concurrent requests arriving on a cold instance each await
+ * `import('ioredis')` and each run `new Redis(url)`, so the instance opens N
+ * connections and keeps only the last in `redisClient`; the rest leak. One
+ * in-flight promise means concurrent callers share a single construction.
+ */
+let redisConstruction: Promise<RateLimitRedisClient | null> | null = null;
+
+/**
+ * Record a degradation to in-process counting.
+ *
+ * `stage` says where it happened, which is the one piece of detail an operator
+ * needs and the one piece that cannot embed a credential. The raw error is
+ * still never logged: a Redis client error can carry its connection URL,
+ * password included.
+ */
+function markRedisDegraded(stage: 'construct' | 'command' | 'verify'): void {
+  redisClient = null;
+  redisDownUntil = Date.now() + REDIS_RETRY_COOLDOWN_MS;
+  redisDegradations += 1;
+  lastDegradationAt = Date.now();
+  degraded = true;
+  console.error(
+    `Rate limiter: Redis ${stage} failed, using in-process counters; ` +
+      `shared limits are degraded to per-instance for up to ${REDIS_RETRY_COOLDOWN_MS}ms. ` +
+      `degradation_count=${redisDegradations}`,
+  );
+}
+
+/** Note a successful Redis operation, so recovery is as visible as failure. */
+function markRedisHealthy(): void {
+  if (degraded) {
+    degraded = false;
+    console.error('Rate limiter: Redis recovered, shared limits are in effect again.');
+  }
+}
+
+/**
+ * The backend's health, with nothing secret in it.
+ *
+ * Exported so a monitored path can answer "are limits actually shared?" without
+ * an operator running the verification route by hand — and without the route's
+ * side effects. Still per-instance: that is a property of the deployment, not
+ * of this function, and no value here describes any instance but this one.
+ */
+export interface RateLimitBackendHealth {
+  configured: boolean;
+  activeBackend: 'redis' | 'in_memory_fallback';
+  /** True while a cooldown is suppressing reconnection attempts. */
+  inCooldown: boolean;
+  cooldownRemainingMs: number;
+  /** Cumulative degradations on this instance since it started. */
+  degradations: number;
+  lastDegradationAt: number | null;
+}
+
+export function rateLimitBackendHealth(): RateLimitBackendHealth {
+  const now = Date.now();
+  const inCooldown = now < redisDownUntil;
+  return {
+    configured: Boolean(process.env.REDIS_URL),
+    activeBackend: redisClient && !inCooldown ? 'redis' : 'in_memory_fallback',
+    inCooldown,
+    cooldownRemainingMs: inCooldown ? redisDownUntil - now : 0,
+    degradations: redisDegradations,
+    lastDegradationAt,
+  };
+}
 
 async function getRedis(): Promise<RateLimitRedisClient | null> {
-  if (redisUnavailable) return null;
+  if (Date.now() < redisDownUntil) return null;
   if (redisClient) return redisClient;
   if (!process.env.REDIS_URL) return null;
 
-  try {
-    // Optional dependency: only required when REDIS_URL is configured.
-    const mod = (await import('ioredis')) as unknown as {
-      default: new (url: string) => RateLimitRedisClient;
-    };
-    redisClient = new mod.default(process.env.REDIS_URL);
-    return redisClient;
-  } catch {
-    // A missing package or unreachable server must not take the app down; fall
-    // back to in-process counting. Do not log the connection error: it can
-    // contain a Redis URL with credentials.
-    console.error('Rate limiter: Redis unavailable, falling back to in-process counters.');
-    redisUnavailable = true;
-    return null;
-  }
+  if (redisConstruction) return redisConstruction;
+
+  redisConstruction = (async () => {
+    try {
+      // Optional dependency: only required when REDIS_URL is configured.
+      const mod = (await import('ioredis')) as unknown as {
+        default: new (url: string) => RateLimitRedisClient;
+      };
+      redisClient = new mod.default(process.env.REDIS_URL as string);
+      return redisClient;
+    } catch {
+      // A missing package or unreachable server must not take the app down; fall
+      // back to in-process counting. Do not log the connection error: it can
+      // contain a Redis URL with credentials.
+      markRedisDegraded('construct');
+      return null;
+    } finally {
+      redisConstruction = null;
+    }
+  })();
+
+  return redisConstruction;
 }
 
 const REDIS_VERIFICATION_TTL_MS = 5_000;
@@ -243,7 +348,7 @@ export async function verifyRateLimitBackend(): Promise<RateLimitBackendVerifica
   } catch {
     // Do not log the connection error. Client errors often embed a URL and
     // credentials. The running limiter will use its documented memory fallback.
-    redisUnavailable = true;
+    markRedisDegraded('verify');
     return inMemoryVerification(true, 'failed', keyMayExist ? 'ttl_fallback' : 'not_required');
   } finally {
     if (keyMayExist) {
@@ -285,6 +390,7 @@ export async function checkRateLimit(
       await redis.pexpire(key, rule.windowSeconds * 1000);
     }
     const ttl = await redis.pttl(key);
+    markRedisHealthy();
     return {
       allowed: count <= rule.limit,
       remaining: Math.max(0, rule.limit - count),
@@ -294,8 +400,7 @@ export async function checkRateLimit(
   } catch {
     // Do not log `err`: a Redis client error can include its credential-bearing
     // connection URL. Preserve availability with the documented local fallback.
-    console.error('Rate limiter: Redis command failed, using in-process counter.');
-    redisUnavailable = true;
+    markRedisDegraded('command');
     pruneMemory();
     return checkInMemory(key, rule);
   }
@@ -364,12 +469,21 @@ export function __resetInMemoryCounters(): void {
 /** Test-only: inject a Redis double without creating any network connection. */
 export function __setRedisClientForTests(client: RateLimitRedisClient | null): void {
   redisClient = client;
-  redisUnavailable = false;
+  redisConstruction = null;
+  // Deliberately does NOT clear `redisDownUntil` or `degraded`. Injecting a
+  // client is not a recovery event, and nothing in production clears either
+  // flag as a side effect of acquiring one — a helper that did would hide the
+  // very transition the degradation tests exist to observe. Use
+  // `__resetRateLimitBackendForTests()` for isolation between cases.
 }
 
 /** Test-only: restore Redis module state between isolated tests. */
 export function __resetRateLimitBackendForTests(): void {
   redisClient = null;
-  redisUnavailable = false;
+  redisDownUntil = 0;
+  redisConstruction = null;
+  redisDegradations = 0;
+  lastDegradationAt = null;
+  degraded = false;
   memoryCounters.clear();
 }
