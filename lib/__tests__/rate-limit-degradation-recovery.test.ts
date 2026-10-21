@@ -124,6 +124,43 @@ describe('the cooldown bounds the degradation instead of latching it', () => {
     expect(rateLimitBackendHealth().inCooldown).toBe(true);
   });
 
+  it('keeps the client across a command failure instead of orphaning it', async () => {
+    vi.useFakeTimers();
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    // One double, failing then healthy: if a command failure discarded the
+    // client, the retry after the cooldown would construct a new one instead
+    // of reaching this instance — and the old one would be left with its
+    // socket and reconnect loop running, never disconnected.
+    let fail = true;
+    const incr = vi.fn(async () => {
+      if (fail) throw new Error('ECONNRESET');
+      return 1;
+    });
+    __setRedisClientForTests(redisDouble({ incr }));
+
+    await checkRateLimit('auth:login', 'keepalive');
+    expect(incr).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(30_001);
+    fail = false;
+    // No re-injection: the retry must reuse the client already held.
+    const result = await checkRateLimit('auth:login', 'keepalive');
+
+    expect(incr).toHaveBeenCalledTimes(2);
+    expect(result.allowed).toBe(true);
+    expect(rateLimitBackendHealth().activeBackend).toBe('redis');
+  });
+
+  it('reports the fallback during a cooldown even though the client is retained', async () => {
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    __setRedisClientForTests(redisDouble({ incr: vi.fn().mockRejectedValue(new Error('down')) }));
+
+    await checkRateLimit('auth:login', 'health-during-cooldown');
+
+    // Retaining the client must not make health claim Redis is in use.
+    expect(rateLimitBackendHealth().activeBackend).toBe('in_memory_fallback');
+  });
+
   it('retries once the cooldown has elapsed, and recovers', async () => {
     vi.useFakeTimers();
     process.env.REDIS_URL = TEST_REDIS_URL;
@@ -202,9 +239,40 @@ describe('concurrency', () => {
     expect(rateLimitBackendHealth().degradations).toBeGreaterThanOrEqual(1);
   });
 
-  it('serialises in-flight construction so concurrent callers share one client', async () => {
+  it('constructs the Redis client once under a concurrent cold start', async () => {
+    // The real serialisation test. It has to mock `ioredis` and re-import the
+    // module, because an injected double skips construction entirely and an
+    // unconfigured module returns null before it ever reads
+    // `redisConstruction` — so neither observes the thing being asserted.
+    vi.resetModules();
+    // A function declaration, not an arrow: `new mod.default(url)` cannot
+    // construct an arrow function.
+    const ctor = vi.fn(function constructed(this: unknown) {
+      return redisDouble();
+    });
+    vi.doMock('ioredis', () => ({ default: ctor }));
+
+    try {
+      const isolated = await import('../rate-limit');
+      process.env.REDIS_URL = TEST_REDIS_URL;
+
+      await Promise.all(
+        Array.from({ length: 5 }, (_, i) => isolated.checkRateLimit('auth:login', `cold-${i}`)),
+      );
+
+      // Five concurrent callers on a cold instance, one connection. Without the
+      // in-flight promise each opens its own and all but the last leak.
+      expect(ctor).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.doUnmock('ioredis');
+      vi.resetModules();
+    }
+  });
+
+  it('shares one in-process counter across concurrent callers when unconfigured', async () => {
     // No REDIS_URL and no injected client: getRedis() takes the unconfigured
     // path for every caller, which must stay allocation-free and consistent.
+    // This says nothing about construction — see the test above.
     const results = await Promise.all(
       Array.from({ length: 5 }, () => checkRateLimit('auth:login', 'shared-key')),
     );

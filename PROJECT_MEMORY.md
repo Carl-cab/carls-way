@@ -931,3 +931,81 @@ prefer fixing forward.
 class, and whether `rateLimitBackendHealth()` should be surfaced on an
 authenticated operations route for scraping. Engineering: the
 `follow-redirects` advisory first, then header-trust boundaries.
+
+---
+
+## 2026-10-21 — three review corrections on the Redis cooldown (PR #67)
+
+**Purpose and scope.** Review of `6bf491e` found three defects; all three were
+verified against source before changing anything, and all three were real.
+
+**1. A connection leak, introduced by the fix itself (Major).**
+`markRedisDegraded()` set `redisClient = null` on every stage, including a
+*command* failure. Nothing calls `quit()` or `disconnect()` on the abandoned
+instance, so its socket and its own reconnect loop keep running while the next
+request after the cooldown constructs a brand new client. Repeated outages
+accumulate orphans — the same leak the serialised construction in that very
+commit exists to prevent, reintroduced one function later. Now only a
+`'construct'` failure discards the client; a command or verify failure keeps it,
+which also keeps ioredis's own reconnect machinery. `rateLimitBackendHealth()`
+already guarded `activeBackend` on `!inCooldown`, so retaining the client does
+not make health claim Redis is in use — asserted by a new test.
+
+**2. A self-contradicting readiness row (Minor).** The evidence string in
+`scripts/status/readiness.json` still said the limiter "sets
+`redisUnavailable=true`" and that "the flag LATCHES — the only resets are
+test-only", and cited `lib/rate-limit.ts:138` for a variable the same commit
+deleted. The suffix appended in that commit then said the latch had been
+replaced, so one field described one control two contradictory ways. The cause
+was mine: I **appended** to a current-status file as though it were
+append-only. Only `PROJECT_MEMORY.md` is. Rewritten to describe `redisDownUntil`
+and the cooldown, keeping the per-instance PARTIAL rationale and one explicit
+note that an earlier version described the old latch.
+
+The same stale claim was in two files the review did **not** flag —
+`CLAUDE.md`'s `REDIS_URL` row and the pre-flight step in
+`docs/STAFF_ONLY_REAL_RAIL_TEST_MATRIX.md` — found by sweeping for the class
+rather than the cited line. Both corrected. Line-number citations are now
+dropped rather than updated: `:138`, `:137`, `:95` went stale within a day of
+being written, which is an argument against citing lines in prose at all.
+The copy at `PROJECT_MEMORY.md:772` is in an already-merged entry and is
+corrected here by appending, not by editing it.
+
+**3. A test whose name over-claimed (nitpick, and the most instructive).**
+"serialises in-flight construction so concurrent callers share one client" ran
+with no `REDIS_URL`, so `getRedis()` returned `null` before it ever read
+`redisConstruction`. It would have passed with the serialisation deleted.
+Replaced with an isolated case that mocks `ioredis`, re-imports the module and
+asserts the constructor is called exactly once under five concurrent callers;
+the original is kept under an honest name covering what it actually tests. This
+is the fourth defect of the same shape in this work — a check covering part of
+its subject, described as covering all of it — and this time it was in the
+coverage claim for a leak fix.
+
+**Financial or security behaviour affected.** No behaviour change beyond the
+leak fix. Rate limiting still fails open, still never logs the raw exception.
+
+**Tests run and results.** 15 cases in
+`lib/__tests__/rate-limit-degradation-recovery.test.ts` (3 new). Full suite
+**58 files / 847 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+Mutation-checked individually: discarding the client on every stage fails
+"keeps the client across a command failure instead of orphaning it", and
+removing the in-flight promise fails "constructs the Redis client once under a
+concurrent cold start" — one test each, neither failing for the other's reason.
+
+**Commit / PR.** Branch `ops/redis-degradation-recovery`, PR **#67**. Not merged.
+
+**Migration impact.** None.
+
+**Readiness impact.** Unchanged: still **PARTIAL**.
+
+**Unresolved findings.** As in the preceding entry — nothing consumes
+`rateLimitBackendHealth()`, fail-open versus fail-closed by risk class is an
+owner decision, and `clientIdentifier()` still prefers an unvalidated
+`x-real-ip`.
+
+**Rollback requirement.** Revert the commit; the prior state carries the
+connection leak.
+
+**Next recommended action.** Unchanged: merge #66 first, then branch
+protection, then this PR.

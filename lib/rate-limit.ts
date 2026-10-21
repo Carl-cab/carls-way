@@ -183,7 +183,18 @@ let redisConstruction: Promise<RateLimitRedisClient | null> | null = null;
  * password included.
  */
 function markRedisDegraded(stage: 'construct' | 'command' | 'verify'): void {
-  redisClient = null;
+  // Only discard the client when construction itself failed — there is no
+  // usable client in that case anyway.
+  //
+  // Dropping it on a *command* failure looks tidier and is a connection leak.
+  // Nothing calls `quit()`/`disconnect()` on the abandoned instance, so its
+  // socket and its own reconnect loop keep running while the next request
+  // after the cooldown builds a brand new client; repeated outages accumulate
+  // orphans. That is the same leak the serialised construction above exists to
+  // prevent, reintroduced one function later. Keeping the client also keeps
+  // ioredis's own reconnect machinery, which is better at recovering a
+  // connection than discarding it and starting over.
+  if (stage === 'construct') redisClient = null;
   redisDownUntil = Date.now() + REDIS_RETRY_COOLDOWN_MS;
   redisDegradations += 1;
   lastDegradationAt = Date.now();
