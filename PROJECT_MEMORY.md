@@ -846,3 +846,57 @@ state above means a pass says nothing about the others. The row reaches
 VERIFIED only on deployment-wide evidence, i.e. the monitored degradation
 signal in the unresolved finding above. Then branch protection, which is still absent — `master` is
 `protected: false` and two PRs have merged on unenforced checks.
+
+---
+
+## 2026-10-21 — follow-redirects advisory: credential headers on the Plaid path
+
+**Purpose and scope.** `pnpm audit --prod` began failing on `master` at
+`c2859f6` with two newly published **high** advisories against
+`follow-redirects@1.16.0`: GHSA-q3jh-wrc6-jgq8 (array-form headers bypass,
+cross-origin credential stripping) and GHSA-8r9p-f939-6h3c
+(`sensitiveHeaders` regex escaping can expose credential headers). Both are
+patched in 1.16.1. Pinned forward with a `pnpm.overrides` entry.
+
+**Why this one is not routine audit noise.** The dependency path is
+`plaid > axios > follow-redirects`, and both advisories are about **credential
+headers surviving a cross-origin redirect**. Plaid requests from this codebase
+carry `PLAID-SECRET` and `PLAID-CLIENT-ID` — the exact header class the
+advisories describe, on the exact client that carries them. `lib/plaid-error.ts`
+exists precisely because those headers must never reach a log; this is the same
+secret leaking by a different route.
+
+**How it was fixed.** `follow-redirects` is transitive only — there is no direct
+`axios` dependency to bump, and `plaid@42.2.0` pins `axios@1.20.0`, which pins
+`follow-redirects@1.16.0`. A `pnpm.overrides` entry of `>=1.16.1` is therefore
+the minimal correct fix; upgrading `plaid` would be a larger change with no
+additional security benefit. Resolved tree confirmed at 1.16.1.
+
+**Financial or security behaviour affected.** A credential-exposure path is
+closed. No application code changed — one `package.json` block and the
+lockfile.
+
+**Tests run and results.** `pnpm audit --prod` → **no known vulnerabilities**
+(was 2 high). `pnpm install --frozen-lockfile` succeeds, which is what CI and
+Vercel both run, so the lockfile is consistent with `package.json` rather than
+drifting — the failure mode `CLAUDE.md`'s single-lockfile rule exists to
+prevent. Full suite **57 files / 832 tests passing**, typecheck clean. (832 not
+844: this branch is cut from `master` and does not contain the Redis
+degradation work.)
+
+**Commit / PR.** Branch `sec/follow-redirects-advisory`, cut from `c2859f6`.
+Not merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The advisory surfaced only because post-merge CI runs
+the audit on `master`; nothing alerts on a new advisory against an unchanged
+tree. `master` also does not enforce the `dependency audit` check, so a failing
+audit blocks nothing — see the branch-protection gap.
+
+**Rollback requirement.** Revert the commit and the lockfile together. Doing so
+restores a known high-severity credential-exposure path; prefer fixing forward.
+
+**Next recommended action.** Owner: enforce branch protection so a failing
+`dependency audit` actually blocks a merge. Engineering: header-trust
+boundaries.

@@ -48,5 +48,10 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^3.2.7"
+  },
+  "pnpm": {
+    "overrides": {
+      "follow-redirects": ">=1.16.1"
+    }
   }
 }
