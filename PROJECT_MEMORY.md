@@ -711,3 +711,138 @@ shared rate-limit backend question, and set branch protection — `master` is
 still `protected: false`, so none of the six green checks is enforced.
 Engineering: Phase 3's `workflow_dispatch` runner, which is where adoption and
 execution both get a real entry point.
+
+---
+
+## 2026-10-20 — REDIS_URL confirmed set in production (configuration, not operation)
+
+**Purpose and scope.** Record an owner-reported configuration fact and correct
+two documentation claims that were narrower than the code's behaviour. No code
+change.
+
+**What is now known.** The owner reports `REDIS_URL` is set for production
+(2026-10-20). Name only — no value was requested, supplied, or held by the
+engineering session, and the session still cannot reach Vercel (`403 CONNECT`).
+
+**What is still NOT known, and why the distinction matters.** "The variable is
+set" is not "limits are shared". Measured in `lib/rate-limit.ts`:
+
+- `getRedis()` catches client construction failure, sets
+  `redisUnavailable = true`, and returns null — the limiter then uses
+  in-process counters.
+- `checkRateLimit()` catches any command failure and does the same
+  (line ~298), as does `verifyRateLimitBackend()` (line ~246).
+- The **raw exception** is deliberately not logged, because a Redis client
+  error can embed its credential-bearing connection URL. A generic degradation
+  line *is* emitted to stderr (`Rate limiter: Redis unavailable, falling back
+  to in-process counters.` / `Rate limiter: Redis command failed, using
+  in-process counter.`), so the signal exists but carries no detail and is
+  easy not to recognise as the diagnostic for a latched per-instance
+  fallback.
+- **The flag latches.** The only resets are `__setRedisClientForTests()` and
+  `__resetRateLimitBackendForTests()`, both test-only. There is no production
+  retry, so a degraded instance keeps counting in-process until it recycles.
+
+So a configured Redis that stops answering makes each instance enforce the
+limit locally. The aggregate allowance can reach `limit × instances`, and
+callers *can* observe changed `allowed` and `remaining` results — `limit` is
+`rule.limit` on both paths (`lib/rate-limit.ts:113` and `:291`) and never
+changes —
+what they do not receive is an explicit backend-failure signal. On serverless
+the latch is bounded by instance lifetime, which mitigates but does not remove
+it.
+
+(This sentence said "invisibly to any caller" in the first draft. Review
+caught the same overstatement in `CLAUDE.md`, I corrected it there and in
+`readiness.json`, and missed this copy — a partial sweep of a claim that
+appears in three files, which is the recurring shape of my errors on this
+work.)
+
+**Financial or security behaviour affected.** None changed. The correction
+matters because the operator limit on `/api/migrate` and the auth-endpoint
+limits were documented as stronger than the code guarantees.
+
+**Readiness impact.** `Redis-backed rate limiting in production` moves from
+BLOCKED to **PARTIAL**, not VERIFIED: configuration confirmed, operation
+unproven. `POST /api/admin/operations/redis-rate-limit` run against production
+with a session holding `exceptions:manage` (SuperAdmin or OperationsAdmin) is
+the available evidence — already implemented and audited, performing an
+isolated set/get/delete — but **it proves only the instance that served it.**
+`redisUnavailable`, `redisClient` and `memoryCounters` are module-level
+(`lib/rate-limit.ts:138`, `:137`, `:95`), so they are per serverless instance,
+and another live instance can be latched into in-process counting while this
+one answers pass. Serverless instances cannot be addressed individually, so
+repeated POSTs give sampling confidence, not coverage. VERIFIED requires
+evidence covering every live instance, or equivalent deployment-wide evidence —
+which means monitoring the degradation signal, the unresolved finding recorded
+below. The row stays PARTIAL on a passing POST. The POST remains an owner
+action.
+
+**Tests run and results.** Documentation and readiness data only; full suite
+re-run to confirm nothing regressed: **57 files / 832 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+(A correction to how that run was described earlier in this entry's drafting:
+"a fresh PostgreSQL 16 database" was not a sufficient instruction. A genuinely
+empty database fails four files — `audit.test.ts`, `splits.test.ts`,
+`stripe-settlement.test.ts`, `transfer-execution-safety.test.ts` — on rows
+they do not create, because `.github/workflows/ci.yml` applies
+`lib/__tests__/helpers/test-schema.sql` before running the suite and the
+instruction in `CLAUDE.md` did not mention that step. A local URL also needs
+`?sslmode=disable`, since `resolveSslMode()` defaults to `'require'`. Both
+were hit while validating this change, and both are now written into the
+testing section of `CLAUDE.md` with the failure each one produces. Same shape
+as the rest of this round: an instruction that worked in the environment where
+it was written, recorded as if it were general.)
+
+**Commit / PR.** **PR #65**, branch `ops/redis-configuration-confirmed`,
+initial commit `baf3dc9`; review fixes follow it on the same branch. Preceding
+work merged as `6d8861c` (PR #63, Phase 1) and `1d4d783` (PR #64, Phase 2),
+the latter confirmed 4/4 green on `master` post-merge.
+
+(These fields were written as pending in the first draft of this entry, before
+the PR existed and before the suite had been re-run. Filling them in is
+completing an entry that has never been merged, not editing history — the
+append-only rule governs the committed record, and this follows the Phase 1
+entry's precedent of recording the SHA and PR after the push.)
+
+**Migration impact.** None.
+
+**Unresolved findings.** Two corrections review caught in the first draft of
+this entry, both overstating how invisible the fallback is: it said callers
+could see no behaviour change, when `limit × instances` changes `allowed` and
+`remaining` and lets a caller spread requests across instances to exceed the
+nominal limit — only the *failure signal* is absent; and it cited "an admin
+session" for the verification route when that route requires the
+`exceptions:manage` permission, i.e. SuperAdmin or OperationsAdmin, so a lesser
+admin role gets a 403 that reads like a Redis outage.
+
+A third correction, caught in the same review round: every place I wrote the
+verification instruction — `CLAUDE.md`, `scripts/status/readiness.json`, this
+entry, and the pre-flight step in
+`docs/STAFF_ONLY_REAL_RAIL_TEST_MATRIX.md` — told the reader that running the
+route once settles the question. It cannot. The backend state is module-level,
+so one POST samples one serverless instance, and Vercel gives no way to
+address the others. This supersedes the "Next recommended action" of the
+Phase 2 entry above, which said to run the route to *settle* the shared
+rate-limit backend question; running it is still worth doing, but it narrows
+the question rather than closing it. Corrected by appending, not by editing
+that entry.
+
+The latching fallback has no production retry or
+alarm. Worth considering a bounded retry, or surfacing
+`activeBackend` from `verifyRateLimitBackend()` through a monitored path, so a
+silent degradation is detectable without an operator running the route by
+hand. Not built here — it is a behaviour change to a security control and
+belongs in its own reviewed change.
+
+**Rollback requirement.** Revert the commit; it is documentation and readiness
+data only.
+
+**Next recommended action.** Owner: run the verification route and report the
+outcome (pass/fail only, no values). That does **not** move the row to
+VERIFIED — it samples one serverless instance, and the per-instance module
+state above means a pass says nothing about the others. The row reaches
+VERIFIED only on deployment-wide evidence, i.e. the monitored degradation
+signal in the unresolved finding above. Then branch protection, which is still absent — `master` is
+`protected: false` and two PRs have merged on unenforced checks.

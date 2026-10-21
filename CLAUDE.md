@@ -238,7 +238,24 @@ because the defects they cover were mismatches between SQL in the app and the
 actual schema — exactly what a hand-written fake cannot catch. Set
 `DATABASE_URL` to a scratch database before running them, and prefer a
 genuinely fresh one: reusing a database that an earlier run already migrated
-has twice hidden a failure that CI then found on a clean one. A test that
+has twice hidden a failure that CI then found on a clean one. **A fresh
+database is not enough on its own** — apply the fixture first, exactly as
+`.github/workflows/ci.yml` does in its "Prepare test schema" step:
+
+```bash
+createdb manna_scratch
+psql "postgres://…/manna_scratch" -f lib/__tests__/helpers/test-schema.sql
+DATABASE_URL="postgres://…/manna_scratch?sslmode=disable" pnpm test
+```
+
+Skip the fixture and four files fail on seeded rows they did not create —
+`audit.test.ts` first, on
+`admin_audit_logs_admin_user_id_fkey` — which reads like a regression and is
+not one. And `?sslmode=disable` is required for a local server:
+`resolveSslMode()` in `lib/db.ts` defaults to `'require'` for every URL that
+does not ask otherwise, so without it every DB-backed file fails with
+`Client network socket disconnected before secure TLS connection was
+established`. Both were learned by hitting them. A test that
 **mutates schema** must use a disposable database, not the shared one, and
 restoring the object afterwards is not good enough: vitest runs files in
 parallel, so the window where the object is missing is a race, not an ordering
@@ -440,9 +457,26 @@ arbitrary end user.
   `docs/decisions/0005-migration-privilege-separation.md` exist to resolve.
   `clientIdentifier()` trusting `x-real-ip` first remains **unverified**, not
   cleared.
-  The operator limit is also **weaker than its number suggests**: without
-  `REDIS_URL` the counter is process-local, so on Vercel it is `6 × instances`
-  per hour and a cold start resets it. It is deliberately **not** fail-closed —
+  The operator limit's strength depends on a backend that can degrade
+  silently. `REDIS_URL` **is set in production** (owner-reported 2026-10-20,
+  name only), so the counter is nominally the shared 6/hour. But
+  `lib/rate-limit.ts` falls back to in-process counters on any Redis client or
+  command failure, which makes it `6 × instances`. That difference IS
+  caller-visible — `allowed` and `remaining` change, and a caller spreading
+  requests across instances can exceed the nominal limit; what the fallback
+  provides is **no explicit signal that the backend failed**. And it
+  **latches**: `redisUnavailable`
+  has no production reset path (both resets are test-only), so a degraded
+  instance stays degraded until it recycles. The **raw exception** is deliberately
+  not logged, because a Redis client error can embed the credential-bearing
+  URL; a generic degradation line *is* emitted to stderr, so a signal exists
+  but carries no detail. Read "6/hour" as "6/hour
+  while Redis is answering", and prove the backend with
+  `POST /api/admin/operations/redis-rate-limit` rather than inferring it from
+  the variable being set — bearing in mind that a pass covers only the
+  instance that served the request, because the backend state is module-level
+  (see the `REDIS_URL` row). Without `REDIS_URL` at all it is `6 × instances`
+  by construction. It is deliberately **not** fail-closed —
   refusing the migration whenever Redis is absent would make an optional
   variable a hard dependency of the only schema-migration path and of the
   command-line break-glass, which is the Release 1.0 lockout shape. The threat
@@ -576,7 +610,7 @@ which a balance-rewriting migration gets applied twice.
 | `NEXT_PUBLIC_APP_URL` | Full origin URL without trailing slash, e.g. `https://carloscab74.vercel.app` |
 | `MANNA_ENV` | `sandbox`, spelled exactly, declares a sandbox deployment. `VERCEL_ENV=production` overrides it, so no value here can weaken a production deploy |
 | `CRON_SECRET` | Required by the reconciliation cron route; unset means the route refuses |
-| `REDIS_URL` | Optional. Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint |
+| `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit — the flag latches until the instance recycles, the **raw exception** is unlogged by design while a generic degradation line is emitted to stderr, so callers get no explicit failure signal and operators get one undetailed line. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** `redisUnavailable`, `redisClient` and `memoryCounters` are module-level (`lib/rate-limit.ts:138`, `:137`, `:95`), so they are per serverless instance: another live instance can be latched into in-process counting while this one answers pass. Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |
 | `CA_EFT_LIVE` | `true` enables live CA EFT. Any other value, including unset, is sandbox |
 
