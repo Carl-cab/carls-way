@@ -299,6 +299,62 @@ describe('the verification route shares the same degradation accounting', () => 
     expect(rateLimitBackendHealth().inCooldown).toBe(true);
   });
 
+  it('records a degradation when the read-back marker does not match', async () => {
+    // Fails without throwing, so the catch never sees it. Before this, the
+    // route answered verification:'failed' / in_memory_fallback while health
+    // still said redis and the next checkRateLimit retried the client.
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    __setRedisClientForTests(
+      redisDouble({ set: vi.fn().mockResolvedValue('OK'), get: vi.fn().mockResolvedValue('someone-elses-marker') }),
+    );
+
+    const result = await verifyRateLimitBackend();
+
+    expect(result.verification).toBe('failed');
+    expect(result.activeBackend).toBe('in_memory_fallback');
+    // The answer and the health report must agree.
+    expect(rateLimitBackendHealth().activeBackend).toBe('in_memory_fallback');
+    expect(rateLimitBackendHealth().degradations).toBe(1);
+    expect(rateLimitBackendHealth().inCooldown).toBe(true);
+  });
+
+  it('records a degradation when the cleanup delete does not remove one key', async () => {
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    const marker: { value?: string } = {};
+    __setRedisClientForTests(
+      redisDouble({
+        set: vi.fn(async (_k: string, v: string) => {
+          marker.value = v;
+          return 'OK';
+        }),
+        get: vi.fn(async () => marker.value ?? null),
+        del: vi.fn().mockResolvedValue(0),
+      }),
+    );
+
+    const result = await verifyRateLimitBackend();
+
+    expect(result.verification).toBe('failed');
+    expect(rateLimitBackendHealth().degradations).toBe(1);
+    expect(rateLimitBackendHealth().inCooldown).toBe(true);
+  });
+
+  it('does NOT record a degradation when NX refuses on a key collision', async () => {
+    // The deliberate asymmetry. NX refusing means the key already existed,
+    // which proves Redis answered correctly — the probe just could not claim
+    // its name. Opening a cooldown here would demote a healthy backend on a
+    // 1-in-2^122 clash, so this must not follow the two branches above.
+    process.env.REDIS_URL = TEST_REDIS_URL;
+    __setRedisClientForTests(redisDouble({ set: vi.fn().mockResolvedValue(null) }));
+
+    const result = await verifyRateLimitBackend();
+
+    expect(result.verification).toBe('failed');
+    expect(result.cleanup).toBe('not_required');
+    expect(rateLimitBackendHealth().degradations).toBe(0);
+    expect(rateLimitBackendHealth().inCooldown).toBe(false);
+  });
+
   it('leaves health untouched when Redis is simply not configured', async () => {
     const result = await verifyRateLimitBackend();
 

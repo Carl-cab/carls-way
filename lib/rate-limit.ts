@@ -334,18 +334,34 @@ export async function verifyRateLimitBackend(): Promise<RateLimitBackendVerifica
     if (wrote !== 'OK') {
       // A random UUID collision is not expected, but do not overwrite any key
       // if it somehow occurs. The key was not created by this check.
+      //
+      // Deliberately does NOT record a degradation, unlike the two branches
+      // below. `NX` refusing means the key already existed, which says Redis
+      // answered correctly — the backend is healthy and the probe simply could
+      // not claim its key. Opening a cooldown here would demote a working
+      // backend on the strength of a 1-in-2^122 name clash. Do not add
+      // `markRedisDegraded` for symmetry with the branches below.
       return inMemoryVerification(true, 'failed', 'not_required');
     }
     keyMayExist = true;
 
+    // These two branches fail *without throwing*, so the catch below never
+    // sees them. Recording the degradation here is what keeps the answer this
+    // function returns — `verification: 'failed'`, `activeBackend:
+    // 'in_memory_fallback'` — consistent with what `rateLimitBackendHealth()`
+    // reports and with what the next `checkRateLimit()` actually does. Without
+    // it the route says the backend failed while health still says redis and
+    // the next call retries the retained client.
     const observed = await redis.get(key);
     if (observed !== marker) {
+      markRedisDegraded('verify');
       return inMemoryVerification(true, 'failed', 'ttl_fallback');
     }
 
     const deleted = await redis.del(key);
     keyMayExist = false;
     if (deleted !== 1) {
+      markRedisDegraded('verify');
       return inMemoryVerification(true, 'failed', 'ttl_fallback');
     }
 

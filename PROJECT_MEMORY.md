@@ -1009,3 +1009,61 @@ connection leak.
 
 **Next recommended action.** Unchanged: merge #66 first, then branch
 protection, then this PR.
+
+---
+
+## 2026-10-21 — the verification route's non-throwing failures now open the cooldown (PR #67)
+
+**Purpose and scope.** `verifyRateLimitBackend()` has two failure branches that
+return **without throwing**: the read-back marker not matching, and the cleanup
+`del` not removing exactly one key. Both returned
+`verification: 'failed'` with `activeBackend: 'in_memory_fallback'` while
+recording nothing, so the catch never saw them and no cooldown opened. The
+route therefore answered "the backend failed" while `rateLimitBackendHealth()`
+still reported `redis` and the next `checkRateLimit()` retried the retained
+client. One function, two contradictory answers about one control.
+
+Both branches now call `markRedisDegraded('verify')` before returning, so the
+answer, the health report and the limiter's next action agree.
+
+**The asymmetry is deliberate and is now pinned by a test.** The third branch,
+`NX` refusing the write, does **not** record a degradation and must not. `NX`
+refusing means the key already existed, which proves Redis answered correctly —
+the probe simply could not claim its name. Opening a cooldown there would
+demote a healthy backend on a 1-in-2^122 UUID clash. A comment says so at the
+branch, specifically to stop a future reader adding the call "for symmetry",
+and a test asserts the count stays zero.
+
+**Why this surfaced now.** The inconsistency predates this PR, but the previous
+code discarded the client on every failure and set a permanent latch, so the
+window was narrower. Retaining the client — the correct fix for the connection
+leak — is what made it reachable, which is a fair example of one fix exposing
+the next.
+
+**Financial or security behaviour affected.** Rate limiting only, and in the
+conservative direction: a verification failure now degrades the instance
+rather than leaving it claiming a backend it just failed to use. Still fails
+open. Raw exception still never logged.
+
+**Tests run and results.** 18 cases in
+`lib/__tests__/rate-limit-degradation-recovery.test.ts` (3 new). Full suite
+**58 files / 850 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+Mutation-checked in both directions: removing the two new calls fails exactly
+the two new branch tests, and adding the call to the collision branch fails the
+asymmetry test. Neither mutation is caught by the other's test.
+
+**Commit / PR.** Branch `ops/redis-degradation-recovery`, PR **#67**. Not merged.
+
+**Migration impact.** None.
+
+**Readiness impact.** Unchanged: **PARTIAL**.
+
+**Unresolved findings.** As before — nothing consumes
+`rateLimitBackendHealth()`, fail-open versus fail-closed by risk class is an
+owner decision, and `clientIdentifier()` still prefers an unvalidated
+`x-real-ip`.
+
+**Rollback requirement.** Revert the commit.
+
+**Next recommended action.** Unchanged: merge #66 first, then branch
+protection, then this PR.
