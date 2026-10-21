@@ -233,6 +233,12 @@ export interface RateLimitBackendHealth {
   lastDegradationAt: number | null;
 }
 
+/**
+ * Read this instance's backend health. Pure — no Redis contact, no side
+ * effects, unlike `verifyRateLimitBackend()`, so a monitored path can poll it
+ * freely. `activeBackend` reports the fallback whenever a cooldown is open,
+ * even though the client is retained for the retry.
+ */
 export function rateLimitBackendHealth(): RateLimitBackendHealth {
   const now = Date.now();
   const inCooldown = now < redisDownUntil;
@@ -246,6 +252,15 @@ export function rateLimitBackendHealth(): RateLimitBackendHealth {
   };
 }
 
+/**
+ * The shared Redis client, or `null` when rate limiting must count in process.
+ *
+ * Returns `null` without contacting Redis while a cooldown is open, which is
+ * what bounds a degradation instead of latching it (see `redisDownUntil`), and
+ * when `REDIS_URL` is unset. Concurrent callers on a cold instance share one
+ * construction through `redisConstruction` rather than each opening a
+ * connection.
+ */
 async function getRedis(): Promise<RateLimitRedisClient | null> {
   if (Date.now() < redisDownUntil) return null;
   if (redisClient) return redisClient;
