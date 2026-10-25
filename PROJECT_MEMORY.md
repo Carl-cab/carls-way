@@ -900,3 +900,102 @@ restores a known high-severity credential-exposure path; prefer fixing forward.
 **Next recommended action.** Owner: enforce branch protection so a failing
 `dependency audit` actually blocks a merge. Engineering: header-trust
 boundaries.
+
+---
+
+## 2026-10-25 — Sprint 1 Task E: Phase 0 runbook executed against synthetic data
+
+**Purpose and scope.** Every command in
+`docs/runbooks/backup-restore-rehearsal.md` had been written without ever being
+run, because running it needs a production backup and an owner-provisioned
+target. Ran the whole procedure against a **synthetic** source database
+instead, so the commands — and more importantly the verification steps — could
+be proven to work. Full command-level evidence:
+`docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
+
+**Phase 0 remains NOT RUN.** No customer data, no production credential, no
+production host. What is established is narrower: the procedure executes and
+each of its checks detects the failure it claims to detect. That second half is
+the point — a verification step that cannot fail is decoration.
+
+**Positive case.** `pg_dump` → `pg_restore --no-owner --no-privileges`: exit 0,
+zero stderr, 0.20 s. `verify-migrate.sql`: zero non-`OK` rows.
+Source/target row counts identical. `reconciliation-check.sql`: **7/7 PASS**,
+non-vacuously — the dataset carries one completed internal payment with both
+ledger legs and opening balances, because an empty database passes all seven
+checks for free. Application suite against the restored database: **58 files /
+836 tests passing**. Teardown left zero rehearsal databases and zero probe
+roles.
+
+**Negative cases, which are the substance.** Dropping
+`transactions.correlation_id` → caught by step 2. Crediting 20.00 against a
+25.00 payment → 3 of 7 reconciliation checks FAIL. Privilege probe with no
+grants → 114 unreachable rows (20 tables × 4 privileges + 17 sequences × 2);
+with the full grant set → 0. The last pair matters together: a probe returning
+0 means nothing unless it can return non-zero.
+
+**Financial or security behaviour affected.** None. One new read-only SQL
+fixture, one audit document, and a correction to a runbook. No application
+code.
+
+**Four findings, one of them a defect in a verification step.**
+
+1. **The runbook named the wrong failure word — corrected.** Step 2 said the
+   pass criterion was "no `ABSENT` objects". `verify-migrate.sql` emits
+   **two** words: sections 1-4 report `MISSING`, only section 5 reports
+   `ABSENT`. A dropped table, column or index is therefore invisible to an
+   operator checking for `ABSENT`. Not hypothetical — the first negative case
+   was *initially scored as "the check failed to detect a dropped column"*
+   because the measurement grepped for `absent`. The script was right and the
+   measurement was wrong; an operator following the runbook literally makes the
+   mirror-image error during an incident and calls a damaged restore clean. Now
+   requires every row to read `OK`, with both failure words tabulated and a
+   counting command that catches either.
+2. **`users.balance` diverges across the three schema sources**:
+   `verify-migrate.sql` requires it, `initializeSchema()` creates it, the test
+   fixture omits it — and `schema-source-parity.test.ts` only compares the
+   first two, so nothing flags it. **Deliberately not changed**: the omission
+   may be protective, since `CLAUDE.md` forbids new code touching the legacy
+   column and a fixture without it makes any such read fail loudly with 42703.
+   Owner judgement call.
+3. **Step 4 will fail against a real restore carrying audit history.**
+   `audit_logs.user_id` references `users(id)` with no `ON DELETE` clause, and
+   23 test files `DELETE FROM users` using hard-coded ids in the 9001-9807
+   band. Production ids increment from 1, so above roughly 9000 users those
+   bands overlap and the FK blocks the delete — surfacing as "the application
+   is incompatible with the backup" when it is the harness assuming it may
+   delete users it did not create. Observed here as an id collision of the
+   rehearsal's own making (synthetic user 9501 vs that file's `USER_ID = 9501`)
+   and fixed by renumbering to 99001+; the general hazard is **not** fixed,
+   because both remedies — renumbering test ids, or changing an audit-table
+   FK — deserve their own review.
+4. The fixture's own seeds `splitpayera`/`splitpayerb` carry 500.00 CAD with no
+   ledger entries, so `user_wallets_exactly_match_ledger` reports 2
+   discrepancies against an unmodified fixture database. Correct for a
+   split-payment test, wrong for a reconciliation source — and found *before*
+   any fault was injected, which is the strongest evidence here that step 3b
+   works.
+
+**Tests run and results.** Full suite **58 files / 836 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings. The suite was additionally run
+against the restored database as runbook step 4, with the same result.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/phase0-synthetic-rehearsal`; the SHA is in the commit message. Carries the
+`next` 16.4.3 security bump ported from PR #69 so CI is green. Not merged.
+
+**Migration impact.** None. `schema_migrations` was empty in the restore, which
+is correct and expected: an empty tracking table means "not adopted into
+tracking", not "no migrations applied".
+
+**Unresolved findings.** Restore duration (0.20 s) is **not** transferable to
+production scale and must not be cited as an RTO input. Backup availability,
+recovery point, production restore duration, and production ownership and
+privileges are all still NOT RUN and need the owner-executed rehearsal.
+
+**Rollback requirement.** Revert the commit; documentation and one read-only
+SQL fixture.
+
+**Next recommended action.** Owner: merge PR #69 first (two unauthenticated
+RCEs), then authorize the Phase 0 production rehearsal with a designated
+operator and an isolated target.

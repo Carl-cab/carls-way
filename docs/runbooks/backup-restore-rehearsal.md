@@ -79,8 +79,34 @@ have been timed too.
 psql "$RESTORE_TARGET_URL" -f scripts/verify-migrate.sql
 ```
 
-This is the existing read-only check. Every row must report present. An
-`ABSENT` row means the backup predates a migration, which is exactly the
+This is the existing read-only check. **Every row must read `OK`.**
+
+Be precise about what a failure looks like, because the script uses *two*
+words and an earlier version of this runbook named only one of them:
+
+| Section of `verify-migrate.sql` | Failure word |
+|---|---|
+| 1 — tables | `MISSING` |
+| 2 — columns | `MISSING` |
+| 3-4 — unique indexes behind upserts | `MISSING — upsert will fail` |
+| 5 — money column types | `ABSENT` |
+
+This runbook previously said the pass criterion was "no `ABSENT` objects".
+That is wrong in the dangerous direction: a dropped **table, column or index**
+reports `MISSING`, so an operator checking only for `ABSENT` sees nothing and
+concludes the schema is intact. Measured during the synthetic rehearsal —
+dropping `transactions.correlation_id` produced `transactions.correlation_id |
+MISSING` and zero occurrences of the word `ABSENT`.
+
+So: grep for neither word. Require every row to read `OK`, or count the rows
+that do not:
+
+```bash
+psql "$RESTORE_TARGET_URL" -f scripts/verify-migrate.sql | grep -cE 'MISSING|ABSENT'
+# must be 0
+```
+
+Any non-`OK` row means the backup predates a migration, which is exactly the
 discovery worth making now rather than during an outage.
 
 ### 3. Verify the data is coherent, not merely present
@@ -289,7 +315,7 @@ hold**:
 | Finding | Why it matters |
 |---|---|
 | Restore completed, and how long it took | Measured restore duration — one input to an RTO, not the RTO |
-| `verify-migrate.sql` reported no ABSENT objects | The backup is current with the code |
+| `verify-migrate.sql` reported every row `OK` (count of `MISSING`/`ABSENT` rows = 0) | The backup is current with the code |
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
 | **All seven** rows from `scripts/reconciliation-check.sql` report `PASS` — paste the output | The financial invariants survived. Aggregate and per-payment checks fail independently, and errors cancel in aggregates, so a subset is not evidence |
