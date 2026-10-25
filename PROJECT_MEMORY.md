@@ -900,3 +900,98 @@ restores a known high-severity credential-exposure path; prefer fixing forward.
 **Next recommended action.** Owner: enforce branch protection so a failing
 `dependency audit` actually blocks a merge. Engineering: header-trust
 boundaries.
+
+---
+
+## 2026-10-25 — Sprint 1 Task D: every GitHub Action pinned to a commit SHA
+
+**Purpose and scope.** All seven `uses:` references in `.github/workflows/`
+named a mutable tag (`@v4`, `@v3`). A tag is a pointer the action's owner can
+move, so whoever controls — or compromises — `actions/checkout` could repoint
+`v4` and have it run here on the next job, with no diff and no review in this
+repository. Pinned all of them to 40-hex commit SHAs, keeping a trailing
+`# vN` so the version stays legible.
+
+**Why it matters more than the usual supply-chain advice.** The jobs here are
+not neutral. `actions/checkout` handles the job token; the secret-scan job
+downloads and executes a third-party binary over the entire git history;
+CodeQL's job holds `security-events: write`. A moved tag in any of those is
+arbitrary code execution inside CI with those permissions. The existing
+hardening already recognised this for the *binary* — Gitleaks is pinned by
+version **and** verified against a published SHA256 — so the actions were the
+remaining unpinned executable input.
+
+**Provenance of the SHAs, which is the part worth checking.** This session's
+GitHub access is scoped to `Carl-cab/carls-way`, so the action repositories
+could not be read to resolve the tags (and should not be — the restriction is
+explicit). The SHAs were instead taken from this repository's own CI run on
+`6927ebd`, from the runner's `Download action repository 'owner/action@vN'
+(SHA:…)` lines. That is *stronger* provenance than a separate tag lookup: it
+pins to exactly the commits that produced the green checks on the current
+`master`, rather than to whatever the tag points at now.
+
+| Action | Pinned SHA |
+|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
+| `pnpm/action-setup` | `b906affcce14559ad1aafd4ab0e942779e9f58b1` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
+| `github/codeql-action` (init, autobuild, analyze) | `4bfa242aa49c5f7c6770b98670d354a7dfac05f8` |
+
+**Financial or security behaviour affected.** No application code changed. A
+CI supply-chain path is closed. No workflow trigger, permission, job name or
+step semantics altered — verified by parsing both files and confirming the
+four job names still read exactly `install · typecheck · lint · test · build`,
+`dependency audit`, `secret scan`, `analyze javascript-typescript`, which are
+the contexts branch protection must require.
+
+**Why a test and not just the edit.** Pinning is easy to do once and easy to
+lose: the obvious way to add a step is to copy `uses: owner/action@v4` from
+documentation. Nothing in typecheck, lint or the build reads a YAML file, so an
+unpinned action would reach `master` with six green checks and nothing would
+notice. `lib/__tests__/workflow-action-pinning.test.ts` is the only thing in
+the repository that would. It also asserts the workflow files are *found* —
+without that, deleting the directory would make every other assertion pass
+over an empty list, a green test guarding nothing.
+
+**Tests run and results.** 4 new cases. Full suite **58 files / 836 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings,
+`pnpm install --frozen-lockfile` succeeds. Mutation-checked: reverting one
+action to `@v4` fails the SHA assertion (and the sweep), and removing a `# vN`
+comment fails only the legibility assertion — each mutation caught by the
+intended test.
+
+**Also corrected:** `CLAUDE.md` said "57 files / 821 tests" while `master` was
+actually at 57 / 832 — stale by eleven tests before this change touched the
+line, which is exactly the drift the sentence beneath it warns about.
+
+**Commit / PR.** This entry's own commit on branch `ci/pin-actions-to-shas`;
+the SHA is in the commit message. Not merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.**
+
+- A CI run log recorded `##[warning]Node.js 20 is deprecated. The following
+  actions target Node.js 20 but are being forced to run on Node.js 24:
+  actions/checkout@v4, actions/setup-node@v4, pnpm/action-setup@v4`. This is
+  about the *action runtime*, not the `node-version: 20` the jobs request, and
+  it is unrelated to pinning — but pinning freezes the affected versions, so
+  the eventual move to action majors that target Node 24 is now a deliberate
+  bump rather than something a tag would have done silently. Recorded, not
+  acted on.
+- The full-tree advisory audit reports **2 critical, 13 high, 8 moderate** in
+  devDependencies (vite, vitest, @vitest/mocker, brace-expansion, esbuild).
+  These do not ship, the blocking tier audits `--prod` only and is clean, and
+  that split is deliberate and documented in `ci.yml`. Worth a look for any
+  that is newly fixable; none blocks a merge.
+
+**Rollback requirement.** Revert the commit. Doing so restores mutable action
+references; prefer fixing forward.
+
+**Next recommended action.** Owner: branch protection remains the blocker —
+see the Sprint 1 report. A write to
+`PUT /repos/Carl-cab/carls-way/branches/master/protection` was *attempted*
+this session and refused by the egress proxy with "Write access to this GitHub
+API path is not permitted through this proxy", so enforcement is BLOCKED on
+owner action rather than merely unattempted.
