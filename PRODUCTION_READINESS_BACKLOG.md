@@ -706,3 +706,35 @@
 
 **Total: 1,532+ hours, ~12 weeks, multiple teams**
 
+
+---
+
+## Sprint 1 (2026-10-25) — status changes, with evidence
+
+Appended rather than re-marked in place, per the governance rule: an item moves
+only when a change verifies it, naming the evidence. Nothing below is marked
+complete on the strength of an unmerged PR.
+
+| Item | Change | Evidence |
+|---|---|---|
+| GitHub Actions supply-chain pinning | *(new)* → **PARTIAL** | All seven `uses:` pinned to commit SHAs taken from this repo's CI run on `6927ebd`; `lib/__tests__/workflow-action-pinning.test.ts` enforces it; mutation-checked. PR #68, **unmerged** — `master` still carries mutable tags |
+| Production dependency advisories | *(new)* → **BLOCKED** | `next@16.3.8` on `master` carries two unauthenticated RCE advisories and a DoS, all patched `>=16.4.1`. PR #69 bumps to `16.4.3`, `pnpm audit --prod` clean. BLOCKED because only a merge fixes `master` |
+| Database backup and restore verification | NOT RUN → **PARTIAL** | Runbook executed end to end against synthetic production-shaped data: restore exit 0 / 0.20 s, `verify-migrate.sql` 0 non-OK rows, counts identical, reconciliation 7/7 PASS non-vacuously, app suite passed against the restore, teardown clean. Negative cases prove each check can fail. `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`. **Production rehearsal still NOT RUN** |
+| Branch protection enforcing required checks | BLOCKED → **BLOCKED** (now proven) | A `PUT` to `/branches/master/protection` was *attempted* and refused: "Write access to this GitHub API path is not permitted through this proxy" (403). Previously inferred from a read 403; now established by attempt |
+| Secret scanning in CI | PARTIAL → **PARTIAL** (unchanged, reason narrowed) | Gitleaks runs on every PR into `master`, full history, pinned by version and SHA256, `--redact`, SARIF `commitMessage` stripped. PARTIAL now for one reason only: not enforced by branch protection |
+| Static analysis (CodeQL) in CI | PARTIAL → **PARTIAL** (unchanged, reason narrowed) | Runs on every PR and weekly, least-privilege, succeeded on `6927ebd`. PARTIAL only because not enforced |
+| Redis-backed rate limiting in production | PARTIAL → **PARTIAL** (unchanged) | PR #67 removes the never-recovers latch and reports health on an observation; PR #71 validates the client identity and reports its provenance. Neither makes shared limiting VERIFIED: counters remain per serverless instance and nothing scrapes the degradation signal |
+| Header trust (`clientIdentifier`) | unverified → **unverified, now answerable** | PR #71 adds `clientIdentity().source`. The platform's actual behaviour is still unknown — Vercel's docs are unreachable (`403 CONNECT`) — but one authenticated production request now settles it |
+
+### Explicitly NOT advanced
+
+- **Phase 0** stays **NOT RUN**. The procedure is validated; no production
+  backup was inspected, no production restore performed. Restore duration
+  (0.20 s on a trivial dataset) is not an RTO input.
+- **Vercel operational verification** stays **NOT RUN** in every particular —
+  production SHA, health, Redis behaviour, `CRON_SECRET`, cron firing, logs,
+  error monitoring, alert ownership. Both `api.vercel.com` and the deployment
+  host answer `403 CONNECT`; no Vercel CLI and no token in this environment.
+- **Bank linking, domestic money movement and cross-border movement** are
+  unchanged. No live flag was touched; both default off. Sprint 1 was security
+  and recovery foundations and moved none of the three business gates.

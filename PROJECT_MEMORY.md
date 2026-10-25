@@ -900,3 +900,79 @@ restores a known high-severity credential-exposure path; prefer fixing forward.
 **Next recommended action.** Owner: enforce branch protection so a failing
 `dependency audit` actually blocks a merge. Engineering: header-trust
 boundaries.
+
+---
+
+## 2026-10-25 — Sprint 1 documentation: status records brought current
+
+**Purpose and scope.** Sprint 1's engineering sits on five branches with open
+PRs; this brings the three status records in line with what is actually true of
+`master`, and records what Sprint 1 did and did not establish.
+
+**The stalest claim, corrected.** `CURRENT_STATUS.md` read "verified against
+commit `6d8861c`" with "57 files / 821 tests" while `master` had moved on three
+times (`1d4d783`, `c2859f6`, `6927ebd`) and the suite had reached 832. Both
+numbers were stale in the direction that invites trust — a file that reads as
+confirmation, confirming something four commits old. This is the second time
+this file has needed that correction; the first was a stale *date* on current
+content, and the note about it is still in the file.
+
+**Task G: coverage inventoried rather than expanded.** Every area the sprint
+named already has isolated coverage — duplicate financial requests, concurrent
+transfer execution, Redis failure during sensitive operations, webhook delivery
+failure and retries, dead-letter recovery, unknown transfer outcomes, ledger
+consistency, reconciliation discrepancies, migration interruption. My first
+sweep appeared to show gaps in dead-letter, webhook-retry and unknown-outcome
+coverage; that was a too-narrow grep (hyphens and camelCase), and checking
+variants found nine, three and eleven files respectively. **No tests were added
+for Task G**, because adding them would have been duplicating coverage to look
+productive. The suite runs in sandbox only; no production ledger was touched
+and no real money moved.
+
+**Status changes recorded.** `scripts/status/readiness.json` gains two rows
+(Actions supply-chain pinning; production dependency advisories), and four rows
+have their evidence rewritten. `PRODUCTION_READINESS_BACKLOG.md` gains an
+appended Sprint 1 block rather than in-place re-marking, per the governance
+rule. Owner actions are now ordered with PR #69 first, because `master` is
+carrying two unauthenticated RCEs.
+
+**Three things deliberately NOT advanced**, stated because a sprint report is
+where false completion gets manufactured:
+
+- **Phase 0 stays NOT RUN.** The procedure is validated synthetically; no
+  production backup was inspected and no production restore performed. The
+  0.20 s restore duration is not an RTO input and is labelled as such
+  everywhere it appears.
+- **Vercel operational verification stays NOT RUN in every particular** —
+  production SHA, health, Redis behaviour, `CRON_SECRET`, cron firing, logs,
+  error monitoring, alert ownership. Both `api.vercel.com` and the deployment
+  host answer `403 CONNECT`, re-confirmed today; no CLI, no token.
+- **No business gate moved.** Bank linking, domestic movement and cross-border
+  movement are where they were. Both live flags remain off and neither was
+  touched. Sprint 1 was security and recovery foundations.
+
+**Financial or security behaviour affected.** None. Documentation and readiness
+data only.
+
+**Tests run and results.** Full suite on this branch **57 files / 832 tests
+passing** (documentation-only on top of `master`), typecheck clean, lint
+0 errors / 28 warnings, `readiness.json` parses and the report renders.
+
+**Commit / PR.** This entry's own commit on branch `docs/sprint1-status`; the
+SHA is in the commit message. Carries the `next` 16.4.3 bump ported from PR #69
+so CI is green. Not merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The pattern worth carrying out of this sprint: two
+dependency advisories reached `master` in five days, both *after* its last
+green run, and both were found only because an unrelated PR re-ran the audit.
+Green CI on an unchanged tree is not evidence of a clean tree. Dependabot
+alerts are named in `ci.yml` as the backstop and have never been confirmed
+enabled — that is now the first-order gap, ahead of anything else in the CI
+configuration.
+
+**Rollback requirement.** Revert the commit; documentation only.
+
+**Next recommended action.** Owner: PR #69, then branch protection, then
+confirm Dependabot.

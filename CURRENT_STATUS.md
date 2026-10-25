@@ -1,23 +1,47 @@
 # Manna — Current Status
 
-Last updated: 2026-10-19 — verified against commit `6d8861c` on `master`
-(PR #63 merged: decision 0005 Phase 1 hardening of `/api/migrate`), plus the
-Phase 2 migration-versioning branch described below.
+Last updated: **2026-10-25** — verified against commit `6927ebd` on `master`
+(PR #66 merged: `follow-redirects` pinned). `master` was re-fetched at the
+start of Sprint 1 and had not moved in four days.
 Command-level evidence for the preceding baseline:
-`docs/audits/2026-10-17-baseline.md`.
+`docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
+`docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Verified on the Phase 2 tree, on a database created fresh for the run:
-**57 files / 821 tests** pass, typecheck clean, lint 0 errors / 28 warnings,
-build clean. Earlier baselines on this file: 55 files / 778 tests at
-`4e63bb9`, 56 / 788 at `42dbba6`.
+Measured on `master` at `6927ebd`, on a database created fresh for the run and
+with the CI fixture applied: **57 files / 832 tests** pass, typecheck clean,
+lint 0 errors / 28 warnings, build clean. Earlier baselines on this file:
+55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`.
+
+**The previous header claimed verification against `6d8861c` and "57 files /
+821 tests" while `master` had moved on three times (`1d4d783`, `c2859f6`,
+`6927ebd`) and the suite had reached 832.** Both numbers were stale in the
+direction that invites trust, which is the failure this file has already been
+corrected for once.
+
+## ⚠ Two things on this list are worse than "unverified"
+
+**1. `master` carries two unauthenticated remote-code-execution advisories.**
+`next@16.3.8` is inside the vulnerable range of three advisories — two
+unauthenticated RCE (Image Optimization; `use cache` typed arrays,
+GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r) — all patched in
+`>=16.4.1`. PR #69 bumps to `16.4.3` and clears `pnpm audit --prod`, and is
+**unmerged**. Until it merges this is live on a public deployment.
+
+**2. Nothing watches an unchanged tree.** Both that advisory set and the
+`follow-redirects` one five days earlier reached `master` *after* its last
+green CI run, and both were found only because an unrelated PR happened to
+re-run the audit. Dependabot alerts are named in `ci.yml` as the durable
+backstop but have never been confirmed enabled.
 
 **What is NOT verified, stated here because the rest of this file reads as
 confirmation:** nothing about the deployment. `api.vercel.com` and the
-production host both return `403 CONNECT` from this environment's egress
-proxy, so the production SHA, whether `REDIS_URL` or `CRON_SECRET` is set,
-whether the cron fires, and deployment health are all unverified rather than
-passing. `master` is also still `protected: false`, so none of the six
-passing CI checks is enforced.
+production host both return `403 CONNECT` from this environment's egress proxy
+— re-confirmed 2026-10-25 — so the production SHA, whether `REDIS_URL` or
+`CRON_SECRET` is set, whether the cron fires, and deployment health are all
+unverified rather than passing. `master` is also still `protected: false` with
+no rulesets, so none of the six passing CI checks is enforced; a write to the
+protection API from this environment is refused by the egress proxy, so that
+is blocked on owner action rather than unattempted.
 
 The header previously read "2026-06-28 (Phase B3.2b Settlement Balance
 Executor complete)" while the body had been revised as recently as
