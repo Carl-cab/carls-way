@@ -38,21 +38,95 @@ import { join } from 'node:path';
 
 const WORKFLOW_DIR = join(process.cwd(), '.github', 'workflows');
 
-/** `uses:` lines, with the file and line number so a failure is locatable. */
+/**
+ * Matches a `uses` step, in every spelling YAML accepts for that key.
+ *
+ * The naive form — `/uses:\s*(\S+)/` — has a bypass, and it was in the first
+ * version of this file. YAML allows whitespace before the colon and allows the
+ * key to be quoted, so all of these set the key `uses` and all of them run:
+ *
+ *     - uses: owner/action@v4
+ *     - uses : owner/action@v4
+ *     - "uses": owner/action@v4
+ *     - 'uses': owner/action@v4
+ *
+ * Verified against a YAML parser: each parses to `{uses: "owner/action@v4"}`.
+ * A matcher requiring a bare `uses:` skips the other three, and because the
+ * remaining steps still satisfy the reference floor below, the suite would pass
+ * while a mutable reference merged. A guard with a bypass is worse than no
+ * guard, because it is trusted.
+ *
+ * Parsing the YAML properly would close this more thoroughly, but no YAML
+ * parser is available to this project and adding a dependency to lint two
+ * files is out of proportion. Hence a deliberately permissive regex, with the
+ * bypass spellings pinned by their own tests below.
+ */
+const USES_LINE = /^\s*(?:-\s*)?["']?uses["']?\s*:\s*(\S+)/;
+/** Same tolerance, unanchored, for the belt-and-braces sweep. */
+const USES_ANYWHERE = /["']?uses["']?\s*:\s*([^\s#]+)/;
+
+/** Action references in one file's text, with line numbers for locatability. */
+function refsIn(text: string): Array<{ line: number; value: string }> {
+  const out: Array<{ line: number; value: string }> = [];
+  text.split('\n').forEach((raw, i) => {
+    // Skip comment lines: the explanatory prose above several steps mentions
+    // action names, and a comment is not an execution.
+    if (/^\s*#/.test(raw)) return;
+    const m = USES_LINE.exec(raw);
+    if (m) out.push({ line: i + 1, value: m[1] });
+  });
+  return out;
+}
+
+/** `uses` lines across the real workflow directory. */
 function usesLines(): Array<{ file: string; line: number; value: string }> {
   const out: Array<{ file: string; line: number; value: string }> = [];
   for (const file of readdirSync(WORKFLOW_DIR).filter((f) => /\.ya?ml$/.test(f))) {
-    const text = readFileSync(join(WORKFLOW_DIR, file), 'utf8');
-    text.split('\n').forEach((raw, i) => {
-      // Skip comment lines: the explanatory prose above several steps mentions
-      // action names, and a comment is not an execution.
-      if (/^\s*#/.test(raw)) return;
-      const m = /^\s*(?:-\s*)?uses:\s*(\S+)/.exec(raw);
-      if (m) out.push({ file, line: i + 1, value: m[1] });
-    });
+    for (const r of refsIn(readFileSync(join(WORKFLOW_DIR, file), 'utf8'))) {
+      out.push({ file, line: r.line, value: r.value });
+    }
   }
   return out;
 }
+
+describe('the matcher itself, against the spellings that bypassed it', () => {
+  // These run on synthetic text rather than the real files, because the point
+  // is to prove the matcher sees a form that is NOT currently in the repo. A
+  // guard can only be trusted if its blind spots have been probed directly.
+  it.each([
+    ['bare', '      - uses: owner/action@v4'],
+    ['space before colon', '      - uses : owner/action@v4'],
+    ['wide space before colon', '      - uses   : owner/action@v4'],
+    ['double-quoted key', '      - "uses": owner/action@v4'],
+    ['single-quoted key', "      - 'uses': owner/action@v4"],
+    ['not a list item', '    uses: owner/action@v4'],
+  ])('sees a %s uses step', (_label, line) => {
+    expect(refsIn(line)).toEqual([{ line: 1, value: 'owner/action@v4' }]);
+  });
+
+  it('ignores a commented-out reference', () => {
+    expect(refsIn('      # - uses: owner/action@v4')).toEqual([]);
+  });
+
+  it('would flag each bypass spelling as unpinned', () => {
+    // The assertion that matters: every spelling reaches the SHA check, so a
+    // mutable reference cannot hide behind YAML syntax.
+    const lines = [
+      '      - uses : owner/action@v4',
+      '      - "uses": owner/action@main',
+      "      - 'uses': owner/action@v3",
+    ].join('\n');
+    const unpinned = refsIn(lines).filter(({ value }) => !/@[0-9a-f]{40}$/.test(value));
+    expect(unpinned).toHaveLength(3);
+  });
+
+  it('accepts a SHA-pinned reference in any spelling', () => {
+    const sha = 'a'.repeat(40);
+    const lines = [`      - uses : owner/action@${sha}`, `      - "uses": owner/action@${sha}`].join('\n');
+    const unpinned = refsIn(lines).filter(({ value }) => !/@[0-9a-f]{40}$/.test(value));
+    expect(unpinned).toEqual([]);
+  });
+});
 
 describe('GitHub Actions supply chain', () => {
   it('finds the workflows it is supposed to be guarding', () => {
@@ -93,7 +167,7 @@ describe('GitHub Actions supply chain', () => {
       const text = readFileSync(join(WORKFLOW_DIR, file), 'utf8');
       text.split('\n').forEach((raw, i) => {
         if (/^\s*#/.test(raw)) return;
-        if (!/^\s*(?:-\s*)?uses:\s*\S+@[0-9a-f]{40}/.test(raw)) return;
+        if (!/^\s*(?:-\s*)?["']?uses["']?\s*:\s*\S+@[0-9a-f]{40}/.test(raw)) return;
         if (!/#\s*v?\d/.test(raw)) unlabelled.push(`${file}:${i + 1}`);
       });
     }
@@ -109,7 +183,7 @@ describe('GitHub Actions supply chain', () => {
       const text = readFileSync(join(WORKFLOW_DIR, file), 'utf8');
       text.split('\n').forEach((raw, i) => {
         if (/^\s*#/.test(raw)) return;
-        const m = /uses:\s*([^\s#]+)/.exec(raw);
+        const m = USES_ANYWHERE.exec(raw);
         if (!m) return;
         const ref = m[1];
         if (ref.startsWith('./')) return;

@@ -965,8 +965,10 @@ intended test.
 actually at 57 / 832 — stale by eleven tests before this change touched the
 line, which is exactly the drift the sentence beneath it warns about.
 
-**Commit / PR.** This entry's own commit on branch `ci/pin-actions-to-shas`;
-the SHA is in the commit message. Not merged.
+**Commit / PR.** Commit `f5d0554` on branch `ci/pin-actions-to-shas`, PR
+**#68**, with `371a287` porting the `next` 16.4.3 security bump from PR #69.
+This entry's own corrections follow in a later commit on the same branch. Not
+merged.
 
 **Migration impact.** None.
 
@@ -995,3 +997,76 @@ see the Sprint 1 report. A write to
 this session and refused by the egress proxy with "Write access to this GitHub
 API path is not permitted through this proxy", so enforcement is BLOCKED on
 owner action rather than merely unattempted.
+
+---
+
+## 2026-10-25 — two review corrections on the Actions pinning (PR #68)
+
+**Purpose and scope.** Review of `f5d0554` found two defects. Both real; one is
+a bypass in the guard that commit added.
+
+**1. The guard had a bypass (Minor, CWE-829).** The matcher required a bare
+`uses:`. YAML accepts whitespace before the colon and a quoted key, so all of
+these set the key `uses` and all of them run:
+
+```yaml
+- uses: owner/action@v4
+- uses : owner/action@v4
+- "uses": owner/action@v4
+- 'uses': owner/action@v4
+```
+
+Verified against a YAML parser: each parses to `{uses: "owner/action@v4"}`. A
+matcher requiring the bare form skips the other three, and because the
+remaining steps still satisfy the seven-reference floor, **the suite would pass
+while a mutable reference merged**. A guard with a bypass is worse than no
+guard, because it is trusted.
+
+All three matchers in the file — the line scanner, the legibility check and the
+belt-and-braces sweep — now tolerate optional quotes and whitespace. Parsing
+the YAML properly would be more thorough, but no YAML parser is available to
+this project and adding a dependency to lint two files is out of proportion;
+the reviewer said the same. So the blind spots are pinned by tests instead.
+
+**The restructuring is the substantive part.** The scanner is now a function
+over *text*, so the bypass spellings can be probed directly with synthetic
+input rather than by mutating the real workflows. Six spellings are asserted
+visible, a commented-out reference asserted ignored, and two cases assert that
+every spelling reaches the SHA check. Mutation-checked: restoring the narrow
+matcher fails five of them.
+
+That matters beyond this file. The previous version could only test what was
+already in `.github/workflows`, which means it could never have tested a form
+the repository does not use — exactly where a bypass lives.
+
+**2. The entry did not name its PR or SHA (Minor).** Corrected: commit
+`f5d0554`, PR **#68**, with `371a287` porting the `next` security bump. The
+learning recorded on PR #67 — that an entry cannot contain its own introducing
+SHA — explains why it arrives a commit later, but it does not excuse omitting
+the PR number, which was knowable at the time.
+
+**Financial or security behaviour affected.** None in the application. A CI
+supply-chain guard that could be bypassed by YAML syntax now cannot be.
+
+**Tests run and results.** 13 cases in
+`lib/__tests__/workflow-action-pinning.test.ts` (9 new, 4 → 13). Full suite
+**58 files / 845 tests passing** (836 + 9), typecheck clean, lint 0 errors /
+28 warnings.
+Mutation-checked: narrowing `USES_LINE` back to `uses:` fails five cases.
+
+**Commit / PR.** This entry's own commit on branch `ci/pin-actions-to-shas`,
+PR **#68**; the SHA is in the commit message.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The guard is a regex, not a parser. It now covers every
+spelling of the key that YAML permits for a mapping, verified against a parser,
+but a sufficiently exotic construction (a merge key, an anchor expanding to a
+`uses` mapping) would still slip past. Recorded rather than built for: those
+forms do not occur in hand-written workflows, and the cost of a YAML dependency
+is not justified by them.
+
+**Rollback requirement.** Revert the commit; the guard returns to a state where
+`uses : owner/action@v4` is invisible to it.
+
+**Next recommended action.** Unchanged: PR #69 first.
