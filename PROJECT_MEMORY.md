@@ -923,8 +923,9 @@ zero stderr, 0.20 s. `verify-migrate.sql`: zero non-`OK` rows.
 Source/target row counts identical. `reconciliation-check.sql`: **7/7 PASS**,
 non-vacuously — the dataset carries one completed internal payment with both
 ledger legs and opening balances, because an empty database passes all seven
-checks for free. Application suite against the restored database: **58 files /
-836 tests passing**. Teardown left zero rehearsal databases and zero probe
+checks for free. Application suite against the restored database: **57 files /
+832 tests passing** (this branch's count). Teardown left zero rehearsal
+databases and zero probe
 roles.
 
 **Negative cases, which are the substance.** Dropping
@@ -934,9 +935,13 @@ grants → 114 unreachable rows (20 tables × 4 privileges + 17 sequences × 2);
 with the full grant set → 0. The last pair matters together: a probe returning
 0 means nothing unless it can return non-zero.
 
-**Financial or security behaviour affected.** None. One new read-only SQL
-fixture, one audit document, and a correction to a runbook. No application
-code.
+**Financial or security behaviour affected.** None in the application. The new
+SQL fixture is **not** read-only — it runs `ALTER TABLE` and several `INSERT`s
+— so it is described here as what it is: a fixture that writes, intended only
+for a disposable synthetic source database. Calling it read-only, as a draft of
+this entry did, would mislead an operator about what happens if it is pointed
+at the wrong database. Otherwise: one audit document and a correction to a
+runbook. No application code.
 
 **Four findings, one of them a defect in a verification step.**
 
@@ -976,9 +981,12 @@ code.
    any fault was injected, which is the strongest evidence here that step 3b
    works.
 
-**Tests run and results.** Full suite **58 files / 836 tests passing**,
-typecheck clean, lint 0 errors / 28 warnings. The suite was additionally run
-against the restored database as runbook step 4, with the same result.
+**Tests run and results.** Full suite **57 files / 832 tests passing** on this
+branch, typecheck clean, lint 0 errors / 28 warnings. The suite was
+additionally run against the restored database as runbook step 4, with the same
+result. (A draft said 58 / 836, which is the count on the companion
+`ci/pin-actions-to-shas` branch — a number measured on one tree and recorded
+against another, the same defect as the missing source-preparation step.)
 
 **Commit / PR.** This entry's own commit on branch
 `ops/phase0-synthetic-rehearsal`; the SHA is in the commit message. Carries the
@@ -993,9 +1001,103 @@ production scale and must not be cited as an RTO input. Backup availability,
 recovery point, production restore duration, and production ownership and
 privileges are all still NOT RUN and need the owner-executed rehearsal.
 
-**Rollback requirement.** Revert the commit; documentation and one read-only
-SQL fixture.
+**Rollback requirement.** Revert the commit; documentation and one SQL fixture
+that writes to a disposable synthetic database and is referenced by nothing in
+the application.
 
 **Next recommended action.** Owner: merge PR #69 first (two unauthenticated
 RCEs), then authorize the Phase 0 production rehearsal with a designated
 operator and an isolated target.
+
+---
+
+## 2026-10-25 — five review corrections on the Phase 0 rehearsal (PR #70)
+
+**Purpose and scope.** Review of `225197c` found five defects, two of them
+Major. All five were verified by measurement before changing anything, and all
+five were real. Two of them are the same error I had just finished *correcting*
+in that very commit.
+
+**1. The audit was not reproducible from its own inputs (Major).** The source
+preparation included an ad-hoc `INSERT` typed at the command line, present in
+neither the committed fixture nor the write-up. Measured: from
+`test-schema.sql` + `restore-rehearsal-synthetic.sql` alone the source has
+**4** ledger entries, not the 6 reported, and
+`user_wallets_exactly_match_ledger` **FAILS** with 2 discrepancies — so the
+documented 7/7 PASS could not follow from the recorded inputs. The numbers were
+genuinely measured; they were measured on a state nobody else could recreate,
+which for evidence purposes is the same as not having them. The step is now
+inside the fixture, driven from `WHERE balance_cad <> 0` rather than hard-coded
+ids so a future seed with a balance is covered automatically. Re-verified: the
+two committed files alone now give 6 entries and 7/7 PASS.
+
+**2. The corrected schema gate still had a hole (Major).** The previous entry
+records fixing a gate that counted only `ABSENT` when the script also emits
+`MISSING`. The fix counted `MISSING|ABSENT` — and the script emits a **fourth**
+wording, `WRONG TYPE — <type>`, for a money column that is present but not
+numeric. A restore with `transactions.amount` as `REAL` passed the corrected
+gate. That is precisely the error being fixed, committed inside the fix.
+
+The gate is now a **whitelist**: every row must begin with `OK`. A whitelist
+cannot be incomplete in the dangerous direction; a blacklist of failure words
+can, and twice was.
+
+**3. A gate that cried wolf, found while verifying the fix.** The first
+whitelist used aligned `psql` output and reported **2** non-`OK` rows on a
+database that was clean — the script's later sections print their own header
+rows, two beginning `problem | user_id | …`, which the filter counted as
+failures. A gate that fails on every clean run is ignored within a week. Fixed
+with `-t -A` (tuples only). Caught because the fix was tested rather than
+assumed.
+
+**4. `psql` failure read as a clean result (Minor).** `grep`/`awk` over the
+output of a failed `psql` sees empty input and prints `0`. Now
+`-v ON_ERROR_STOP=1` with an explicit exit check that prints
+`SCHEMA CHECK DID NOT RUN — this is not a pass`. Verified against a nonexistent
+database.
+
+**5. A destructive fixture described as read-only (Minor).** The entry above
+called it "one new read-only SQL fixture". It runs `ALTER TABLE` and several
+`INSERT`s, one of which fabricates a ledger row for every user with a balance.
+Against a real database that is a schema change plus invented financial
+history. Corrected in both places in that entry, and the fixture now opens with
+a warning naming itself as writing and contrasting it with
+`verify-migrate.sql` and `reconciliation-check.sql`, which genuinely are
+read-only and safe anywhere.
+
+**6. A second misattributed number, found by re-running everything.** The audit
+reported step 4 as "58 files / 836 tests". That is the count on the companion
+`ci/pin-actions-to-shas` branch, which carries one extra test file; on this
+branch it is **57 / 832**. Same defect as #1 — a number measured on one tree
+and recorded against another. The rule now stated in the audit is that a number
+belongs to the tree it was measured on.
+
+**Also added:** the audit now records the complete command sequence in run
+order — source preparation, dump and restore, the gate, counts, all four fault
+injections, the privilege probe both ways, the suite, and teardown — because
+the omission of one command is what made the original unreproducible.
+
+**Financial or security behaviour affected.** None in the application. One SQL
+fixture that writes to a disposable database, one audit document, one runbook.
+
+**Tests run and results.** Entire documented sequence re-executed verbatim from
+the committed files: source 6 ledger entries; restore exit 0, 0 stderr, 0.23 s;
+gate 0 non-`OK`; 7 users; reconciliation 7 PASS / 0 FAIL; dropped column → gate
+1; `WRONG TYPE` → gate 1; unequal legs → 3 FAIL; nonexistent database → DID NOT
+RUN; privilege probe 114 → 0; suite 57 files / 832 tests; teardown 0 databases
+and 0 roles. Full suite on the branch **57 files / 832 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/phase0-synthetic-rehearsal`, PR **#70**; the SHA is in the commit message.
+
+**Migration impact.** None.
+
+**Unresolved findings.** Phase 0 is still **NOT RUN**: no production backup
+inspected, no production restore performed, restore duration not transferable.
+
+**Rollback requirement.** Reverting restores an unreproducible audit and a
+schema gate that passes a wrongly typed money column. Fix forward.
+
+**Next recommended action.** Unchanged: PR #69 first (two unauthenticated
+RCEs), then branch protection.

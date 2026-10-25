@@ -81,30 +81,57 @@ psql "$RESTORE_TARGET_URL" -f scripts/verify-migrate.sql
 
 This is the existing read-only check. **Every row must read `OK`.**
 
-Be precise about what a failure looks like, because the script uses *two*
-words and an earlier version of this runbook named only one of them:
+Gate on that, and *only* on that. The script can report a problem in four
+different wordings, and enumerating them is how you miss one:
 
-| Section of `verify-migrate.sql` | Failure word |
+| Section of `verify-migrate.sql` | Failure wording |
 |---|---|
 | 1 — tables | `MISSING` |
 | 2 — columns | `MISSING` |
 | 3-4 — unique indexes behind upserts | `MISSING — upsert will fail` |
-| 5 — money column types | `ABSENT` |
+| 5 — money column types, absent | `ABSENT` |
+| 5 — money column types, present but not numeric | `WRONG TYPE — <type>` |
 
-This runbook previously said the pass criterion was "no `ABSENT` objects".
-That is wrong in the dangerous direction: a dropped **table, column or index**
-reports `MISSING`, so an operator checking only for `ABSENT` sees nothing and
-concludes the schema is intact. Measured during the synthetic rehearsal —
-dropping `transactions.correlation_id` produced `transactions.correlation_id |
-MISSING` and zero occurrences of the word `ABSENT`.
+Two earlier versions of this runbook got the gate wrong, both by listing
+failures instead of requiring success:
 
-So: grep for neither word. Require every row to read `OK`, or count the rows
-that do not:
+- The first said the criterion was "no `ABSENT` objects". A dropped **table,
+  column or index** reports `MISSING`, so an operator checking for `ABSENT`
+  saw nothing. Measured: dropping `transactions.correlation_id` produced
+  `transactions.correlation_id | MISSING` and zero occurrences of `ABSENT`.
+- The second counted `MISSING|ABSENT` — and still missed `WRONG TYPE`, so a
+  money column restored as `REAL` or `DOUBLE PRECISION` passed the gate. That
+  is the same mistake as the first, committed inside the fix for it.
+
+So require every row to begin with `OK`. A whitelist cannot be incomplete in
+the dangerous direction; a blacklist of failure words can, and twice has:
 
 ```bash
-psql "$RESTORE_TARGET_URL" -f scripts/verify-migrate.sql | grep -cE 'MISSING|ABSENT'
+psql -v ON_ERROR_STOP=1 -t -A -F'|' "$RESTORE_TARGET_URL" \
+     -f scripts/verify-migrate.sql > verify.out || {
+  echo "SCHEMA CHECK DID NOT RUN — this is not a pass"; exit 1
+}
+awk -F'|' 'NF>=2 && $2 !~ /^OK/ {n++} END {print n+0}' verify.out
 # must be 0
 ```
+
+Three details, each of which was wrong in a draft of this command:
+
+- **`-t -A`** (tuples only, unaligned) matters. With aligned output the script's
+  later sections print their own header rows — two of them begin
+  `problem | user_id | …` — and a naive filter counts those headers as
+  failures. Measured: the aligned form reported **2** non-`OK` rows on a
+  database that was in fact clean, which is a gate that cries wolf every run
+  and therefore gets ignored.
+- **`ON_ERROR_STOP=1` and the `||` exit check** matter as much as the pattern.
+  Without them a `psql` that fails before emitting any row feeds empty input to
+  the counter, which prints `0` — a failed schema check reported as clean.
+- The pattern is `!~ /^OK/`, a **whitelist**. Anything else counts, including a
+  wording nobody has thought of yet.
+
+Verified against three databases: a clean restore reports `0`, a restore with a
+money column altered to `REAL` reports `1` (`transactions.amount | WRONG TYPE —
+REAL`), and a nonexistent target reports `DID NOT RUN` rather than `0`.
 
 Any non-`OK` row means the backup predates a migration, which is exactly the
 discovery worth making now rather than during an outage.
@@ -315,7 +342,7 @@ hold**:
 | Finding | Why it matters |
 |---|---|
 | Restore completed, and how long it took | Measured restore duration — one input to an RTO, not the RTO |
-| `verify-migrate.sql` reported every row `OK` (count of `MISSING`/`ABSENT` rows = 0) | The backup is current with the code |
+| `verify-migrate.sql` ran successfully AND every row began with `OK` (count of non-`OK` rows = 0) | The backup is current with the code |
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
 | **All seven** rows from `scripts/reconciliation-check.sql` report `PASS` — paste the output | The financial invariants survived. Aggregate and per-payment checks fail independently, and errors cancel in aggregates, so a subset is not evidence |

@@ -13,6 +13,14 @@
 -- proven to FAIL when the data is wrong, which is the part that actually
 -- matters. A verification step that cannot detect a bad restore is decoration.
 --
+-- ## THIS FILE WRITES. Point it only at a disposable database.
+--
+-- It runs `ALTER TABLE users ADD COLUMN` and several `INSERT`s, including one
+-- that inserts a ledger row for every user carrying a balance. Against a real
+-- database that is a schema change plus fabricated financial history. Unlike
+-- `scripts/verify-migrate.sql` and `scripts/reconciliation-check.sql`, which
+-- are read-only and safe anywhere, this one is not.
+--
 -- **This is not a production rehearsal and must never be reported as one.** It
 -- contains no customer data, exercises no production credential, and touches
 -- no production host. It validates the runbook's commands; it does not validate
@@ -76,6 +84,28 @@ INSERT INTO ledger_entries (user_id, account_type, entry_type, currency, debit, 
 VALUES
   (99001, 'wallet', 'opening_balance', 'CAD', 0, 100.00, NULL, 'synthetic opening balance'),
   (99002, 'wallet', 'opening_balance', 'CAD', 0, 100.00, NULL, 'synthetic opening balance');
+
+-- The source schema ALSO seeds its own users, and two of them carry a balance
+-- with no ledger entry: `splitpayera` and `splitpayerb` (9102, 9103) at 500.00
+-- CAD each. That is correct for a split-payment test, which has no interest in
+-- the ledger, and wrong for anything used as a reconciliation source — they
+-- make `user_wallets_exactly_match_ledger` report two discrepancies.
+--
+-- Reconciling them here, rather than by a command typed alongside this file,
+-- is what makes the rehearsal reproducible. An earlier version of this fixture
+-- omitted it and the audit's "7/7 PASS" came from an ad-hoc INSERT that was in
+-- neither the script nor the write-up: the numbers were measured but could not
+-- be recreated from the recorded inputs, which is as good as unevidenced.
+--
+-- Driven from the table rather than hard-coded ids, so a future fixture seed
+-- with a balance is covered automatically instead of silently reopening the
+-- same gap.
+INSERT INTO ledger_entries (user_id, account_type, entry_type, currency, debit, credit, description)
+SELECT id, 'wallet', 'opening_balance', 'CAD', 0, balance_cad,
+       'synthetic opening balance for a source-schema seed user'
+FROM users
+WHERE balance_cad <> 0
+  AND id NOT IN (99001, 99002);
 
 -- One completed internal payment, Alice -> Bob, 25 CAD.
 INSERT INTO transactions

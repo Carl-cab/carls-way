@@ -26,15 +26,78 @@ Local PostgreSQL 16.15, two throwaway databases per run, destroyed afterwards.
 Source built from `lib/__tests__/helpers/test-schema.sql` plus
 `scripts/restore-rehearsal-synthetic.sql`.
 
+## Commands, in the order run
+
+Recorded in full because an earlier version of this audit was **not
+reproducible from its own inputs**: the source preparation included an ad-hoc
+`INSERT` typed at the command line, present in neither the committed fixture
+nor this document, and without it the reconciliation reports 6/7 rather than
+7/7. The step is now inside
+`scripts/restore-rehearsal-synthetic.sql`, and what follows is the complete
+sequence. `$PG` is a local superuser URL for a throwaway PostgreSQL instance;
+no credential here reaches any real system.
+
+```bash
+# 1. Source preparation — schema fixture, then the synthetic dataset.
+psql "$PG/postgres" -c "CREATE DATABASE rehearsal_src"
+psql "$PG/rehearsal_src" -f lib/__tests__/helpers/test-schema.sql
+psql "$PG/rehearsal_src" -f scripts/restore-rehearsal-synthetic.sql
+psql "$PG/rehearsal_src" -tAc "SELECT count(*) FROM ledger_entries"      # 6
+
+# 2. Dump and restore into a separate target, timed.
+psql "$PG/postgres" -c "CREATE DATABASE rehearsal_tgt"
+pg_dump --format=custom --file=production-backup.dump "$PG/rehearsal_src"
+time pg_restore --no-owner --no-privileges \
+     --dbname "$PG/rehearsal_tgt" production-backup.dump   # exit 0, 0 stderr, 0.20s
+
+# 3. Schema gate (the corrected whitelist form).
+psql -v ON_ERROR_STOP=1 -t -A -F'|' "$PG/rehearsal_tgt" \
+     -f scripts/verify-migrate.sql > verify.out
+awk -F'|' 'NF>=2 && $2 !~ /^OK/ {n++} END {print n+0}' verify.out       # 0
+
+# 4. Counts and invariants.
+psql "$PG/rehearsal_tgt" -tAc "SELECT count(*) FROM users"              # 7
+psql "$PG/rehearsal_tgt" -f scripts/reconciliation-check.sql            # 7/7 PASS
+
+# 5. Fault injection — each in its own fresh restore of the same dump.
+psql "$PG/neg1" -c "ALTER TABLE transactions DROP COLUMN correlation_id"
+#   -> verify-migrate: transactions.correlation_id | MISSING   (gate reports 1)
+psql "$PG/neg2" -c "ALTER TABLE transactions ALTER COLUMN amount TYPE REAL"
+#   -> verify-migrate: transactions.amount | WRONG TYPE — REAL (gate reports 1)
+psql "$PG/neg3" -c "UPDATE ledger_entries SET credit = 20.00
+                    WHERE transaction_id = 99101 AND entry_type='payment_received'"
+#   -> reconciliation: 3 of 7 FAIL
+psql -v ON_ERROR_STOP=1 -t -A -F'|' "$PG/does_not_exist" -f scripts/verify-migrate.sql
+#   -> nonzero exit, gate reports DID NOT RUN rather than 0
+
+# 6. Privilege probe (NOLOGIN role, no grants, then the full set).
+psql "$PG/rehearsal_tgt" -c "CREATE ROLE manna_app_probe NOLOGIN"
+psql "$PG/rehearsal_tgt" -c "GRANT CONNECT ON DATABASE rehearsal_tgt TO manna_app_probe;
+                             GRANT USAGE ON SCHEMA public TO manna_app_probe"
+#   -> 114 unreachable rows (20 tables x 4 privileges + 17 sequences x 2)
+psql "$PG/rehearsal_tgt" -c "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO manna_app_probe;
+                             GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO manna_app_probe"
+#   -> 0 unreachable rows
+
+# 7. Application suite against the restore (destructive to its data — last).
+DATABASE_URL="$PG/rehearsal_tgt?sslmode=disable" pnpm test               # 57 files / 832 tests
+
+# 8. Teardown.
+psql "$PG/postgres" -c "DROP DATABASE IF EXISTS rehearsal_src"   # and tgt, neg1-3
+psql "$PG/postgres" -c "DROP ROLE IF EXISTS manna_app_probe"
+psql "$PG/postgres" -tAc "SELECT count(*) FROM pg_database WHERE datname LIKE 'rehearsal%'"  # 0
+rm -f production-backup.dump
+```
+
 ## Positive case
 
 | Step | Command | Result |
 |---|---|---|
 | 1 | `pg_dump --format=custom` then `pg_restore --no-owner --no-privileges` | exit **0**, **0** stderr lines, **0.20 s** |
-| 2 | `psql -f scripts/verify-migrate.sql` | **0** rows reading `MISSING` or `ABSENT` |
+| 2 | schema gate, whitelist form (above) | **0** rows failing to begin with `OK` |
 | 3a | row counts, source vs target | identical: `users=7 tx=1 ledger=6 audit=1` |
 | 3b | `psql -f scripts/reconciliation-check.sql` | **7/7 `PASS`** |
-| 4 | `DATABASE_URL=<target> pnpm test` | **58 files / 836 tests passing** |
+| 4 | `DATABASE_URL=<target> pnpm test` | **57 files / 832 tests passing** on this branch |
 | 5 | drop both databases and the probe role | 0 rehearsal databases, 0 probe roles remain |
 
 The dataset is deliberately the smallest one that satisfies the invariants
@@ -53,12 +116,23 @@ nothing like production's. Recorded for method, not for capacity planning.
 | Injected fault | Step that should catch it | Result |
 |---|---|---|
 | `ALTER TABLE transactions DROP COLUMN correlation_id` | 2 | **caught** — `transactions.correlation_id │ MISSING` |
+| `ALTER TABLE transactions ALTER COLUMN amount TYPE REAL` | 2 | **caught** — `transactions.amount │ WRONG TYPE — REAL`. Missed by the first corrected gate, which counted `MISSING│ABSENT` only |
+| point the gate at a nonexistent database | 2 | **caught** — reports `DID NOT RUN`, not `0` |
 | receiver credited 20.00 against a 25.00 payment (the "unequal legs" case the runbook describes) | 3b | **caught** — 3 of 7 checks `FAIL`: `internal_ledger_currency_debits_equal_credits`, `internal_payment_amounts_match_ledger`, `user_wallets_exactly_match_ledger` |
 | privilege probe with **no** grants applied | 4 (grants) | **114** unreachable rows (20 tables × 4 privileges + 17 sequences × 2) |
 | privilege probe with the full application grant set | 4 (grants) | **0** unreachable rows |
 
 The last two matter together: a probe that returns 0 is only meaningful if it
 can return non-zero, and it does.
+
+### A note on the test count
+
+Step 4 reports **57 files / 832 tests**, which is the suite on *this* branch.
+A draft of this audit said 58 / 836 — a count measured on the companion
+`ci/pin-actions-to-shas` branch, which carries one extra test file. Recording it
+here made a second number in this document unreproducible from this branch,
+the same defect as the missing source-preparation step. Both are corrected; the
+rule applied is that a number belongs to the tree it was measured on.
 
 ## Findings
 
