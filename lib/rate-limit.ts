@@ -313,8 +313,56 @@ export function rateLimitHeaders(result: RateLimitResult): Record<string, string
   };
 }
 
+/** Which header a client identity came from, or that none was usable. */
+export type ClientIdentitySource =
+  | 'x-vercel-forwarded-for'
+  | 'x-real-ip'
+  | 'x-forwarded-for'
+  | 'none';
+
+export interface ClientIdentity {
+  /** The rate-limit key. `'unknown-client'` when no header was usable. */
+  id: string;
+  /** Where it came from. Diagnostic only — never a trust decision. */
+  source: ClientIdentitySource;
+}
+
 /**
- * Client identifier for an unauthenticated request.
+ * Is this a syntactically plausible IP address?
+ *
+ * ## Why validate at all, given it does not stop spoofing
+ *
+ * It does not, and nothing here should be read as claiming it does: an attacker
+ * who can set the header can set it to a *valid* address just as easily as to
+ * garbage, and rotate it per request.
+ *
+ * What it does is narrow the key space from "any string the client sends" to
+ * "any string shaped like an IP". That removes a distinct class of problem from
+ * the rate limiter: a header carrying an empty value, a comma-joined list that
+ * slipped through, a hostname, or deliberate padding no longer becomes a
+ * *distinct Redis key*. Each unique key is a counter, and counters keyed on
+ * unvalidated client input are a memory and cardinality concern independent of
+ * whether the limit can be evaded.
+ *
+ * Deliberately permissive rather than exhaustive — this is a shape check, not
+ * an address parser. IPv4 dotted quad, or anything hex-and-colon that looks
+ * IPv6-ish, optionally with a zone or a bracketed port stripped by the caller.
+ */
+function looksLikeIp(value: string): boolean {
+  if (value.length === 0 || value.length > 45) return false;
+  // IPv4 dotted quad, each octet 0-255.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+    return value.split('.').every((o) => Number(o) <= 255);
+  }
+  // IPv6: hex groups and colons, at least one colon, optional %zone.
+  if (/^[0-9a-fA-F:]+(%[0-9a-zA-Z._-]+)?$/.test(value) && value.includes(':')) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve the client identity for an unauthenticated request, with provenance.
  *
  * ## Which part of X-Forwarded-For can be trusted
  *
@@ -323,37 +371,96 @@ export function rateLimitHeaders(result: RateLimitResult): Record<string, string
  * *leftmost* entries are whatever the client made up, and only the entry
  * appended by the nearest trusted proxy is authentic — the rightmost one.
  *
- * This read the leftmost entry. Every rate limit keyed on it could therefore be
- * bypassed outright: send a different `X-Forwarded-For: <random>` per request
- * and each attempt looks like a new client, so the counter never accumulates.
- * That removes the ceiling from login, registration and password reset at once.
+ * An earlier version read the leftmost entry. Every rate limit keyed on it
+ * could therefore be bypassed outright: send a different
+ * `X-Forwarded-For: <random>` per request and each attempt looks like a new
+ * client, so the counter never accumulates. That removes the ceiling from
+ * login, registration and password reset at once.
  *
- * `x-real-ip` is preferred where present because a proxy that sets it writes a
- * single address it observed directly, with no client-supplied prefix to strip.
+ * ## What is still unverified, stated rather than implied
  *
- * Falls back to a constant when no forwarding header is present, which makes the
- * limit global rather than per-client. That is the safe direction: it throttles
- * more, not less.
+ * The order below prefers `x-vercel-forwarded-for`, then `x-real-ip`, then the
+ * rightmost `x-forwarded-for` hop. **Which of these the platform actually sets
+ * — and therefore which a client cannot forge — has not been verified.**
+ * Vercel's documentation is unreachable from the engineering environment
+ * (`api.vercel.com` and the deployment host both answer `403 CONNECT` through
+ * the egress proxy), and third-party accounts of the behaviour contradict each
+ * other and the official docs.
  *
- * This is correct for a deployment sitting behind exactly one trusted proxy,
- * which is how Vercel serves this app. Behind a chain of N trusted proxies the
- * authentic entry is the Nth from the right; that needs a configured hop count
- * rather than a fixed rule, and should be revisited if the topology changes.
+ * So this function does **not** claim an unforgeable identity. It reports where
+ * the value came from, which is what makes the question answerable: an
+ * operator can compare `source` against what they expect for the deployment
+ * instead of taking a header's trustworthiness on faith. Until that is
+ * confirmed, treat every limit keyed on this as "best effort per apparent
+ * client", not "per client".
+ *
+ * ## The `'none'` case is an availability cliff, not merely a weak limit
+ *
+ * When no header is usable every caller shares the single key
+ * `'unknown-client'`. For `auth:login` the caller is keyed
+ * `${clientIdentifier(req)}:${email}`, so a collapse is still per-email. But
+ * `auth:register` (3/hour) and `schema:bootstrap` are keyed on the client
+ * alone — so a collapse makes those limits **global**: three registrations per
+ * hour for the whole platform, and a break-glass path any anonymous caller can
+ * exhaust for everyone.
+ *
+ * That is deliberately left as is. Both alternatives — refusing the request, or
+ * dropping the limit — are policy decisions about availability versus
+ * enforcement that belong to the owner, not to this function. It is recorded
+ * here and in `CLAUDE.md` so the choice is explicit rather than accidental.
  */
-export function clientIdentifier(req: { headers: { get(name: string): string | null } }): string {
-  const realIp = req.headers.get('x-real-ip')?.trim();
-  if (realIp) return realIp;
+export function clientIdentity(req: {
+  headers: { get(name: string): string | null };
+}): ClientIdentity {
+  // Platform-set on Vercel according to its documentation, and specifically
+  // described there as surviving an upstream proxy that overwrites
+  // x-forwarded-for. Preferred first for that reason — not because it has been
+  // confirmed unforgeable from here.
+  const vercel = req.headers.get('x-vercel-forwarded-for')?.trim();
+  if (vercel && looksLikeIp(vercel)) {
+    return { id: vercel, source: 'x-vercel-forwarded-for' };
+  }
 
+  // A proxy that sets this writes a single address it observed directly, with
+  // no client-supplied prefix to strip.
+  const realIp = req.headers.get('x-real-ip')?.trim();
+  if (realIp && looksLikeIp(realIp)) {
+    return { id: realIp, source: 'x-real-ip' };
+  }
+
+  // Rightmost hop only. Correct for a deployment behind exactly one trusted
+  // proxy, which is how Vercel serves this app. Behind a chain of N trusted
+  // proxies the authentic entry is the Nth from the right; that needs a
+  // configured hop count rather than a fixed rule, and should be revisited if
+  // the topology changes.
   const forwarded = req.headers.get('x-forwarded-for');
   if (forwarded) {
     const hops = forwarded
       .split(',')
       .map((hop) => hop.trim())
       .filter((hop) => hop.length > 0);
-    if (hops.length > 0) return hops[hops.length - 1];
+    for (let i = hops.length - 1; i >= 0; i -= 1) {
+      if (looksLikeIp(hops[i])) return { id: hops[i], source: 'x-forwarded-for' };
+    }
   }
 
-  return 'unknown-client';
+  // Falls back to a constant, which makes the limit global rather than
+  // per-client. See the note above: that throttles more, not less, but for
+  // client-keyed buckets it is an availability cliff rather than a safe
+  // default.
+  return { id: 'unknown-client', source: 'none' };
+}
+
+/**
+ * Client identifier for an unauthenticated request.
+ *
+ * Thin wrapper over `clientIdentity()`, kept because every call site wants the
+ * key and not the provenance. Callers that need to report *where* the identity
+ * came from — an operations diagnostic, not a trust decision — use
+ * `clientIdentity()` directly.
+ */
+export function clientIdentifier(req: { headers: { get(name: string): string | null } }): string {
+  return clientIdentity(req).id;
 }
 
 /** Test-only: clear in-process counters between cases. */

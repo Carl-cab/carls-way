@@ -455,8 +455,20 @@ arbitrary end user.
   **ownership**, which is the coupling that blocks audit immutability and what
   Phases 2-5 of
   `docs/decisions/0005-migration-privilege-separation.md` exist to resolve.
-  `clientIdentifier()` trusting `x-real-ip` first remains **unverified**, not
-  cleared.
+  `clientIdentifier()` resolution is now `x-vercel-forwarded-for` →
+  `x-real-ip` → rightmost `x-forwarded-for` hop, each validated as a
+  syntactically plausible IP, with `clientIdentity()` reporting which header
+  the value came from. **Which of those the platform actually sets — and
+  therefore which a client cannot forge — remains unverified, not cleared.**
+  `api.vercel.com` and the deployment host both answer `403 CONNECT` through
+  the engineering environment's egress proxy, so Vercel's own documentation
+  cannot be read from here, and third-party accounts contradict each other and
+  the official docs. Validation narrows the key space from "any string a client
+  sends" to "any string shaped like an IP"; it does **not** stop an attacker
+  rotating valid addresses, and nothing should describe it as doing so. Read
+  every limit keyed on this as "best effort per *apparent* client".
+  `clientIdentity().source` exists so the question is answerable from a real
+  request instead of from documentation.
   The operator limit's strength depends on a backend that can degrade
   silently. `REDIS_URL` **is set in production** (owner-reported 2026-10-20,
   name only), so the counter is nominally the shared 6/hour. But
@@ -485,6 +497,29 @@ arbitrary end user.
   PostgreSQL — which this endpoint always has, since it cannot run without
   `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
   the migration that it limits, so it belongs with Phase 2.
+- **Fail-closed by risk class is an open owner decision, with a
+  recommendation.** When shared rate limiting is lost — Redis unreachable, or
+  no usable client header — every bucket currently fails *open*: the request is
+  served under a weaker or collapsed limit. Whether that is right depends on
+  the bucket, and the two failure modes are not symmetrical:
+
+  | Bucket | Key | On Redis loss | On header loss (`source: 'none'`) | Recommended |
+  |---|---|---|---|---|
+  | `auth:login` | `client:email` | `5 × instances` per email | still per-email | **leave fail-open** — a refusal locks out real users and the per-email key bounds the damage |
+  | `auth:register` | client | `3 × instances` | **global 3/hour** | fail-open, but the collapse is an availability cliff worth alerting on |
+  | `auth:password-reset` | client | `3 × instances` | **global 3/hour** | as above |
+  | `money:send`, `money:transfer-execute` | user id | `N × instances` | unaffected — keyed on the authenticated user | **owner decision.** Refusing protects velocity limits; it also blocks customer payments during an infrastructure fault |
+  | `schema:migrate-operator` | admin id | `6 × instances` | unaffected | leave fail-open — see the Release 1.0 lockout note above |
+  | `schema:bootstrap` | client | `N × instances` | **global** — any anonymous caller can exhaust the break-glass for everyone | leave fail-open; refusing recreates the lockout this path exists to break |
+
+  The money buckets are the only genuine dilemma, and it is a business
+  judgement, not an engineering one: silently losing shared velocity protection
+  versus refusing legitimate payments during a Redis outage. **Not implemented
+  either way** — doing so unilaterally would either weaken a financial control
+  or interrupt customers. The buckets keyed on an authenticated user id are
+  unaffected by header loss, which narrows the question to Redis availability
+  alone.
+
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
   `ProviderEventRepository` both use `sql.json`) — an earlier note here claimed

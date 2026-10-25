@@ -900,3 +900,94 @@ restores a known high-severity credential-exposure path; prefer fixing forward.
 **Next recommended action.** Owner: enforce branch protection so a failing
 `dependency audit` actually blocks a merge. Engineering: header-trust
 boundaries.
+
+---
+
+## 2026-10-25 — Sprint 1 Task C: client identity gains provenance and validation
+
+**Purpose and scope.** `clientIdentifier()` returned the first non-empty
+`x-real-ip`, unvalidated, then the rightmost `x-forwarded-for` hop. It is the
+rate-limit key for `auth:login`, `auth:register`, `auth:password-reset`,
+`schema:bootstrap` and the webhook endpoints. Reworked into `clientIdentity()`,
+which resolves `x-vercel-forwarded-for` → `x-real-ip` → rightmost
+`x-forwarded-for`, validates each candidate as a syntactically plausible IP,
+and **reports which header the value came from**. `clientIdentifier()` is now a
+thin wrapper, so no call site changed.
+
+**What this does NOT do, stated first because it is the thing most likely to be
+overclaimed.** It does not make the identity unforgeable and it does not stop
+spoofing. An attacker who can set a header can send *valid* addresses and
+rotate them per request. Which of these headers the platform actually sets is
+still **unverified**: `api.vercel.com` and the deployment host both answer
+`403 CONNECT` through this environment's egress proxy — re-confirmed today —
+so Vercel's own documentation cannot be read from here, and third-party
+accounts contradict each other and the official docs.
+
+**What it does do.**
+
+1. **Narrows the key space** from "any string the client sends" to "any string
+   shaped like an IP". Each distinct key is a counter, so unvalidated client
+   input was also unbounded key cardinality in Redis, independent of whether
+   the limit could be evaded. A hostname, a sentence, an unsplit
+   comma-list, an out-of-range octet or 200 bytes of padding no longer becomes
+   a rate-limit key.
+2. **Falls through rather than discarding.** A junk value in the preferred
+   header no longer shadows a good value in a later one — otherwise an attacker
+   could *force* the collapse case deliberately by sending one junk header.
+   That is a new hazard the validation itself would have introduced, caught by
+   its own test.
+3. **Makes the open question answerable.** `clientIdentity().source` means an
+   operator can see which header a real request was keyed on, instead of my
+   asking the owner to find out what Vercel sends. That converts a blocked
+   question into a one-request observation.
+
+**Financial or security behaviour affected.** Rate-limit key derivation only.
+No limit value, no fail-open/closed policy, no money path. The collapse
+constant `'unknown-client'` is unchanged and now pinned by a test, deliberately,
+so changing it to a refusal cannot happen silently.
+
+**The fail-closed recommendation the sprint asked for** is now a table in
+`CLAUDE.md` under Known gaps, per bucket, distinguishing the two failure modes
+— Redis loss (`limit × instances`) and header loss (collapse to one key). They
+are not symmetrical: buckets keyed on an authenticated user id (`money:send`,
+`money:transfer-execute`, `schema:migrate-operator`) are *unaffected* by header
+loss, which narrows the money question to Redis availability alone. The money
+buckets are the only genuine dilemma and it is a business judgement — silently
+losing shared velocity protection versus refusing legitimate payments during an
+infrastructure fault. **Not implemented either way.** `auth:register`,
+`auth:password-reset` and `schema:bootstrap` key on the client alone, so a
+header collapse makes those limits *global*: three registrations an hour for
+the whole platform, and a break-glass path any anonymous caller can exhaust for
+everyone. Recommended to stay fail-open with an alert rather than become a
+refusal, since refusing recreates the Release 1.0 lockout shape.
+
+**Tests run and results.** 20 new cases in
+`lib/__tests__/client-identity.test.ts`. Full suite **58 files / 852 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings. Mutation-checked, each
+guard separately:
+
+| Mutation | Fails |
+|---|---|
+| read the leftmost `x-forwarded-for` hop (the original bypass) | 1 — "ignores the client-supplied prefix" |
+| drop validation so any non-empty string is a key | 8, including every rejected-input case |
+| no fall-through when the preferred header holds junk | 1 — "falls through to a usable header" |
+
+**Commit / PR.** This entry's own commit on branch
+`sec/client-identity-provenance`; the SHA is in the commit message. Carries the
+`next` 16.4.3 bump ported from PR #69. Not merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The header-trust question itself. It needs one fact
+this environment cannot obtain: which of the three headers production actually
+sets. `clientIdentity().source` now makes that a single authenticated
+observation rather than a documentation hunt, but the observation still has to
+be made. Until then no limit keyed on a client IP should be described as
+per-client.
+
+**Rollback requirement.** Revert the commit; the previous behaviour accepts
+arbitrary strings as rate-limit keys.
+
+**Next recommended action.** Owner: PR #69 first (two unauthenticated RCEs),
+then branch protection, then report `clientIdentity().source` from one real
+request so the header question can be closed.
