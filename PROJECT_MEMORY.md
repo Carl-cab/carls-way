@@ -969,3 +969,322 @@ roll this back; fix forward if `16.4.3` causes a problem.
 **Next recommended action.** Owner: merge this ahead of everything else in
 Sprint 1, then confirm Dependabot alerts are enabled for the repository, then
 branch protection so a failing audit can block a merge.
+
+---
+
+## 2026-10-25 — Sprint 1 Task D: every GitHub Action pinned to a commit SHA
+
+**Purpose and scope.** All seven `uses:` references in `.github/workflows/`
+named a mutable tag (`@v4`, `@v3`). A tag is a pointer the action's owner can
+move, so whoever controls — or compromises — `actions/checkout` could repoint
+`v4` and have it run here on the next job, with no diff and no review in this
+repository. Pinned all of them to 40-hex commit SHAs, keeping a trailing
+`# vN` so the version stays legible.
+
+**Why it matters more than the usual supply-chain advice.** The jobs here are
+not neutral. `actions/checkout` handles the job token; the secret-scan job
+downloads and executes a third-party binary over the entire git history;
+CodeQL's job holds `security-events: write`. A moved tag in any of those is
+arbitrary code execution inside CI with those permissions. The existing
+hardening already recognised this for the *binary* — Gitleaks is pinned by
+version **and** verified against a published SHA256 — so the actions were the
+remaining unpinned executable input.
+
+**Provenance of the SHAs, which is the part worth checking.** This session's
+GitHub access is scoped to `Carl-cab/carls-way`, so the action repositories
+could not be read to resolve the tags (and should not be — the restriction is
+explicit). The SHAs were instead taken from this repository's own CI run on
+`6927ebd`, from the runner's `Download action repository 'owner/action@vN'
+(SHA:…)` lines. That is *stronger* provenance than a separate tag lookup: it
+pins to exactly the commits that produced the green checks on the current
+`master`, rather than to whatever the tag points at now.
+
+| Action | Pinned SHA |
+|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
+| `pnpm/action-setup` | `b906affcce14559ad1aafd4ab0e942779e9f58b1` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
+| `github/codeql-action` (init, autobuild, analyze) | `4bfa242aa49c5f7c6770b98670d354a7dfac05f8` |
+
+**Financial or security behaviour affected.** No application code changed. A
+CI supply-chain path is closed. No workflow trigger, permission, job name or
+step semantics altered — verified by parsing both files and confirming the
+four job names still read exactly `install · typecheck · lint · test · build`,
+`dependency audit`, `secret scan`, `analyze javascript-typescript`, which are
+the contexts branch protection must require.
+
+**Why a test and not just the edit.** Pinning is easy to do once and easy to
+lose: the obvious way to add a step is to copy `uses: owner/action@v4` from
+documentation. Nothing in typecheck, lint or the build reads a YAML file, so an
+unpinned action would reach `master` with six green checks and nothing would
+notice. `lib/__tests__/workflow-action-pinning.test.ts` is the only thing in
+the repository that would. It also asserts the workflow files are *found* —
+without that, deleting the directory would make every other assertion pass
+over an empty list, a green test guarding nothing.
+
+**Tests run and results.** 4 new cases. Full suite **58 files / 836 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings,
+`pnpm install --frozen-lockfile` succeeds. Mutation-checked: reverting one
+action to `@v4` fails the SHA assertion (and the sweep), and removing a `# vN`
+comment fails only the legibility assertion — each mutation caught by the
+intended test.
+
+**Also corrected:** `CLAUDE.md` said "57 files / 821 tests" while `master` was
+actually at 57 / 832 — stale by eleven tests before this change touched the
+line, which is exactly the drift the sentence beneath it warns about.
+
+**Commit / PR.** Commit `f5d0554` on branch `ci/pin-actions-to-shas`, PR
+**#68**, with `371a287` porting the `next` 16.4.3 security bump from PR #69.
+This entry's own corrections follow in a later commit on the same branch. Not
+merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.**
+
+- A CI run log recorded `##[warning]Node.js 20 is deprecated. The following
+  actions target Node.js 20 but are being forced to run on Node.js 24:
+  actions/checkout@v4, actions/setup-node@v4, pnpm/action-setup@v4`. This is
+  about the *action runtime*, not the `node-version: 20` the jobs request, and
+  it is unrelated to pinning — but pinning freezes the affected versions, so
+  the eventual move to action majors that target Node 24 is now a deliberate
+  bump rather than something a tag would have done silently. Recorded, not
+  acted on.
+- The full-tree advisory audit reports **2 critical, 13 high, 8 moderate** in
+  devDependencies (vite, vitest, @vitest/mocker, brace-expansion, esbuild).
+  These do not ship, the blocking tier audits `--prod` only and is clean, and
+  that split is deliberate and documented in `ci.yml`. Worth a look for any
+  that is newly fixable; none blocks a merge.
+
+**Rollback requirement.** Revert the commit. Doing so restores mutable action
+references; prefer fixing forward.
+
+**Next recommended action.** Owner: branch protection remains the blocker —
+see the Sprint 1 report. A write to
+`PUT /repos/Carl-cab/carls-way/branches/master/protection` was *attempted*
+this session and refused by the egress proxy with "Write access to this GitHub
+API path is not permitted through this proxy", so enforcement is BLOCKED on
+owner action rather than merely unattempted.
+
+---
+
+## 2026-10-25 — two review corrections on the Actions pinning (PR #68)
+
+**Purpose and scope.** Review of `f5d0554` found two defects. Both real; one is
+a bypass in the guard that commit added.
+
+**1. The guard had a bypass (Minor, CWE-829).** The matcher required a bare
+`uses:`. YAML accepts whitespace before the colon and a quoted key, so all of
+these set the key `uses` and all of them run:
+
+```yaml
+- uses: owner/action@v4
+- uses : owner/action@v4
+- "uses": owner/action@v4
+- 'uses': owner/action@v4
+```
+
+Verified against a YAML parser: each parses to `{uses: "owner/action@v4"}`. A
+matcher requiring the bare form skips the other three, and because the
+remaining steps still satisfy the seven-reference floor, **the suite would pass
+while a mutable reference merged**. A guard with a bypass is worse than no
+guard, because it is trusted.
+
+All three matchers in the file — the line scanner, the legibility check and the
+belt-and-braces sweep — now tolerate optional quotes and whitespace. Parsing
+the YAML properly would be more thorough, but no YAML parser is available to
+this project and adding a dependency to lint two files is out of proportion;
+the reviewer said the same. So the blind spots are pinned by tests instead.
+
+**The restructuring is the substantive part.** The scanner is now a function
+over *text*, so the bypass spellings can be probed directly with synthetic
+input rather than by mutating the real workflows. Six spellings are asserted
+visible, a commented-out reference asserted ignored, and two cases assert that
+every spelling reaches the SHA check. Mutation-checked: restoring the narrow
+matcher fails five of them.
+
+That matters beyond this file. The previous version could only test what was
+already in `.github/workflows`, which means it could never have tested a form
+the repository does not use — exactly where a bypass lives.
+
+**2. The entry did not name its PR or SHA (Minor).** Corrected: commit
+`f5d0554`, PR **#68**, with `371a287` porting the `next` security bump. The
+learning recorded on PR #67 — that an entry cannot contain its own introducing
+SHA — explains why it arrives a commit later, but it does not excuse omitting
+the PR number, which was knowable at the time.
+
+**Financial or security behaviour affected.** None in the application. A CI
+supply-chain guard that could be bypassed by YAML syntax now cannot be.
+
+**Tests run and results.** 13 cases in
+`lib/__tests__/workflow-action-pinning.test.ts` (9 new, 4 → 13). Full suite
+**58 files / 845 tests passing** (836 + 9), typecheck clean, lint 0 errors /
+28 warnings.
+Mutation-checked: narrowing `USES_LINE` back to `uses:` fails five cases.
+
+**Commit / PR.** This entry's own commit on branch `ci/pin-actions-to-shas`,
+PR **#68**; the SHA is in the commit message.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The guard is a regex, not a parser. It now covers every
+spelling of the key that YAML permits for a mapping, verified against a parser,
+but a sufficiently exotic construction (a merge key, an anchor expanding to a
+`uses` mapping) would still slip past. Recorded rather than built for: those
+forms do not occur in hand-written workflows, and the cost of a YAML dependency
+is not justified by them.
+
+**Rollback requirement.** Revert the commit; the guard returns to a state where
+`uses : owner/action@v4` is invisible to it.
+
+**Next recommended action.** Unchanged: PR #69 first.
+
+---
+
+## 2026-10-26 — quoted action values in the pinning guard (PR #68)
+
+**Purpose and scope.** A third review finding on the same guard, and the same
+class of error for the third time: the matcher was wrong about what it was
+reading. `USES_LINE` captured `(\S+)`, so a YAML quoted scalar
+`uses: "owner/action@<40-hex>"` was captured *with* its closing quote, and the
+`$`-anchored SHA assertion then rejected a correctly pinned action.
+
+**Direction of the defect, stated plainly.** This one fails *closed*: it would
+have blocked a future workflow that quoted its values, not admitted a mutable
+reference. That makes it less dangerous than the `uses :` bypass it sits
+beside, and worth fixing on the same grounds — a guard whose blind spots are
+unprobed is trusted further than it has earned.
+
+**Change.** Both matchers now exclude quote characters from the captured value
+(`["']?([^\s"']+)`). Three spellings added to the synthetic matcher test
+(double-quoted value, single-quoted value, quoted key *and* value) and two
+quoted-value lines added to the SHA-acceptance case, including one with a
+trailing `# v4` comment.
+
+**Financial or security behaviour affected.** None in the application.
+
+**Tests run and results.** 16 cases in
+`lib/__tests__/workflow-action-pinning.test.ts` (13 → 16). Mutation-checked:
+restoring `(\S+)` fails 4 cases.
+
+**Commit / PR.** PR **#68**, branch `ci/pin-actions-to-shas`. The introducing
+SHA is named in the follow-up entry rather than here, for the reason recorded
+on PR #67 — an entry cannot contain its own commit's SHA.
+
+**Migration impact.** None.
+
+**Unresolved findings.** None open on this PR. The guard remains a regex rather
+than a YAML parse; that trade-off and its cost are recorded above.
+
+**Rollback requirement.** None — test-only change.
+
+**Next recommended action.** Owner review and merge of #68.
+
+---
+
+## 2026-10-26 — attribution correction for two entries on PR #68
+
+Appended, not edited: both entries above stay as written.
+
+**What was missing.** Two entries on this branch left their introducing SHA
+unrecorded. The entry "two review corrections on the Actions pinning" said
+"the SHA is in the commit message", which does not put it in the entry. The
+entry "quoted action values in the pinning guard" deferred its SHA to a
+follow-up entry that was never written — so the deferral, which is legitimate
+in itself, became a dangling promise.
+
+**The SHAs.**
+
+| Entry | Commit | PR |
+|---|---|---|
+| two review corrections on the Actions pinning (the `uses :` bypass) | `3927d2d` | #68 |
+| quoted action values in the pinning guard | `ea707f4` | #68 |
+
+Both on branch `ci/pin-actions-to-shas`, which also carries `f5d0554` (the
+original pinning change), `371a287` (porting the `next` 16.4.3 bump from PR
+#69) and `090d490` (merging `master` after #69 landed, resolving the
+`PROJECT_MEMORY.md` append conflict).
+
+**The pattern, since it is now three occurrences.** An entry cannot contain
+the SHA of the commit that introduces it, so the SHA has to arrive one commit
+later — and twice on this branch, and once on #70, that later commit recorded
+something else and the SHA was forgotten. "Named in a follow-up entry" is only
+true once the follow-up exists. The reliable form is to write the deferral and
+the follow-up in the same working session, which is what this entry does.
+
+**Financial or security behaviour affected.** None. Attribution only.
+
+**Tests run and results.** No code change; the suite on this branch is **58
+files / 848 tests passing** as of `090d490`.
+
+**Commit / PR.** PR **#68**; this entry's own SHA is the one case the rule
+genuinely cannot name, and nothing further is promised for it.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #68.
+
+---
+
+## 2026-10-26 — a latent time-dependent flake in the recovery suite (found via PR #68)
+
+**How it surfaced.** CI failed on `c703ee0`, a commit that touched only
+`PROJECT_MEMORY.md`. `install · typecheck · lint · test · build` reported **1
+failed | 847 passed**:
+`transfer-recovery-c1.test.ts > findStuckTransfers > flags a posted intent
+stuck past 24h for manual review, not a fresh one`, with
+`duplicate key value violates unique constraint
+idx_transfer_intents_provider_reference`,
+`Key (provider_reference_id)=(trf_c13_posted_1792977822725)`.
+
+**The defect, which is on `master` and not in PR #68.** The test helper built
+`provider_reference_id` as `trf_c13_${status}_${Date.now()}`. That column is
+covered by a unique index, and the failing case inserts **two `posted`
+intents back to back** — one aged 25 hours, one aged 1 hour. Two calls with
+the same status inside one millisecond therefore produce the *same* reference
+and the second insert raises 23505. Nothing about the assertion is wrong; the
+fixture collides with itself, and whether it does depends on how fast the
+runner is.
+
+**Measured, not inferred.** Against a real database, the two inserts the test
+makes:
+
+| Reference scheme | First insert | Second insert |
+|---|---|---|
+| `trf_c13_posted_<ms>` (old) | ok | **rejected, 23505** |
+| `trf_c13_posted_<ms>_<pid>_<n>` (new) | ok | ok |
+
+**Fix.** A per-call counter plus a run tag (`Date.now()` and the pid). The
+counter cannot collide within a run; the run tag keeps references distinct
+across runs in a reused database, which the suite's own guidance warns about.
+
+**Financial or security behaviour affected.** None — test fixture only. But
+worth stating why it mattered: this suite exists because the stuck-transfer
+query, the partial unique index and the `ON CONFLICT` sweep are database
+behaviour a mock cannot verify. A fixture that fails on its own id generation
+produces a red build that says nothing about the invariant under test, and a
+red build nobody can attribute is how a suite stops being believed.
+
+**Tests run and results.** Full suite **58 files / 848 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings. The collision reproduction above
+was run separately against a disposable database.
+
+**Commit / PR.** PR **#68**, branch `ci/pin-actions-to-shas`; SHA named in a
+later entry, and this time the follow-up is written in the same session — see
+the attribution-correction entry immediately above for why that matters.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The fix is carried on #68 because #68's CI is what
+went red and a separate PR would leave it red until that PR merged. It is
+**not** related to action pinning, and it belongs to `master`: every open
+branch shares the defect until one of them merges. Also unexamined: other
+fixtures in the suite that build identifiers from `Date.now()` may have the
+same shape. Not audited here, and not claimed to be clean.
+
+**Rollback requirement.** None — reverting restores a flaky fixture.
+
+**Next recommended action.** Owner review and merge of #68. Afterwards, a sweep
+for other `Date.now()`-derived identifiers in fixtures would be cheap and is
+worth doing once.
