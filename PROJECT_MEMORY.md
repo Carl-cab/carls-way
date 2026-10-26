@@ -972,9 +972,20 @@ guard separately:
 | drop validation so any non-empty string is a key | 8, including every rejected-input case |
 | no fall-through when the preferred header holds junk | 1 — "falls through to a usable header" |
 
-**Commit / PR.** This entry's own commit on branch
-`sec/client-identity-provenance`; the SHA is in the commit message. Carries the
-`next` 16.4.3 bump ported from PR #69. Not merged.
+**Commit / PR.** `d858b39` on branch `sec/client-identity-provenance`, **PR
+#71**. Followed by `363dd74` on the same branch and PR, which replaces the
+character-class IP check with `net.isIP` after review: the old check accepted a
+bare `':'` as an address, so a junk `x-vercel-forwarded-for` was selected
+rather than skipped, and it rejected the IPv4-mapped form `::ffff:192.0.2.1`,
+sending a real client to the shared `unknown-client` bucket. That commit also
+adds `money:split-pay` to the Redis-loss decision table — a third bucket keyed
+on the authenticated user id, absent from the table as first written. Suite at
+`363dd74`: **58 files / 857 tests passing**. Carries the `next` 16.4.3 bump
+ported from PR #69. Not merged.
+
+(An earlier version of this paragraph said "the SHA is in the commit message",
+which does not put the SHA in the entry — the governance rule asks for the SHA
+and the PR, and PR #69 is the dependency bump, not this change.)
 
 **Migration impact.** None.
 
