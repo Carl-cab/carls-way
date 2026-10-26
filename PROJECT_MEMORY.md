@@ -2348,9 +2348,16 @@ only," which was wrong about the branch's own diff.)
 passing** (documentation-only on top of `master`), typecheck clean, lint
 0 errors / 28 warnings, `readiness.json` parses and the report renders.
 
-**Commit / PR.** This entry's own commit on branch `docs/sprint1-status`; the
-SHA is in the commit message. Carries the `next` 16.4.3 bump ported from PR #69
-so CI is green. Not merged.
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; this entry's own
+commit SHA is in the commit message. Corrected in place, before this entry was
+ever merged, on two counts: it named no PR, and it said it "carries the `next`
+16.4.3 bump ported from PR #69 so CI is green", which stopped being true when
+`master` was merged into this branch. #69 merged first as `1bc81df`, so the
+bump now reaches this branch *from* `master` and the branch's own
+`package.json`/`pnpm-lock.yaml` diff against `master` is empty. Editing rather
+than appending here because the entry had not yet reached `master`, so this is
+finishing a draft, not rewriting history — and a false statement left standing
+for the sake of a rule about history would serve nobody reading it later.
 
 **Migration impact.** None.
 
@@ -2666,12 +2673,17 @@ in scope. The interaction tests added on #71 pin this.
 refusal.** The asymmetry decides it. Fail-closed converts a Redis outage into a
 **payments outage** for every customer while the database, providers and
 application are healthy. Fail-open raises one user's ceiling to
-`limit × instances` — a low single-digit multiplier on the Hobby plan, not
-caller-controllable — and the rate limit is the outermost of three layers: the
-per-intent idempotency key with `SELECT ... FOR UPDATE` prevents a replay
-double-debiting, and `velocity_checks` applies a separate rolling per-user
-volume limit that does not depend on Redis. Worst case is "sends more often
-than intended during an outage", not "money moves twice".
+`limit × instances`, **by an unmeasured factor** — corrected in place before
+this entry reached `master`; it read "a low single-digit multiplier on the
+Hobby plan, not caller-controllable", which this repository has no evidence
+for and this environment cannot obtain (`403 CONNECT` to Vercel). The layer
+that survives a Redis outage and caps volume is `velocity_checks`. The
+per-intent idempotency key with `SELECT ... FOR UPDATE` is **not** such a
+layer and was wrongly listed as one: it stops a replay double-debiting *one*
+intent and says nothing about a caller creating many. Worst case is "sends more
+often than the nominal limit during an outage, still bounded by
+`velocity_checks`", not "money moves twice". See the 2026-10-26 entry on the
+review that caught both.
 
 **The real defect named.** It is not the fail-open choice; it is that the
 degradation is **unobservable**. `rateLimitBackendHealth()` already reports the
@@ -2844,3 +2856,85 @@ already carries three such promises that were never kept, and each one reads
 like a pointer to evidence that does not exist. The merge SHA of PR #72 is
 recoverable from the PR itself, which is a durable reference; that is the whole
 of the answer, not a placeholder for one.
+
+---
+
+## 2026-10-26 — review of the reconciliation found two claims I could not support
+
+Appended rather than folded into the entry above, because the findings are
+about that entry's own accuracy and the correction is worth more than the tidy
+version of it.
+
+**How the review nearly did not happen.** CodeRabbit's commit status on
+`7253d96` read **`success` with the description `Review paused`**. Green, and
+it meant the head had *never been reviewed* — auto-review was paused at
+`551ee88`, and a triggered review had aborted with "Head commit changed"
+because a commit was pushed while it was in flight. The status was reported as
+an approval in this session before the description was read. **This is the same
+defect as the "ALL GREEN 1/1" reading from earlier in the sprint**: a green
+signal accepted without checking what it asserts. Both times the signal was
+technically accurate and the inference was wrong. The monitor was rewritten to
+reject a CodeRabbit status whose description is `Review paused`, which is the
+only version of this guard that would have caught it.
+
+**The Major finding, and it was right.** Decision 0007 justified keeping the
+money buckets fail-open partly on this: "On Vercel's Hobby plan the instance
+count is small and not controllable by the caller, so this is a multiplier in
+the low single digits, not an unbounded hole." Nothing in this repository
+establishes an instance count — no deployment limit, no observed value — and
+this environment cannot obtain one (`403 CONNECT` to `api.vercel.com` and the
+deployment host). That is **an invented quantitative bound used to justify a
+security posture**, which is exactly what this project's rules prohibit, and it
+was written in the same document that elsewhere insists on not inferring
+Redis's state from a variable being set. Withdrawn, not softened: the
+multiplier is now recorded as **unbounded until someone with deployment access
+establishes a concurrency ceiling**.
+
+**A second error in the same paragraph.** It listed the per-intent idempotency
+key and `SELECT ... FOR UPDATE` claim among the controls constraining abuse
+during an outage. They are not: they prevent *one* intent being debited twice
+and say nothing about a caller creating *many* intents. Conflating "cannot
+double-debit an intent" with "cannot exceed a volume" is how a rate-limit
+decision gets argued from a control that was never a rate limit. The only layer
+that survives a Redis outage and actually caps volume is `velocity_checks`.
+
+**The recommendation did not change, and that is the point.** It rests on the
+asymmetry — fail-closed makes a cache outage a total, customer-visible payments
+outage while the database, providers and application are healthy; fail-open
+loosens an aggregate ceiling for users actively abusing the system. That
+ordering holds whether `instances` is 2 or 200. What the unknown size changes is
+the **urgency of moving the counter to PostgreSQL**, which removes the dilemma
+rather than choosing a side. An argument that survives the removal of its
+weakest premise was not relying on it; the premise still had to go.
+
+**Also corrected from the same review.** `GO_LIVE_RUNBOOK.md` had its header
+re-anchored to `e0f3f0d` while §4.1 and §4.2 still cited `1bc81df` — the same
+staleness one level down, in the document whose entire contract is about
+currency. Re-anchored, having first confirmed that the execute, webhook,
+provider and settlement paths are unchanged between the two commits, so the
+evidence carries rather than needing a re-read. And §4.1's idempotency box
+claimed the key "guarantees a single debit" unconditionally; provider
+idempotency records are retained for a bounded period and `submitting` is
+deliberately retryable, so a retry landing after expiry is **not** protected
+and must go through `POST /api/admin/transfers/[id]/reconcile`. The retention
+window is the provider's, is unverified here, and is deliberately not asserted
+as a number.
+
+**Tests run and their results.** Documentation only; no source file changed.
+`readiness.json` parses and the report renders with no `undefined` cells and
+exit 0. The four required checks were green on `7253d96` before these edits and
+re-run on the new head.
+
+**Financial or security behaviour affected.** None in code. In *documentation*,
+two overstatements of financial-safety guarantees were removed — the unbounded
+abuse multiplier and the unconditional single-debit claim. Neither changed
+behaviour, and both would have misled someone deciding whether a rail was safe
+to enable, which is the only reason these documents exist.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Unchanged and now better-founded: the owner
+decision in 0007, with the note that establishing the Vercel concurrency
+ceiling is a prerequisite for ever calling the fail-open risk *bounded*.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`.

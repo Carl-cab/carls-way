@@ -2,7 +2,11 @@
 
 **Status:** Proposed. **Awaiting an owner decision — not implemented either way.**
 **Date:** 2026-10-26
-**Decided against:** `master` at `0b609f4`
+**Reviewed against:** `master` at `0b609f4` — the field read "Decided against",
+which contradicted the status line one row above it: nothing has been decided.
+`lib/rate-limit.ts` is byte-identical between `0b609f4` and `e0f3f0d` (the
+current tip), so the reading still holds; the anchor is kept at the commit the
+code was actually read at rather than advanced to look current.
 
 ## The question, narrowed
 
@@ -28,34 +32,75 @@ just weaker. Nothing refuses.
 ## The two risks, stated at their real size
 
 **Fail-open risk — abuse.** During a Redis outage a single user's ceiling rises
-from 10 to `10 × instances` executions per hour. On Vercel's Hobby plan the
+from 10 to `10 × instances` executions per hour.
+
+**How large that is, is UNVERIFIED, and an earlier draft of this record
+asserted a bound it could not support.** It read: "On Vercel's Hobby plan the
 instance count is small and not controllable by the caller, so this is a
-multiplier in the low single digits, not an unbounded hole. It is also **not
-the only control**: `transfer_intents` carries a per-intent idempotency key and
-a `SELECT ... FOR UPDATE` claim, so a replay cannot double-debit one intent,
-and `velocity_checks` applies a separate rolling volume limit per user that
-does not depend on Redis. The rate limit is the outermost of three layers, and
-it is the only one that degrades.
+multiplier in the low single digits, not an unbounded hole." No deployment
+limit, observed count, or other evidence for that exists anywhere in this
+repository, and this environment cannot obtain one — `api.vercel.com` and the
+deployment host both answer `403 CONNECT`. Asserting a numeric bound in order
+to justify a security posture is precisely the move this project's rules
+forbid, so it is withdrawn rather than softened. **Treat `instances` as
+unknown and therefore the multiplier as unbounded** until someone with
+deployment access establishes a concurrency ceiling. If that number turns out
+to be large, it strengthens the case for the Postgres counter in ask 3 below;
+it does not by itself flip the recommendation, because the recommendation
+rests on the asymmetry of the two failure modes rather than on the size of the
+multiplier.
+
+**What else constrains it, stated at its real scope.** `velocity_checks`
+applies a rolling volume limit per user that does not depend on Redis, and it
+is the control that actually caps how much a user can move during an outage.
+The per-intent idempotency key and `SELECT ... FOR UPDATE` claim on
+`transfer_intents` do **not** belong in that list, and an earlier draft wrongly
+included them: they prevent one intent being debited twice, and say nothing
+about a caller creating many separate intents. Conflating "cannot double-debit
+an intent" with "cannot exceed a volume" is how a rate-limit decision gets
+made on a control that was never a rate limit. So the layers that survive a
+Redis outage are `velocity_checks` and nothing else; the rate limit is the
+outermost layer and the only one that degrades.
 
 **Fail-closed risk — refusing real payments.** If the money buckets refused
 while Redis was unreachable, a Redis outage would become a **payments outage**.
 Every send, split payment and transfer execution would fail for every customer
 until Redis returned, even though the database, the providers and the
-application were all healthy. The blast radius is total and customer-visible;
-the fail-open blast radius is a modest multiplier on an already-bounded limit
-for the subset of users who are actively abusing the system during the outage.
+application were all healthy. The blast radius is total and customer-visible,
+and it falls on **every** customer.
+
+The fail-open blast radius falls only on the subset of users actively abusing
+the system during the outage, and its *size* is unknown — this sentence said "a
+modest multiplier on an already-bounded limit", which smuggled the withdrawn
+claim back in after the section above had retracted it. The honest statement is:
+the per-user limit still applies on every instance, the aggregate ceiling
+loosens by an unmeasured factor, and `velocity_checks` continues to cap volume
+per user. Who it affects is known; how much is not.
 
 ## Recommendation
 
 **Keep all three fail-open, and add a signal instead of a refusal.**
 
-The asymmetry decides it: fail-open costs a bounded multiplier on an abuse
-ceiling that two other layers still constrain; fail-closed costs a full
-payments outage triggered by a cache dependency. Trading customer payments for
-a single-digit abuse multiplier is the wrong direction for a payments product,
-and `velocity_checks` plus the idempotency key mean the worst case is "a
-determined user sends more often than intended for the duration of an outage",
-not "money moves twice" or "limits vanish".
+The asymmetry decides it, and it decides it **without needing the multiplier's
+size** — which is just as well, because that size is unverified. Fail-closed
+converts a cache outage into a **total, customer-visible payments outage**:
+every send, split payment and transfer execution fails for every customer
+while the database, the providers and the application are all healthy.
+Fail-open leaves the per-user limit in force on every instance and loosens the
+aggregate ceiling by an unknown factor, for the subset of users actively
+abusing the system during the window, with `velocity_checks` still capping
+volume per user throughout.
+
+One is a certain outage for everyone; the other is a loosened limit for
+attackers. That ordering does not depend on whether `instances` is 2 or 200.
+What the unknown multiplier does change is the urgency of ask 3: the larger it
+could be, the less acceptable it is to leave the counter in Redis at all.
+
+Stated precisely, the worst case under fail-open is "a determined user sends
+more often than the nominal hourly limit for the duration of the outage, still
+bounded by `velocity_checks`" — not "money moves twice", which the per-intent
+idempotency key does prevent, and not "limits vanish", which per-instance
+counting does not cause.
 
 What should change instead:
 

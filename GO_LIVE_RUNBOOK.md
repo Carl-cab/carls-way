@@ -100,10 +100,14 @@ real funds must back every balance.
 The live provider lifecycle is: `createIntent → review → confirm (ready) → **executeTransfer** (processing) → webhook → settled`.
 
 **This section said "NOT YET BUILT" until 2026-10-26, which was wrong.**
-`app/api/transfers/[id]/execute/route.ts` exists on `master` at `1bc81df`.
+`app/api/transfers/[id]/execute/route.ts` exists on `master` at `e0f3f0d`.
 Corrected because a go/no-go document is only usable if every unchecked box is
 genuinely unchecked — one stale blocker teaches an operator to discount the
-rest.
+rest. (This line cited `1bc81df` after the header anchor had moved to
+`e0f3f0d`, which is the same staleness one level down. The execute, webhook,
+provider and settlement paths are **unchanged** between those two commits —
+`git diff --name-status 1bc81df e0f3f0d` over them returns nothing — so the
+evidence carries to the current anchor rather than needing to be re-read.)
 
 - [x] `POST /api/transfers/[id]/execute` exists and loads the intent, verifies
       ownership and `status = 'ready'`, reselects the provider through the
@@ -115,7 +119,20 @@ rest.
 - [x] Idempotency guard present: a stable key derived from the intent id is
       persisted *before* the provider call, and the claim runs inside a
       transaction with `SELECT ... FOR UPDATE`. It is the key, not the lock,
-      that guarantees a single debit.
+      that prevents a duplicate submission — **but only while the provider
+      still holds that idempotency record.** This box previously said the key
+      "guarantees a single debit" without qualification, which overstates it:
+      provider idempotency records are retained for a bounded period, not
+      forever, and `submitting` is deliberately retryable here (a caller that
+      finds `submitting` with no reference recorded retries, because that state
+      is indistinguishable from a crash between the provider call and the local
+      write). So a retry that lands *after* the provider has expired the record
+      is not protected by it and must go through reconciliation
+      (`POST /api/admin/transfers/[id]/reconcile`) rather than through another
+      execute. The exact retention window is the provider's, is not verified
+      here, and is not a number this document should assert — confirm it
+      against Plaid's and Stripe's current documentation before relying on any
+      specific duration.
 - [x] Rate limited per user id (`money:transfer-execute`) — the claim stops one
       intent being submitted twice but not how many intents one account pushes
       at a rail.
@@ -125,7 +142,9 @@ rest.
 
 ### 4.2 Webhook settlement path (🟡 PARTIAL — handlers verified present, settlement never exercised on a rail)
 
-Verified by reading `master` at `1bc81df`, not by running a rail:
+Verified by reading `master` at `e0f3f0d`, not by running a rail. (Cited
+`1bc81df` until 2026-10-26; the webhook and settlement paths are unchanged
+between the two, so the reading stands at the current anchor.)
 
 - [x] `app/api/webhooks/plaid/route.ts` exists and handles
       `TRANSFER_EVENTS_UPDATE` (the event Plaid actually sends; this section
