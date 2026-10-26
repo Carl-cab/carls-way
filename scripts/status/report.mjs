@@ -218,7 +218,19 @@ function main() {
   // interpolates whatever it is handed turns a data mistake into a silent
   // one, and `node report.mjs > /dev/null` then "passes".
   for (const a of r.ownerActions) {
-    if (typeof a !== 'object' || a === null || !a.action || !a.why) {
+    // Truthiness is not enough, and getting that wrong here reproduced the
+    // very bug this guard was added for: `action: []` is truthy, a template
+    // literal renders it as the empty string, and the report emitted "|  |  |"
+    // with exit 0. Require a non-empty string, which is the only thing that
+    // can render as a cell.
+    if (
+      typeof a !== 'object' ||
+      a === null ||
+      typeof a.action !== 'string' ||
+      a.action.trim() === '' ||
+      typeof a.why !== 'string' ||
+      a.why.trim() === ''
+    ) {
       throw new Error(
         `ownerActions entries must be { action, why } objects; got ${JSON.stringify(a)?.slice(0, 80)}`,
       );

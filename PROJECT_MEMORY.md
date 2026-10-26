@@ -986,3 +986,52 @@ configuration.
 
 **Next recommended action.** Owner: PR #69, then branch protection, then
 confirm Dependabot.
+
+---
+
+## 2026-10-26 — two corrections to the Sprint 1 corrections (PR #72)
+
+**1. The header-trust owner action still could not answer the question.**
+The previous round corrected it from one production request to two, but kept
+it to reporting `clientIdentity().source` for each. That does not settle
+anything: if both requests select `x-vercel-forwarded-for`, **the source name
+is identical whether the platform overwrote the forged value or passed it
+through.** What distinguishes the two cases is an *equality* — does the
+resolved id equal the distinctive value that request supplied? The action now
+asks for that boolean per request, alongside the source name, and explicitly
+not the id or the IP. Had this gone to the owner as written, two source names
+would have come back and the question would have looked answered while being
+untouched.
+
+**2. The shape guard added yesterday reproduced the bug it was added for.**
+It tested truthiness, so `action: []` passed, the template literal rendered it
+as the empty string, and the report emitted `|  |  |` with **exit 0** — a
+silent empty row, which is exactly the failure mode the guard exists to catch.
+Measured before and after. It now requires a non-empty string for both fields;
+mutation-checked, an array entry gives exit 1.
+
+That is the third fix in this review round to carry the defect it was fixing
+(the earlier two: a blacklist gate corrected with another blacklist, and a
+pinning matcher widened for quoted keys but not quoted values). The pattern is
+worth naming: a fix written while holding one example in mind tends to cover
+that example and not the class.
+
+**Financial or security behaviour affected.** None directly. One of the two
+is a security *question* whose answer was about to be mis-recorded.
+
+**Tests run and results.** `readiness.json` parses (13 rows, 8 actions), the
+report renders 8 owner-action rows with zero `undefined` and zero empty cells,
+and an array-valued entry exits 1. Full suite unchanged at **57 files / 832
+tests passing**.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a following
+entry, per the PR #67 learning.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The header-trust question itself remains open and is
+now the only owner action whose wording has been corrected twice.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #72.

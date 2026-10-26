@@ -251,8 +251,8 @@
       "why": "Confirm Dependabot alerts are enabled for the repository. Two advisories have reached master behind green CI in five days because nothing watches an unchanged tree."
     },
     {
-      "action": "Report clientIdentity().source from two contrasting production requests",
-      "why": "Report clientIdentity().source from TWO production requests (source names only, never values): one sending no IP headers, one supplying forged x-real-ip, x-forwarded-for and x-vercel-forwarded-for values. The pair answers the header-trust question that PR #71 documents but cannot answer from this environment — one request alone names the selected header without showing whether the platform overwrites a client-supplied value, so it does not close it."
+      "action": "Compare two production requests to settle header trust",
+      "why": "Send TWO production requests and report, for each, clientIdentity().source AND whether the resolved id EQUALS the forged value that request supplied — a boolean, never the id and never the IP. Request A sends no IP headers. Request B supplies a distinctive forged value in x-real-ip, x-forwarded-for and x-vercel-forwarded-for. The source name alone does NOT answer this: if both requests select x-vercel-forwarded-for the name is identical whether the platform overwrote the forged value or passed it through, so only the equality tells you which happened. If B's id equals what B sent, the header is attacker-controlled and every limit keyed on it is per-attempt, not per-client. PR #71 documents the question; this environment cannot answer it (403 CONNECT to both api.vercel.com and the deployment host)."
     },
     {
       "action": "Decide fail-open vs fail-closed for the three user-keyed money buckets",
