@@ -1118,3 +1118,69 @@ CodeRabbit has auto-paused reviews on this PR and on #70 after the volume of
 commits; last reviewed commits are `551ee88` and `44dbd7d`, both current heads,
 so nothing is unreviewed — but a further push to either will not be reviewed
 automatically until someone resumes it.
+
+---
+
+## 2026-10-26 — PR #69 merged: the Next.js RCE advisories cleared from master
+
+**Purpose and scope.** The owner authorized merging PR #69 ("merge 69"). Merged
+as **`1bc81df`**, a merge commit of `a85aa63` onto `6927ebd`.
+
+**Preconditions re-verified immediately before merging**, not carried from
+earlier in the session: PR open and not merged, `mergeable_state: clean`, base
+`6927ebd` equal to then-current `master`, all **six** checks green on
+`a85aa63`, and the file list confined to `package.json` (the `next` /
+`eslint-config-next` pair), `pnpm-lock.yaml` (version pins only — no package
+added or removed) and a `PROJECT_MEMORY.md` entry. No application code.
+Merged with `expectedHeadSha` set to `a85aa63`, so a push between verification
+and merge would have refused rather than merged something unreviewed.
+
+**Financial or security behaviour affected.** Three remotely reachable
+advisories against `next@16.3.8` are closed on `master`: two **unauthenticated
+remote code execution** (Image Optimization; `use cache` typed arrays,
+GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r). `next` is the HTTP
+layer in front of every route, so this is the broadest-surface fix in the
+sprint. No live-money flag, schema, credential or balance change.
+
+**Verified after merging.** Fetched `origin/master` and read the merged tree:
+`1bc81df` pins `16.4.3` in `package.json` **and** in `pnpm-lock.yaml`. Stated
+as a read of the tree rather than an inference from the merge succeeding.
+
+**What this does NOT establish.** The **running deployment** is not known to
+carry `16.4.3`. Production serves whatever its last build produced, and the
+deployed version cannot be read from this environment (`403 CONNECT` to both
+`api.vercel.com` and the deployment host). Until the Vercel production rebuild
+is confirmed, the two RCEs should be treated as potentially live on the public
+deployment. This distinction is now the open half of the readiness row.
+
+**It also resolves a conditional recorded earlier today.** The append on PR #72
+said reverting a carrier reverts the bump *only if* that carrier introduced it
+to `master`. #69 is that carrier. So: reverting `1bc81df` reintroduces the
+advisories, while #68, #70, #71 and #72 now have an **empty** dependency diff
+against `master` and reverting any of them touches no dependency.
+
+**Records updated with the evidence named** (`CURRENT_STATUS.md`,
+`PRODUCTION_READINESS_BACKLOG.md`, `scripts/status/readiness.json`): the
+advisory row moves BLOCKED → **PARTIAL**, and the first owner action changes
+from "merge a next bump" to "confirm the production deployment rebuilt from
+`1bc81df` or later".
+
+**Commit / PR.** Merge commit **`1bc81df`**, PR **#69**, branch
+`sec/next-rce-advisories`. The record of these status updates is PR **#72**
+(`docs/sprint1-status`); its SHA follows in a later entry.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The deployment rebuild, above. And item 2 of
+`CURRENT_STATUS.md` is untouched and is now the first-order gap: **nothing
+watches an unchanged tree.** Both this advisory set and `follow-redirects` five
+days earlier reached `master` after its last green run and surfaced only
+because an unrelated PR re-ran the audit. Dependabot alerts have still never
+been confirmed enabled.
+
+**Rollback requirement.** Reverting `1bc81df` restores two unauthenticated
+RCEs. Do not roll it back; fix forward if `16.4.3` causes a problem.
+
+**Next recommended action.** Owner: confirm the production rebuild, then
+confirm Dependabot alerts, then branch protection so a failing `dependency
+audit` can block a merge.

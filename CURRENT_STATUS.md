@@ -20,18 +20,25 @@ corrected for once.
 
 ## ⚠ Two things on this list are worse than "unverified"
 
-**1. `master` carries two unauthenticated remote-code-execution advisories.**
+(Item 1 was partly resolved on 2026-10-26: `master` is fixed, the running
+deployment is not yet confirmed. Item 2 is unchanged and is now the
+first-order gap.)
+
+**1. `master` CARRIED two unauthenticated remote-code-execution advisories.**
 `next@16.3.8` is inside the vulnerable range of three advisories — two
 unauthenticated RCE (Image Optimization; `use cache` typed arrays,
 GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r) — all patched in
-`>=16.4.1`. PR #69 bumps to `16.4.3` and clears `pnpm audit --prod`, and the
-same bump was ported into #68, #70, #71 and #72 so no open branch reintroduces
-it — so the **first** of those to merge clears `master`, not #69 specifically.
-All five are **unmerged**. Two things remain true after whichever merges first:
-`master` is fixed, and the **running deployment** is not yet known to be — it
-serves whatever the last build produced, and the deployed version cannot be
-read from this environment (`403 CONNECT`). Until a merge *and* a rebuild,
-this is live on a public deployment.
+`>=16.4.1`. **PR #69 was merged on 2026-10-26 as `1bc81df`**, and `master`'s
+`package.json` and `pnpm-lock.yaml` now both pin `16.4.3` — verified by reading
+the merged tree. So `master` is fixed.
+
+**The running deployment is a separate fact and is NOT yet verified.** It serves
+whatever its last build produced, and the deployed version cannot be read from
+this environment (`403 CONNECT` to both `api.vercel.com` and the deployment
+host). Until the Vercel production rebuild from `1bc81df` or later is
+confirmed, treat the two unauthenticated RCEs as potentially live on the public
+deployment. The same bump also rides on #68, #70, #71 and #72, whose dependency
+diff against `master` is now empty.
 
 **2. Nothing watches an unchanged tree.** Both that advisory set and the
 `follow-redirects` one five days earlier reached `master` *after* its last

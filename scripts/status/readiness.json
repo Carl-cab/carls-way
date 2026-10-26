@@ -233,14 +233,14 @@
     },
     {
       "name": "Production dependency advisories",
-      "status": "BLOCKED",
-      "evidence": "master at 6927ebd carries next@16.3.8, which has THREE open advisories: two unauthenticated remote code execution (Image Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r), all patched in >=16.4.1. PR #69 bumps to 16.4.3 and clears pnpm audit --prod, and the bump was ported into #68, #70, #71 and #72 so that no open branch reintroduces it — which also means the FIRST of those to merge clears master, not #69 specifically. BLOCKED because only a merge fixes master, and because clearing master is still not the same as clearing the running deployment: production carries whatever the last deploy built, and this environment cannot read the deployed version (403 CONNECT). Both this and the follow-redirects advisory five days earlier reached master AFTER its last green run and were found only when an unrelated PR re-ran the audit — nothing watches an unchanged tree. Dependabot alerts are named in ci.yml as the durable backstop but have never been confirmed enabled."
+      "status": "PARTIAL",
+      "evidence": "MASTER FIXED, DEPLOYMENT UNVERIFIED. master carried next@16.3.8 with THREE open advisories: two unauthenticated remote code execution (Image Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r), all patched in >=16.4.1. PR #69 was merged on owner authorization 2026-10-26 as 1bc81df; master's package.json and pnpm-lock.yaml now both pin 16.4.3, verified by reading the merged tree. PARTIAL rather than VERIFIED because clearing master is not clearing the RUNNING DEPLOYMENT: production serves whatever its last build produced, and the deployed version cannot be read from this environment (403 CONNECT to both api.vercel.com and the deployment host). VERIFIED needs confirmation that the Vercel production deployment rebuilt from 1bc81df or later. Separately unresolved: both this advisory set and the follow-redirects one five days earlier reached master AFTER its last green run and were found only when an unrelated PR re-ran the audit — nothing watches an unchanged tree, and Dependabot alerts have never been confirmed enabled."
     }
   ],
   "ownerActions": [
     {
-      "action": "Merge a next 16.4.3 bump, before anything else in Sprint 1",
-      "why": "MERGE A NEXT BUMP FIRST. master is serving a public payments application on next@16.3.8 with two unauthenticated RCE advisories. #69 is the smallest such PR, but #68, #70, #71 and #72 all carry the same bump, so whichever merges first clears master. Everything else in Sprint 1 is less urgent. Then confirm the production deployment actually rebuilt — a cleared master is not a cleared deployment."
+      "action": "Confirm the production deployment rebuilt from 1bc81df or later",
+      "why": "PR #69 is merged (1bc81df) and master now pins next@16.4.3, so the advisory is cleared on master. The running deployment is a separate fact: it serves whatever its last build produced, and this environment cannot read the deployed version (403 CONNECT). Until the rebuild is confirmed, treat the two unauthenticated RCEs as potentially still live on the public deployment."
     },
     {
       "action": "Set branch protection on master requiring the four checks",
