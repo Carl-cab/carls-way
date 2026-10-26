@@ -1070,3 +1070,44 @@ is not justified by them.
 `uses : owner/action@v4` is invisible to it.
 
 **Next recommended action.** Unchanged: PR #69 first.
+
+---
+
+## 2026-10-26 — quoted action values in the pinning guard (PR #68)
+
+**Purpose and scope.** A third review finding on the same guard, and the same
+class of error for the third time: the matcher was wrong about what it was
+reading. `USES_LINE` captured `(\S+)`, so a YAML quoted scalar
+`uses: "owner/action@<40-hex>"` was captured *with* its closing quote, and the
+`$`-anchored SHA assertion then rejected a correctly pinned action.
+
+**Direction of the defect, stated plainly.** This one fails *closed*: it would
+have blocked a future workflow that quoted its values, not admitted a mutable
+reference. That makes it less dangerous than the `uses :` bypass it sits
+beside, and worth fixing on the same grounds — a guard whose blind spots are
+unprobed is trusted further than it has earned.
+
+**Change.** Both matchers now exclude quote characters from the captured value
+(`["']?([^\s"']+)`). Three spellings added to the synthetic matcher test
+(double-quoted value, single-quoted value, quoted key *and* value) and two
+quoted-value lines added to the SHA-acceptance case, including one with a
+trailing `# v4` comment.
+
+**Financial or security behaviour affected.** None in the application.
+
+**Tests run and results.** 16 cases in
+`lib/__tests__/workflow-action-pinning.test.ts` (13 → 16). Mutation-checked:
+restoring `(\S+)` fails 4 cases.
+
+**Commit / PR.** PR **#68**, branch `ci/pin-actions-to-shas`. The introducing
+SHA is named in the follow-up entry rather than here, for the reason recorded
+on PR #67 — an entry cannot contain its own commit's SHA.
+
+**Migration impact.** None.
+
+**Unresolved findings.** None open on this PR. The guard remains a regex rather
+than a YAML parse; that trade-off and its cost are recorded above.
+
+**Rollback requirement.** None — test-only change.
+
+**Next recommended action.** Owner review and merge of #68.

@@ -61,9 +61,9 @@ const WORKFLOW_DIR = join(process.cwd(), '.github', 'workflows');
  * files is out of proportion. Hence a deliberately permissive regex, with the
  * bypass spellings pinned by their own tests below.
  */
-const USES_LINE = /^\s*(?:-\s*)?["']?uses["']?\s*:\s*(\S+)/;
+const USES_LINE = /^\s*(?:-\s*)?["']?uses["']?\s*:\s*["']?([^\s"']+)/;
 /** Same tolerance, unanchored, for the belt-and-braces sweep. */
-const USES_ANYWHERE = /["']?uses["']?\s*:\s*([^\s#]+)/;
+const USES_ANYWHERE = /["']?uses["']?\s*:\s*["']?([^\s#"']+)/;
 
 /** Action references in one file's text, with line numbers for locatability. */
 function refsIn(text: string): Array<{ line: number; value: string }> {
@@ -100,6 +100,15 @@ describe('the matcher itself, against the spellings that bypassed it', () => {
     ['double-quoted key', '      - "uses": owner/action@v4'],
     ['single-quoted key', "      - 'uses': owner/action@v4"],
     ['not a list item', '    uses: owner/action@v4'],
+    // A quoted scalar keeps its quotes in the captured value unless they are
+    // excluded. That direction of the defect is a false *failure* — a validly
+    // pinned `uses: "owner/action@<sha>"` would be rejected because the
+    // anchored SHA assertion saw a trailing quote — so it would have blocked a
+    // future workflow rather than let a mutable reference through. Still the
+    // matcher being wrong about what it is reading.
+    ['double-quoted value', '      - uses: "owner/action@v4"'],
+    ['single-quoted value', "      - uses: 'owner/action@v4'"],
+    ['quoted key and value', '      - "uses": "owner/action@v4"'],
   ])('sees a %s uses step', (_label, line) => {
     expect(refsIn(line)).toEqual([{ line: 1, value: 'owner/action@v4' }]);
   });
@@ -122,7 +131,14 @@ describe('the matcher itself, against the spellings that bypassed it', () => {
 
   it('accepts a SHA-pinned reference in any spelling', () => {
     const sha = 'a'.repeat(40);
-    const lines = [`      - uses : owner/action@${sha}`, `      - "uses": owner/action@${sha}`].join('\n');
+    const lines = [
+      `      - uses : owner/action@${sha}`,
+      `      - "uses": owner/action@${sha}`,
+      // Quoted *value*: the capture must not keep the closing quote, or the
+      // `$`-anchored SHA assertion rejects a correctly pinned action.
+      `      - uses: "owner/action@${sha}" # v4`,
+      `      - uses: 'owner/action@${sha}'`,
+    ].join('\n');
     const unpinned = refsIn(lines).filter(({ value }) => !/@[0-9a-f]{40}$/.test(value));
     expect(unpinned).toEqual([]);
   });
