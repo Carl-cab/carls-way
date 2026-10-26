@@ -903,6 +903,75 @@ boundaries.
 
 ---
 
+## 2026-10-25 — Sprint 1 Priority 1: two unauthenticated Next.js RCEs patched
+
+**Purpose and scope.** `pnpm audit --prod` failed on `master`'s tree with three
+advisories against `next@16.3.8`, all in the range `>=16.0.0 <=16.4.0` and all
+patched in `>=16.4.1`:
+
+| Severity | Advisory | Summary |
+|---|---|---|
+| **critical** | — | Unauthenticated **remote code execution** in Image Optimization |
+| **critical** | GHSA-673q-mjm6-r5xr | Unauthenticated **remote code execution** in `use cache` functions returning typed arrays |
+| high | GHSA-p3m5-59mp-jv5r | Denial of service in App Router using Server Actions |
+
+Bumped `next` and `eslint-config-next` from `16.3.8` to `16.4.3`.
+
+**Why this outranked the rest of the sprint.** Two of the three are
+*unauthenticated remote code execution in the framework that serves the
+application* — not a transitive library on one code path, but the HTTP layer in
+front of every route, including `/api/transfers/*`, `/api/migrate` and the
+webhook endpoints. The deployment is public at `carloscab74.vercel.app`. This is
+a different class of exposure from the `follow-redirects` credential-header
+advisory handled last week, which needed an attacker-influenced redirect on the
+Plaid path; these need only a request.
+
+**Version choice.** `16.4.1` is the minimum that clears all three. `16.4.3` was
+taken instead because it is the same `16.3 → 16.4` minor step — the migration
+risk is identical — and stopping at `16.4.1` would leave two later patch
+releases unapplied for no benefit. `eslint-config-next` moved in lockstep; it
+tracks `next`'s version in practice.
+
+**Financial or security behaviour affected.** No application code changed: one
+`package.json` dependency pair and the lockfile. Three remotely reachable
+vulnerabilities, two of them RCE, are closed. No live-money flag, schema,
+credential or ownership change.
+
+**Tests run and results.** The build is the real risk of a minor framework bump,
+and it is the check that would catch a breaking change:
+
+| Check | Result |
+|---|---|
+| `pnpm audit --prod` | **no known vulnerabilities** (was 2 critical / 1 high) |
+| `pnpm run build` | clean — all routes rendered, middleware compiled |
+| `pnpm run typecheck` | clean |
+| Tests | **57 files / 832 tests passing** |
+| `pnpm run lint` | 0 errors / 28 warnings |
+| `pnpm install --frozen-lockfile` | succeeds — lockfile moved with `package.json` |
+
+**Commit / PR.** This entry's own commit on branch `sec/next-rce-advisories`;
+the SHA is in the commit message. Not merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.** How this was found is itself a finding. The advisories
+were published after `6927ebd` was last green, so `master` sat with two
+critical RCEs and a passing CI badge until a PR happened to re-run the audit —
+the same mechanism that surfaced `follow-redirects` four days earlier. **Nothing
+watches an unchanged tree.** Dependabot alerts are named in `ci.yml` as the
+durable backstop but have never been confirmed enabled, and `master` does not
+enforce the `dependency audit` check, so a failing audit blocks nothing. Two
+occurrences in five days is a pattern, not a coincidence.
+
+**Rollback requirement.** Reverting restores two unauthenticated RCEs. Do not
+roll this back; fix forward if `16.4.3` causes a problem.
+
+**Next recommended action.** Owner: merge this ahead of everything else in
+Sprint 1, then confirm Dependabot alerts are enabled for the repository, then
+branch protection so a failing audit can block a merge.
+
+---
+
 ## 2026-10-25 — Sprint 1 documentation: status records brought current
 
 **Purpose and scope.** Sprint 1's engineering sits on five branches with open
