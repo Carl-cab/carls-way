@@ -1172,8 +1172,12 @@ Full suite **57 files / 832 tests passing**.
 **Financial or security behaviour affected.** None. A verification step's
 output contract.
 
-**Commit / PR.** PR **#70**, branch `ops/phase0-synthetic-rehearsal`; SHA in a
-later entry per the PR #67 learning.
+**Commit / PR.** `14d10de` on branch `ops/phase0-synthetic-rehearsal`, PR
+**#70**. (Filled in by a follow-up commit: an entry cannot contain the SHA of
+the commit that introduces it, which is the PR #67 learning — but leaving the
+reference pointing at a "later entry" that did not yet exist was not good
+enough, so it is filled in rather than promised.) Preceded on this branch by
+`d53614e`, which made the gate exit non-zero, and `932ba2e`.
 
 **Migration impact.** None — `verify-migrate.sql` is read-only.
 
