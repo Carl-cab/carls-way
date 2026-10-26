@@ -212,7 +212,19 @@ function main() {
   out.push('');
   out.push('| Action | Why it matters |');
   out.push('|---|---|');
-  for (const a of r.ownerActions) out.push(`| ${a.action} | ${a.why} |`);
+  // Fail loudly on the wrong shape. A plain string here produced
+  // "| undefined | undefined |" for all eight rows — the one section written
+  // for the owner, rendered empty, with a zero exit status. A renderer that
+  // interpolates whatever it is handed turns a data mistake into a silent
+  // one, and `node report.mjs > /dev/null` then "passes".
+  for (const a of r.ownerActions) {
+    if (typeof a !== 'object' || a === null || !a.action || !a.why) {
+      throw new Error(
+        `ownerActions entries must be { action, why } objects; got ${JSON.stringify(a)?.slice(0, 80)}`,
+      );
+    }
+    out.push(`| ${a.action} | ${a.why} |`);
+  }
   out.push('');
   out.push(
     `_Readiness evidence last reviewed ${r.updated}, against \`${r.verifiedAgainstCommit}\`._`,
