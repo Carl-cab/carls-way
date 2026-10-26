@@ -247,8 +247,8 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **59 files /
-869 tests** as of this writing — measured on the merged tree after PR #68
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **61 files /
+901 tests** as of this writing — measured on the merged tree after PR #68
 landed, not carried over from either side of the merge. Both branches had
 written a different number here (844 and 836) and the merge conflicted on
 exactly this sentence; resolving it by measuring is the only way the number

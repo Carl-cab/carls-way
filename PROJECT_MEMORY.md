@@ -1775,3 +1775,74 @@ than what was recorded before — and that is the honest size of it.
 
 **Next recommended action.** Owner review and merge of #71; the observation
 itself remains an owner action.
+
+---
+
+## 2026-10-26 — the #67/#71 interaction, tested where neither suite reached (PR #71)
+
+**Purpose and scope.** The owner required that, after integrating the first of
+the two rate-limit PRs, the **combined** Redis-recovery and client-identity
+behaviour be tested before merging the second. #67 merged as `a08c82f`; this
+branch's base was updated to it and
+`lib/__tests__/rate-limit-identity-outage-interaction.test.ts` added.
+
+**Why a third file.** Each change was tested against the other's absence:
+the degradation suite drives outage and recovery with a fixed key string, the
+identity suite resolves headers with no Redis in play. Neither answered the
+question an operator has during an incident — **Redis down *and* the header is
+junk: which limits still hold?** The two failure modes are not symmetrical:
+
+| Failure | Effect on a client-keyed bucket | Effect on a user-id-keyed bucket |
+|---|---|---|
+| Redis unreachable | weakened to `limit × instances`, still per-key | weakened to `limit × instances`, still per-user |
+| No usable client header | **key collapses** — all callers share one bucket | **unaffected** — the key never came from a header |
+
+That bottom-right cell is the load-bearing claim in the money-bucket
+recommendation, and nothing executed it until now.
+
+**What the 7 cases pin.** Two users keep separate `money:send` counters during
+a total outage; the three money buckets stay separated from each other; a
+bucket still exhausts per user with Redis absent; every junk header resolves to
+the single `unknown-client` identity; a **forged but well-formed** address is
+used as a key and rotating it evades a client-keyed limit — recorded as a real
+evasion rather than implied, because valid IP syntax is not proof of a trusted
+proxy; the degradation line carries the stage and a count and **not** the
+connection URL, its password, the resolved client address or the email; and
+every bucket class, including both break-glass paths, is still **served**
+during an outage.
+
+**Mutation-checked, both directions:**
+
+| Mutation | Result |
+|---|---|
+| append `url=${process.env.REDIS_URL}` to the degradation line | leak case fails |
+| make `money:send` return `allowed: false` while degraded | 3 cases fail, including the explicit fail-open guard |
+
+**A defect in this very test file, found by that mutation run.** The "no Redis
+at all" case passed only because `REDIS_URL` happened to be **unset** in the
+environment. With it set, the unconfigured path tried to construct a real
+client; the case took 5,005 ms and failed. A test whose outcome depends on an
+ambient variable it never mentions is not a test of the thing it names. It now
+stubs the variable explicitly and passes in **both** environments in ~0.4 s.
+Two stray second arguments to `__setRedisClientForTests()` (which takes one)
+were removed in the same pass.
+
+**Financial or security behaviour affected.** None — no policy change. Every
+bucket still fails **open**, and these tests exist so that a future change to
+either mechanism cannot alter that silently.
+
+**Tests run and results.** 7 new cases; the five rate-limit and identity files
+together 69 passing before the addition. Full suite result recorded in the
+following entry with the merge SHA.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`, base
+updated to `a08c82f` (post-#67). SHA in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None — tests only.
+
+**Unresolved findings.** The header-trust question itself, which still needs
+the two-request production comparison with an equality check. And the
+fail-open/fail-closed decision for the three money buckets, which is an owner
+judgement and is deliberately **not** implemented.
+
+**Next recommended action.** Owner review and merge of #71.
