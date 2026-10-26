@@ -1035,3 +1035,41 @@ now the only owner action whose wording has been corrected twice.
 **Rollback requirement.** None.
 
 **Next recommended action.** Owner review and merge of #72.
+
+---
+
+## 2026-10-26 — correction to the 2026-10-25 rollback line (PR #72)
+
+Appended, not edited: the earlier entry stays as written.
+
+**What was wrong.** Its **Rollback requirement** read "Revert the commit;
+documentation only." The status and readiness edits are documentation only, but
+the branch also carries `next` and `eslint-config-next` 16.3.8 → 16.4.3 and the
+matching `pnpm-lock.yaml` change. **Reverting this PR therefore reverts that
+bump and reintroduces two unauthenticated RCE advisories** (Image
+Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) plus a DoS
+(GHSA-p3m5-59mp-jv5r). A rollback instruction is read under time pressure, so
+one that omits a security consequence is worse than none.
+
+**The correct instruction.** To undo the status-record changes, revert only the
+documentation files — `CURRENT_STATUS.md`, `PRODUCTION_READINESS_BACKLOG.md`,
+`scripts/status/readiness.json`, `scripts/status/report.mjs` and this file.
+Leave `package.json` and `pnpm-lock.yaml` at 16.4.3 unless the bump itself is
+being rolled back deliberately, and then only with the advisories in view.
+
+**Also stale in that entry.** Its "Next recommended action" names PR #69 as
+the route to clearing the advisory. The same bump rides on #68, #70, #71 and
+#72, so whichever merges first clears `master`; #69 is merely the smallest
+such PR. Corrected in `readiness.json` and `CURRENT_STATUS.md` by `8a33404`,
+and noted here so the chronological record is not left pointing at one branch.
+
+**Financial or security behaviour affected.** None by this append. It corrects
+a *procedure* whose previous wording would have silently undone a security fix.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a following
+entry per the PR #67 learning.
+
+**Migration impact.** None. **Rollback requirement.** None — this entry is
+itself the correction.
+
+**Next recommended action.** Owner review and merge of #72.
