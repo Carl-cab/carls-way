@@ -3056,3 +3056,116 @@ including the sentences asserting no flag changed.
 **Next recommended action.** Unchanged: the owner decision in 0007.
 
 **Commit / PR.** PR **#72**, branch `docs/sprint1-status`.
+
+---
+
+## 2026-10-26 — four owner confirmations, and a premise of the accepted decision found false
+
+**Purpose and scope.** Record four owner-supplied/owner-verified facts that
+close three Sprint 1 blockers, and record one gap found while checking the
+accepted decision against the code. Documentation only; no source file changed.
+
+**1. Production deployment CONFIRMED — the advisories are cleared in
+production.** Two independent sources agree, which is why this is recorded as
+confirmed rather than probable:
+
+- The **GitHub deployments API**, which is readable from this environment even
+  though Vercel's is not: deployment `7344985889`, `environment: Production`,
+  sha `403acf1`, `state: success`, 2026-10-26T22:19:15Z, and the most recent
+  Production record for the repo.
+- **Owner-supplied Vercel detail**: `dpl_BZgDHuZxjbG2NHgg12b218eoQT3q`,
+  `READY`, production SHA `403acf1823358b4100e7898a1c89ba8b753786c5`, branch
+  `master`, live alias `carloscab74.vercel.app`.
+
+`1bc81df` is an ancestor of `403acf1` (`git merge-base --is-ancestor`) and
+`package.json` there declares `next: 16.4.3`. Each source closes the other's
+gap — the GitHub record proves a successful Production deploy of that SHA but
+not where the alias points; the owner detail supplies the alias but is a report
+rather than a measurement taken here.
+
+**The method is the durable lesson.** "What SHA is serving production" was
+treated as unanswerable for all of Sprint 1 because `api.vercel.com` answers
+`403 CONNECT`. It was answerable the whole time: Vercel writes GitHub
+deployment records, and the GitHub API was never blocked. Being blocked on one
+route is not being blocked on the question — I should have enumerated the other
+routes to the same fact before recording it as unverifiable five separate
+times.
+
+**2. Dependabot ENABLED** — owner-reported: alerts, security updates, grouped
+security updates and malware alerts all On, with no repository file or secret
+changed. Recorded with the convention this repo already uses for `REDIS_URL`:
+an owner report of a setting's state, named and dated. **What is not claimed:**
+the alert *list* is still unobserved here. Both endpoints answer `403` to this
+session and that is a token-scope limit which enabling alerts does not change,
+so the 403 is not evidence either way.
+
+**3. Decision 0007 ACCEPTED** — all three money buckets stay fail-open on Redis
+loss, with a fail-closed requirement in the other direction: if
+`velocity_checks` cannot be evaluated atomically, the money path must refuse.
+Measured at `403acf1`, that requirement holds **only incidentally** —
+`checkVelocityLimit()` has no `try/catch`, no caller wraps it, so a DB error
+propagates to each route's outer handler and 500s before any balance moves.
+No explicit branch, **no test**. Wrapping that call to "be resilient" would
+silently invert it.
+
+**4. Vercel ceiling established, and it is not an instance count.** Pro plan,
+Fluid Compute enabled, 30,000 concurrent function executions documented, 1,000
+per 10s per region burst. "Formally unbounded" is withdrawn **at the execution
+layer**; no exact in-process multiplier may be claimed, because Fluid Compute
+shares instances between invocations. Do not write 30,000 and do not write
+"small". This also corrects a second error in the withdrawn sentence: it said
+**Hobby**, and the team is on **Pro** — `CLAUDE.md` carried the wrong plan too,
+now fixed.
+
+**The finding: `money:split-pay` has no durable volume control.** Decision 0007
+says `velocity_checks` "is the control that actually caps how much a user can
+move during an outage", for all three buckets. Measured at `403acf1`, false for
+one of them. `lib/splits.ts` contains **zero** velocity references;
+`paySplitPortion()` debits the payer and credits the split creator calling
+neither `checkVelocityLimit()` nor `recordVelocity()`. Since
+`checkVelocityLimit()` sums from `velocity_checks`, which split-pay never
+writes, that volume is outside the control in **both** directions — ungated,
+and invisible to every other path's budget.
+
+| Money path | check | record |
+|---|---|---|
+| `money:send` | yes | yes |
+| accept request | yes | yes |
+| `money:transfer-execute` (at intent) | yes | at confirm |
+| **`money:split-pay`** | **none** | **none** |
+
+**Stated at its real size.** The debit is conditional
+(`WHERE balance_cad >= …`) so a payer cannot exceed their balance, and a
+participant can pay only their own portion of a split they belong to, once
+(`ALREADY_PAID`). Moving volume this way requires creating many splits through
+a separate, separately-limited endpoint. A gap in the decision's stated safety
+net, not an open drain — and it does **not** flip the decision, because the
+asymmetry that decided it never depended on `velocity_checks`.
+
+**This is the fifth boundary claim in two days, and the first one I inherited
+into someone else's accepted decision.** I wrote "velocity_checks continues to
+cap volume per user throughout" without checking that it applies to all three
+buckets named one paragraph above it. The owner accepted the record carrying
+that sentence. The pattern is now unambiguous: the risk in this project is not
+inventing facts, it is asserting the *scope* of true ones without tracing each
+boundary. `velocity_checks` does cap volume; it just does not cap that path.
+
+**Financial or security behaviour affected.** None changed. One financial
+control documented as absent where the accepted policy assumed it present.
+
+**Tests run and their results.** Documentation only, no source file touched.
+`readiness.json` parses and `report.mjs` renders with exit 0.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Unresolved findings.** The split-pay gap is BLOCKED on an owner choice: add
+the velocity check and record to that path, or amend 0007 to state the rate
+limit is its only volume control. Either way, the fail-closed-on-velocity-error
+behaviour deserves an explicit branch and a test rather than relying on
+exception propagation.
+
+**Next recommended action.** Owner: choose A or B on split-pay. Engineering:
+whichever is chosen, pin the velocity-unavailable path with a test, since it is
+now a stated requirement of an accepted decision and nothing enforces it.
+
+**Commit / PR.** Branch `docs/sprint1-owner-confirmations`.

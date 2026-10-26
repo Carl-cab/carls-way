@@ -560,8 +560,29 @@ arbitrary end user.
   PostgreSQL — which this endpoint always has, since it cannot run without
   `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
   the migration that it limits, so it belongs with Phase 2.
-- **Fail-closed by risk class is an open owner decision, with a
-  recommendation.** When shared rate limiting is lost — Redis unreachable, or
+- **Fail-closed by risk class — DECIDED 2026-10-26 for the money buckets,
+  still open for the rest.** The owner **accepted** keeping all three money
+  buckets **fail-open** on Redis loss (`docs/decisions/0007`, status Accepted),
+  with a fail-closed requirement in the other direction: **if `velocity_checks`
+  cannot be evaluated atomically, the money path must refuse.** That holds in
+  effect today only *incidentally* — `checkVelocityLimit()` has no `try/catch`
+  and no caller wraps it, so a DB error 500s before any balance moves — with
+  **no explicit branch and no test pinning it**. Wrapping that call to "be
+  resilient" would silently make it fail-open.
+
+  **One premise of that decision is false for one bucket.** `lib/splits.ts`
+  contains **zero** velocity references: `paySplitPortion()` debits the payer
+  and credits the creator calling neither `checkVelocityLimit()` nor
+  `recordVelocity()`. So `money:split-pay` has **no durable volume control
+  behind the rate limit**, and its volume never enters `velocity_checks` to
+  consume any other path's budget either. Bounded in practice by the
+  conditional debit (`WHERE balance_cad >= …`) and by a participant being able
+  to pay only their own portion once — so it is a gap in the stated safety net,
+  not an open drain. Resolving it is an owner call: add the velocity
+  check/record to split-pay, or amend 0007 to say the rate limit is that
+  bucket's only volume control. **Neither is implemented.**
+
+  When shared rate limiting is lost — Redis unreachable, or
   no usable client header — every bucket currently fails *open*: the request is
   served under a weaker or collapsed limit. Whether that is right depends on
   the bucket, and the two failure modes are not symmetrical:
@@ -687,7 +708,17 @@ which a balance-rewriting migration gets applied twice.
 
 ## Deployment Notes
 
-**Platform:** Vercel (Hobby plan). Serverless functions for API routes, Edge Middleware for `proxy.ts`.
+**Platform:** Vercel, **Pro** plan — team `cocopiuf-laa-projects1`, project
+`carlos_cab74`, with **Fluid Compute enabled**. Serverless functions for API
+routes, Edge Middleware for `proxy.ts`. This line read "Hobby plan" until
+2026-10-26, which was wrong and had been reasoned from: a withdrawn claim in
+`docs/decisions/0007` argued the rate-limit fallback multiplier was small
+"on Vercel's Hobby plan". The plan was wrong *and* the inference was invalid.
+Documented concurrency is **30,000 concurrent function executions** (Hobby and
+Pro alike), with a burst limit of 1,000 per 10 seconds per region. That is an
+**execution** ceiling and **not** an instance count — Fluid Compute lets
+invocations share an instance — so it must not be used to derive the
+in-process counter multiplier.
 
 **Auto-deploy:** Every push to `master` triggers a Vercel build and deployment automatically.
 

@@ -43,13 +43,33 @@ GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r) — all patched in
 `package.json` and `pnpm-lock.yaml` now both pin `16.4.3` — verified by reading
 the merged tree. So `master` is fixed.
 
-**The running deployment is a separate fact and is NOT yet verified.** It serves
-whatever its last build produced, and the deployed version cannot be read from
-this environment (`403 CONNECT` to both `api.vercel.com` and the deployment
-host). Until the Vercel production rebuild from `1bc81df` or later is
-confirmed, treat the two unauthenticated RCEs as potentially live on the public
-deployment. The same bump also rides on #68, #70, #71 and #72, whose dependency
-diff against `master` is now empty.
+**The running deployment is now CONFIRMED, and the advisories are cleared in
+production.** This paragraph said the deployment was "NOT yet verified" and
+instructed the reader to treat the two unauthenticated RCEs as potentially
+live. That is resolved as of 2026-10-26, from **two independent sources that
+agree**:
+
+- **GitHub deployments API**, readable from this environment even though
+  Vercel's is not: deployment `7344985889`, `environment: Production`,
+  sha `403acf1`, status `state: success`, 2026-10-26T22:19:15Z — and the most
+  recent Production record for the repository.
+- **Owner-supplied Vercel detail**: deployment `dpl_BZgDHuZxjbG2NHgg12b218eoQT3q`,
+  status `READY`, production SHA `403acf1823358b4100e7898a1c89ba8b753786c5`,
+  branch `master`, live alias `carloscab74.vercel.app`.
+
+`1bc81df` (the `next` 16.4.3 bump) is an **ancestor** of `403acf1`, verified
+with `git merge-base --is-ancestor`, and `package.json` at `403acf1` declares
+`next: 16.4.3`. So the serving deployment contains the fix for all three
+advisories — the two unauthenticated RCEs and the DoS.
+
+Each source closes the other's gap, which is why this is stated as confirmed
+rather than probable: the GitHub record proves Vercel reported a successful
+Production deploy of that exact SHA but says nothing about which deployment the
+domain alias points at; the owner detail supplies the alias and `READY` status
+but is a report rather than something this session measured. **The method is
+worth keeping:** the GitHub deployments API answers "what SHA is deployed to
+Production" without any Vercel access, and that was treated as unanswerable for
+the whole of Sprint 1.
 
 **2. Nothing watches an unchanged tree.** Both that advisory set and the
 `follow-redirects` one five days earlier reached `master` *after* its last
