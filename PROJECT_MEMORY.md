@@ -1180,3 +1180,47 @@ than a YAML parse; that trade-off and its cost are recorded above.
 **Rollback requirement.** None — test-only change.
 
 **Next recommended action.** Owner review and merge of #68.
+
+---
+
+## 2026-10-26 — attribution correction for two entries on PR #68
+
+Appended, not edited: both entries above stay as written.
+
+**What was missing.** Two entries on this branch left their introducing SHA
+unrecorded. The entry "two review corrections on the Actions pinning" said
+"the SHA is in the commit message", which does not put it in the entry. The
+entry "quoted action values in the pinning guard" deferred its SHA to a
+follow-up entry that was never written — so the deferral, which is legitimate
+in itself, became a dangling promise.
+
+**The SHAs.**
+
+| Entry | Commit | PR |
+|---|---|---|
+| two review corrections on the Actions pinning (the `uses :` bypass) | `3927d2d` | #68 |
+| quoted action values in the pinning guard | `ea707f4` | #68 |
+
+Both on branch `ci/pin-actions-to-shas`, which also carries `f5d0554` (the
+original pinning change), `371a287` (porting the `next` 16.4.3 bump from PR
+#69) and `090d490` (merging `master` after #69 landed, resolving the
+`PROJECT_MEMORY.md` append conflict).
+
+**The pattern, since it is now three occurrences.** An entry cannot contain
+the SHA of the commit that introduces it, so the SHA has to arrive one commit
+later — and twice on this branch, and once on #70, that later commit recorded
+something else and the SHA was forgotten. "Named in a follow-up entry" is only
+true once the follow-up exists. The reliable form is to write the deferral and
+the follow-up in the same working session, which is what this entry does.
+
+**Financial or security behaviour affected.** None. Attribution only.
+
+**Tests run and results.** No code change; the suite on this branch is **58
+files / 848 tests passing** as of `090d490`.
+
+**Commit / PR.** PR **#68**; this entry's own SHA is the one case the rule
+genuinely cannot name, and nothing further is promised for it.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #68.
