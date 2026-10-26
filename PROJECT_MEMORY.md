@@ -1073,3 +1073,48 @@ entry per the PR #67 learning.
 itself the correction.
 
 **Next recommended action.** Owner review and merge of #72.
+
+---
+
+## 2026-10-26 — the rollback correction over-corrected (PR #72)
+
+The entry above says reverting this PR "therefore reverts that bump". That is
+true only in one case, and stating it unconditionally replaced an under-claim
+with an over-claim.
+
+**The condition.** `master` is at `6927ebd` carrying `next@16.3.8`, verified
+just now; this branch carries `16.4.3`. The same bump rides on #68, #70, #71
+and #72. So:
+
+- If **#72 merges first**, its merge is what moves `master` to `16.4.3`, and
+  reverting it does reintroduce the advisories.
+- If **another carrier merges first**, `master` is already at `16.4.3` and
+  #72's `package.json`/`pnpm-lock.yaml` diff against it is empty. Reverting
+  #72 then touches no dependency and the advisories stay fixed.
+
+**So the correct instruction is conditional:** before reverting any of these
+five PRs, check whether the one being reverted is the carrier that moved
+`master` to `16.4.3` — `git log -1 --format=%H -- package.json` on `master`
+answers it. If it is, revert only the documentation files and leave
+`package.json` and `pnpm-lock.yaml` alone. If it is not, a full revert is
+safe on that axis.
+
+**Why this is recorded rather than quietly edited.** It is the fifth correction
+this round to a correction of mine, and the second where the fix overshot
+rather than fell short. The failure mode is consistent enough to be worth
+stating: having found an under-claim, I asserted its opposite without checking
+whether the opposite held in every case. The check here took one command.
+
+**Financial or security behaviour affected.** None. A rollback procedure's
+precision.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a following
+entry per the PR #67 learning.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #72. Note that
+CodeRabbit has auto-paused reviews on this PR and on #70 after the volume of
+commits; last reviewed commits are `551ee88` and `44dbd7d`, both current heads,
+so nothing is unreviewed — but a further push to either will not be reviewed
+automatically until someone resumes it.
