@@ -467,8 +467,13 @@ arbitrary end user.
   sends" to "any string shaped like an IP"; it does **not** stop an attacker
   rotating valid addresses, and nothing should describe it as doing so. Read
   every limit keyed on this as "best effort per *apparent* client".
-  `clientIdentity().source` exists so the question is answerable from a real
-  request instead of from documentation.
+  `clientIdentity().source` narrows the question to a real request instead of
+  documentation, but **does not answer it on its own**: a forged
+  `x-vercel-forwarded-for` that the platform overwrote and one it passed
+  through both report the same `source`. The deciding fact is whether the
+  resolved `id` **equals** the value the client sent, so the observation is a
+  forged distinctive value plus that equality as a boolean — never the address
+  itself.
   The operator limit's strength depends on a backend that can degrade
   silently. `REDIS_URL` **is set in production** (owner-reported 2026-10-20,
   name only), so the counter is nominally the shared 6/hour. But

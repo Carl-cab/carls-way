@@ -1002,3 +1002,44 @@ arbitrary strings as rate-limit keys.
 **Next recommended action.** Owner: PR #69 first (two unauthenticated RCEs),
 then branch protection, then report `clientIdentity().source` from one real
 request so the header question can be closed.
+
+---
+
+## 2026-10-26 — `source` alone does not answer the header-trust question (PR #71)
+
+**Purpose and scope.** A correction to this branch's own claim, appended
+rather than rewritten. Three places — `lib/rate-limit.ts`, `CLAUDE.md`, and
+the entry above — said `clientIdentity().source` converts the header-trust
+question into "a one-request observation". It does not.
+
+**Why.** A request supplying a forged `x-vercel-forwarded-for` and a request
+supplying nothing can both report `source: 'x-vercel-forwarded-for'` — in the
+first case because the platform overwrote the forged value, in the second
+because it set it. **The name is identical and the trust conclusion is
+opposite.** The deciding fact is whether the resolved `id` *equals* what the
+client sent, so the observation is a distinctive forged value plus that
+equality as a boolean, never the address. Found on PR #72 by review, against
+wording I had already corrected once (from one request to two) without
+noticing that the comparison itself was the wrong one.
+
+**Financial or security behaviour affected.** No code behaviour: `source` is
+reported the same way. What changes is what may be concluded from it, which is
+the whole point of the field existing.
+
+**Tests run and results.** Comment and documentation only; suite unchanged at
+**58 files / 857 tests passing**, typecheck clean, lint 0 errors / 28
+warnings.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`; SHA in a
+following entry per the PR #67 learning.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The question itself. It now needs a two-request
+comparison with an equality check, which is a slightly larger ask of the owner
+than what was recorded before — and that is the honest size of it.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #71; the observation
+itself remains an owner action.

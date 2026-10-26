@@ -394,11 +394,19 @@ function looksLikeIp(value: string): boolean {
  * other and the official docs.
  *
  * So this function does **not** claim an unforgeable identity. It reports where
- * the value came from, which is what makes the question answerable: an
- * operator can compare `source` against what they expect for the deployment
- * instead of taking a header's trustworthiness on faith. Until that is
- * confirmed, treat every limit keyed on this as "best effort per apparent
- * client", not "per client".
+ * the value came from, which narrows the question without answering it.
+ *
+ * **`source` alone cannot answer it**, and it is worth being exact about why:
+ * a request that supplies a forged `x-vercel-forwarded-for` and a request that
+ * supplies nothing can both report `source: 'x-vercel-forwarded-for'` — in the
+ * first case because the platform overwrote the forged value, in the second
+ * because it set it. The name is identical; the trust conclusion is opposite.
+ * What separates them is whether the resolved `id` **equals** what the client
+ * sent. An operator settles it by sending a distinctive forged value and
+ * checking that equality, reporting the boolean rather than the address.
+ *
+ * Until that is done, treat every limit keyed on this as "best effort per
+ * apparent client", not "per client".
  *
  * ## The `'none'` case is an availability cliff, not merely a weak limit
  *
