@@ -17,7 +17,7 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
 Measured on the merged tree, on a database created fresh for the run and with
-the CI fixture applied: **61 files / 907 tests** pass, typecheck 0 errors, lint 0
+the CI fixture applied: **62 files / 913 tests** pass, typecheck 0 errors, lint 0
 errors / 28 warnings. Earlier baselines on this file: 55 / 778 at `4e63bb9`,
 56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`, 57 / 832 at `6927ebd`.
 

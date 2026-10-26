@@ -115,13 +115,6 @@ async function cleanup() {
 beforeEach(async () => {
   vi.mocked(checkVelocityLimit).mockClear();
   await cleanup();
-  await sql`
-    INSERT INTO users (id, name, username, email, password_hash, country, kyc_status, balance_cad)
-    VALUES
-      (${CREATOR}, 'Velocity Creator', 'velcreator', 'velcreator@example.test', 'x', 'CA', 'verified', 0),
-      (${PAYER},   'Velocity Payer',   'velpayer',   'velpayer@example.test',   'x', 'CA', 'verified', 0)
-    ON CONFLICT (id) DO NOTHING
-  `;
   await setBalance(CREATOR, '0');
   await setBalance(PAYER, '500');
 });

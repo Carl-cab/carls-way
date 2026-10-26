@@ -249,10 +249,11 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **61 files /
-907 tests** — measured on `master` at `e0f3f0d`, the tip after Sprint 1's five
-PRs, on a database created fresh for the run with the CI fixture applied; all
-907 pass. Not carried over from either side of a merge: the branches had
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **62 files /
+913 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 913 pass. The last six arrived with
+`split-pay-velocity.test.ts` when `money:split-pay` was brought under the
+velocity control; the count was 61 / 907 on `master` at `e0f3f0d`. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same

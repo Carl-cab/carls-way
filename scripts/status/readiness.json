@@ -17,7 +17,7 @@
     "percentage would be invented."
   ],
   "updated": "2026-10-26",
-  "verifiedAgainstCommit": "master at 403acf1, deployed to Vercel Production and CONFIRMED serving (deployment 7344985889 state success; owner-reported dpl_BZgDHuZxjbG2NHgg12b218eoQT3q READY on alias carloscab74.vercel.app). Sprint 1's six PRs: #69 1bc81df, #68 ce7255a, #67 a08c82f, #71 0b609f4, #70 e0f3f0d, #72 403acf1. Suite 61 files / 907 tests passing at e0f3f0d; #72 changed no source file. All four required checks green and ENFORCED by ruleset 25851827. Rows describe master unless one names a PR.",
+  "verifiedAgainstCommit": "master at 403acf1, deployed to Vercel Production and CONFIRMED serving (deployment 7344985889 state success; owner-reported dpl_BZgDHuZxjbG2NHgg12b218eoQT3q READY on alias carloscab74.vercel.app). Sprint 1's six PRs: #69 1bc81df, #68 ce7255a, #67 a08c82f, #71 0b609f4, #70 e0f3f0d, #72 403acf1. Suite 61 files / 907 tests at e0f3f0d (#72 changed no source file); 62 files / 913 tests after bringing money:split-pay under the velocity control, all passing on a fresh fixtured database. All four required checks green and ENFORCED by ruleset 25851827. Rows describe master unless one names a PR.",
   "gates": {
     "A": {
       "title": "Bank linking",

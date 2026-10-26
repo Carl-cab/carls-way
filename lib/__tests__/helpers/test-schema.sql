@@ -246,7 +246,11 @@ VALUES
   (9101, 'Split Creator', 'splitcreator', 'creator@example.test', 'x', 'CA', 'verified', 0),
   (9102, 'Split Payer A', 'splitpayera', 'payera@example.test', 'x', 'CA', 'verified', 500),
   (9103, 'Split Payer B', 'splitpayerb', 'payerb@example.test', 'x', 'CA', 'verified', 500),
-  (9104, 'Broke Payer',  'brokepayer',  'broke@example.test',  'x', 'CA', 'verified', 0)
+  (9104, 'Broke Payer',  'brokepayer',  'broke@example.test',  'x', 'CA', 'verified', 0),
+  -- split-pay-velocity.test.ts. A separate pair from 9101-9104 so the two
+  -- files cannot contend for the same rows or the same velocity windows.
+  (9111, 'Velocity Creator', 'velcreator', 'velcreator@example.test', 'x', 'CA', 'verified', 0),
+  (9112, 'Velocity Payer',   'velpayer',   'velpayer@example.test',   'x', 'CA', 'verified', 500)
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
