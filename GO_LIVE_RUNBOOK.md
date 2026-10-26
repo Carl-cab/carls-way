@@ -135,9 +135,17 @@ evidence carries to the current anchor rather than needing to be re-read.)
       so a row already sitting in `submitting` can never be re-submitted
       through it. The `submitting` writes inside that route are its own claim
       within a single invocation, not a retry of a pre-existing row.
-      `PlaidTransferProvider.executeTransfer()` *does* tolerate
-      `status === 'submitting'` to resume, but the route is its only caller, so
-      that branch is unreachable over HTTP. Recovery is
+      `PlaidTransferProvider.executeTransfer()` tolerates
+      `status === 'submitting'`, and **that clause is load-bearing on the
+      normal path** — a correction: this box briefly called it "unreachable
+      over HTTP", which is wrong and would invite deleting it as dead code,
+      breaking every live execute. The sequence is: the route claims a `ready`
+      intent and sets it to `submitting` inside a transaction, commits, and
+      *then* calls `executeTransfer()`, which re-reads the row and sees
+      `submitting`. So every live execute passes through that clause. What the
+      route refuses is a **pre-existing** `submitting` intent, which is a
+      different thing from the state it just wrote itself. Recovery of a
+      stranded intent is
       `POST /api/admin/transfers/[id]/reconcile`, whose `reconcileTransfer()`
       requires `submitting` and replays the provider authorization — returning
       the intent to `ready` where no authorization was ever persisted, which is

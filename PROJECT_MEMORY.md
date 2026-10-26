@@ -2968,6 +2968,12 @@ branch is unreachable over HTTP**. Recovery is
 `POST /api/admin/transfers/[id]/reconcile`, and `reconcileTransfer()` requires
 `submitting`.
 
+> **That last claim is WRONG — see the next entry.** The route sets
+> `submitting` *before* calling `executeTransfer()`, so that branch is on the
+> happy path of every live execute, not unreachable. The pointer is inline
+> because a reader of this entry would otherwise act on the false version, and
+> "unreachable" is the kind of claim that gets working code deleted.
+
 That distinction is worth more than the wording. "A stranded intent is
 retryable" and "a stranded intent is recoverable by an admin through
 reconciliation" describe different security postures, and the first would tell
@@ -2988,6 +2994,62 @@ documentation overstatements of financial-safety properties removed.
 **Tests run and their results.** Documentation only; no source file changed.
 All four required checks were green on `0f307b2` before these edits and re-run
 on the new head. `readiness.json` parses and the report renders, exit 0.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Unchanged: the owner decision in 0007.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`.
+
+---
+
+## 2026-10-26 — the over-correction that would have deleted working code
+
+A third review round on `cc97572`, one finding, and it is the most useful of
+the eight this PR produced.
+
+**What I wrote, and why it was wrong.** Correcting the `submitting` retry claim,
+I wrote that `PlaidTransferProvider.executeTransfer()`'s tolerance of
+`status === 'submitting'` is "unreachable over HTTP, because the route is its
+only caller and the route gates on `ready`". The gate is real; the conclusion
+is not. Verified by reading the ordering:
+
+1. `app/api/transfers/[id]/execute/route.ts` claims a `ready` intent and
+   `UPDATE … SET status = 'submitting'` inside a transaction (gated
+   `AND status = 'ready'`).
+2. The transaction commits.
+3. Line 166 then calls `provider.executeTransfer(...)`.
+4. `PlaidTransferProvider` line 279 re-reads the row, sees `submitting`, and
+   passes **because of** the `intent.status !== 'submitting'` clause.
+
+So that clause is on the **happy path of every live execute**. Calling it
+unreachable is not a harmless imprecision: it is the kind of note that gets a
+branch deleted as dead code during a cleanup, and deleting it would make every
+live execute throw `Cannot execute intent in status: submitting`. The
+documentation would have caused the outage, not the code.
+
+**The real distinction.** The route refuses a **pre-existing** `submitting`
+intent — a row that was already in that state when the request arrived — which
+is a different thing from the `submitting` state the route itself just wrote.
+Both facts are true at once, and collapsing them in either direction produces a
+false statement: "retryable here" (round two) overstated what a client can do,
+"unreachable" (round three) understated what the code relies on.
+
+**The pattern, now four for four.** Every claim this PR got wrong was a
+*boundary* claim — the instance-count bound, the idempotency retention bound,
+who can trigger a retry, and which code paths reach a branch. None was a wrong
+fact; each was a correct fact with its scope mis-drawn. Worth knowing about
+this class of document: the risk is not inventing things, it is asserting the
+edges of true things without tracing them.
+
+**Financial or security behaviour affected.** None in code. One documentation
+claim corrected that could have motivated a behaviour-breaking change.
+
+**Tests run and their results.** Documentation only; no source file changed.
+All four required checks were green on `cc97572` before this edit. `lib/` and
+`app/` remain byte-identical to `master` — re-verified, and the four
+`PLAID_TRANSFER_LIVE`/`CA_EFT_LIVE` matches in the branch diff are all prose,
+including the sentences asserting no flag changed.
 
 **Migration impact.** None. **Rollback requirement.** None.
 
