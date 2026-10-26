@@ -69,7 +69,7 @@ Client (React 19)
 | `lib/webhooks/dlq.ts` | Dead-letter queue reads and requeue |
 | `lib/internal-reconciliation.ts` | Balance/ledger reconciliation checks, run by the cron route |
 | `lib/repositories/BaseRepository.ts` | Repository base. `exists()`/`count()` take a `sql` **fragment**, never a condition string — see the note under Coding Standards |
-| `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise |
+| `lib/rate-limit.ts` | Fixed-window limits per endpoint class; Redis when `REDIS_URL` is set, in-process otherwise. A Redis failure degrades that instance for a **30s cooldown**, then retries — it is not the permanent latch it once was. `rateLimitBackendHealth()` reports the active backend and a cumulative degradation count, with no credential in it |
 | `scripts/verify-migrate.sql` | Read-only check that `/api/migrate` applied everything code reads. Safe against production |
 | `lib/migrations/types.ts` | Migration versioning types. Carries the distinction the whole mechanism rests on: **detecting an end state is not knowing it ran**, which is why `baseline_detected` and `applied` are different statuses |
 | `lib/migrations/registry.ts` | The three authorization-gated `migrations/*.sql` files, each with a read-only catalogue probe for its end state. Reuses `MONEY_COLUMNS` from `lib/db.ts` rather than restating it. The ~103 statements in the migrate route are deliberately **not** entries — they are a convergent reconciler, not versioned migrations |
@@ -77,6 +77,7 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
+| `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
 ---
 
@@ -197,6 +198,24 @@ pnpm install
 pnpm dev
 ```
 
+**Every GitHub Action is pinned to a commit SHA, never a tag.** `uses:
+owner/action@v4` resolves a *mutable* pointer: the action's owner, or anyone
+who compromises that repository, can repoint `v4` at new code and it runs on
+the next job here with no diff and no review in this repo. That is arbitrary
+code execution inside CI holding the job token — and in the secret-scan job it
+would sit alongside a downloaded binary reading the whole git history, while
+CodeQL's job holds `security-events: write`. Pin the 40-hex SHA and keep a
+trailing `# vN` so the version is still legible:
+
+```yaml
+uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+```
+
+Take the SHA from a run log line `Download action repository 'owner/action@vN'
+(SHA:…)` — that is the commit CI actually resolved, which is better provenance
+than a tag looked up separately. `lib/__tests__/workflow-action-pinning.test.ts`
+enforces this; without it an unpinned action passes every other check.
+
 **Package manager: pnpm, and only pnpm.** `pnpm-lock.yaml` is the single
 lockfile; `package-lock.json` was removed because carrying both meant CI
 validated one while Vercel built from the other, and deploys broke silently
@@ -228,8 +247,12 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **57 files /
-821 tests** as of this writing, and the suite is expected to stay fully green.
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **61 files /
+901 tests** as of this writing — measured on the merged tree after PR #68
+landed, not carried over from either side of the merge. Both branches had
+written a different number here (844 and 836) and the merge conflicted on
+exactly this sentence; resolving it by measuring is the only way the number
+means anything. The suite is expected to stay fully green.
 That count was stale at "51 files / 735 tests" for several changes; it is a
 number worth keeping current precisely because it is the thing a reader checks
 a run against.
@@ -465,8 +488,25 @@ arbitrary end user.
   **ownership**, which is the coupling that blocks audit immutability and what
   Phases 2-5 of
   `docs/decisions/0005-migration-privilege-separation.md` exist to resolve.
-  `clientIdentifier()` trusting `x-real-ip` first remains **unverified**, not
-  cleared.
+  `clientIdentifier()` resolution is now `x-vercel-forwarded-for` →
+  `x-real-ip` → rightmost `x-forwarded-for` hop, each validated as a
+  syntactically plausible IP, with `clientIdentity()` reporting which header
+  the value came from. **Which of those the platform actually sets — and
+  therefore which a client cannot forge — remains unverified, not cleared.**
+  `api.vercel.com` and the deployment host both answer `403 CONNECT` through
+  the engineering environment's egress proxy, so Vercel's own documentation
+  cannot be read from here, and third-party accounts contradict each other and
+  the official docs. Validation narrows the key space from "any string a client
+  sends" to "any string shaped like an IP"; it does **not** stop an attacker
+  rotating valid addresses, and nothing should describe it as doing so. Read
+  every limit keyed on this as "best effort per *apparent* client".
+  `clientIdentity().source` narrows the question to a real request instead of
+  documentation, but **does not answer it on its own**: a forged
+  `x-vercel-forwarded-for` that the platform overwrote and one it passed
+  through both report the same `source`. The deciding fact is whether the
+  resolved `id` **equals** the value the client sent, so the observation is a
+  forged distinctive value plus that equality as a boolean — never the address
+  itself.
   The operator limit's strength depends on a backend that can degrade
   silently. `REDIS_URL` **is set in production** (owner-reported 2026-10-20,
   name only), so the counter is nominally the shared 6/hour. But
@@ -474,13 +514,16 @@ arbitrary end user.
   command failure, which makes it `6 × instances`. That difference IS
   caller-visible — `allowed` and `remaining` change, and a caller spreading
   requests across instances can exceed the nominal limit; what the fallback
-  provides is **no explicit signal that the backend failed**. And it
-  **latches**: `redisUnavailable`
-  has no production reset path (both resets are test-only), so a degraded
-  instance stays degraded until it recycles. The **raw exception** is deliberately
-  not logged, because a Redis client error can embed the credential-bearing
-  URL; a generic degradation line *is* emitted to stderr, so a signal exists
-  but carries no detail. Read "6/hour" as "6/hour
+  provides is **no explicit signal that the backend failed**. It no longer
+  **latches**: a failure now opens a 30s cooldown and then retries, so an
+  instance recovers on its own rather than staying degraded until it recycles.
+  (It did latch — `redisUnavailable` had no production reset path, and because
+  ioredis connects lazily the *command* catch was the one that fired, so a
+  single dropped connection permanently demoted an instance.) The **raw
+  exception** is still deliberately not logged, because a Redis client error
+  can embed the credential-bearing URL; the degradation line names the stage
+  and a cumulative count, and `rateLimitBackendHealth()` exposes the same
+  facts for a monitored path. Read "6/hour" as "6/hour
   while Redis is answering", and prove the backend with
   `POST /api/admin/operations/redis-rate-limit` rather than inferring it from
   the variable being set — bearing in mind that a pass covers only the
@@ -495,6 +538,29 @@ arbitrary end user.
   PostgreSQL — which this endpoint always has, since it cannot run without
   `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
   the migration that it limits, so it belongs with Phase 2.
+- **Fail-closed by risk class is an open owner decision, with a
+  recommendation.** When shared rate limiting is lost — Redis unreachable, or
+  no usable client header — every bucket currently fails *open*: the request is
+  served under a weaker or collapsed limit. Whether that is right depends on
+  the bucket, and the two failure modes are not symmetrical:
+
+  | Bucket | Key | On Redis loss | On header loss (`source: 'none'`) | Recommended |
+  |---|---|---|---|---|
+  | `auth:login` | `client:email` | `5 × instances` per email | still per-email | **leave fail-open** — a refusal locks out real users and the per-email key bounds the damage |
+  | `auth:register` | client | `3 × instances` | **global 3/hour** | fail-open, but the collapse is an availability cliff worth alerting on |
+  | `auth:password-reset` | client | `3 × instances` | **global 3/hour** | as above |
+  | `money:send`, `money:split-pay`, `money:transfer-execute` | user id | `N × instances` | unaffected — keyed on the authenticated user | **owner decision, one policy for all three.** Refusing protects velocity limits; it also blocks customer payments during an infrastructure fault |
+  | `schema:migrate-operator` | admin id | `6 × instances` | unaffected | leave fail-open — see the Release 1.0 lockout note above |
+  | `schema:bootstrap` | client | `N × instances` | **global** — any anonymous caller can exhaust the break-glass for everyone | leave fail-open; refusing recreates the lockout this path exists to break |
+
+  The money buckets are the only genuine dilemma, and it is a business
+  judgement, not an engineering one: silently losing shared velocity protection
+  versus refusing legitimate payments during a Redis outage. **Not implemented
+  either way** — doing so unilaterally would either weaken a financial control
+  or interrupt customers. The buckets keyed on an authenticated user id are
+  unaffected by header loss, which narrows the question to Redis availability
+  alone.
+
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
   `ProviderEventRepository` both use `sql.json`) — an earlier note here claimed
@@ -620,7 +686,7 @@ which a balance-rewriting migration gets applied twice.
 | `NEXT_PUBLIC_APP_URL` | Full origin URL without trailing slash, e.g. `https://carloscab74.vercel.app` |
 | `MANNA_ENV` | `sandbox`, spelled exactly, declares a sandbox deployment. `VERCEL_ENV=production` overrides it, so no value here can weaken a production deploy |
 | `CRON_SECRET` | Required by the reconciliation cron route; unset means the route refuses |
-| `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit — the flag latches until the instance recycles, the **raw exception** is unlogged by design while a generic degradation line is emitted to stderr, so callers get no explicit failure signal and operators get one undetailed line. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** `redisUnavailable`, `redisClient` and `memoryCounters` are module-level (`lib/rate-limit.ts:138`, `:137`, `:95`), so they are per serverless instance: another live instance can be latched into in-process counting while this one answers pass. Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
+| `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit. A failure opens a **30s cooldown** (`redisDownUntil`) and then retries, so it no longer latches until the instance recycles; the **raw exception** is unlogged by design, while a degradation line naming the stage and a cumulative count goes to stderr, so callers get no explicit failure signal and operators get one line with no connection detail. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** The backend state (`redisClient`, `redisDownUntil`) and the in-process counters are module-level, so they are per serverless instance: another live instance can be counting in-process while this one answers pass. (Line numbers are deliberately not cited here — they went stale within a day of being written.) Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |
 | `CA_EFT_LIVE` | `true` enables live CA EFT. Any other value, including unset, is sandbox |
 

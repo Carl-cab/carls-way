@@ -79,8 +79,80 @@ have been timed too.
 psql "$RESTORE_TARGET_URL" -f scripts/verify-migrate.sql
 ```
 
-This is the existing read-only check. Every row must report present. An
-`ABSENT` row means the backup predates a migration, which is exactly the
+This is the existing read-only check. **Every row must read `OK`.**
+
+Gate on that, and *only* on that. The script can report a problem in four
+different wordings, and enumerating them is how you miss one:
+
+| Section of `verify-migrate.sql` | Failure wording |
+|---|---|
+| 1 — tables | `MISSING` |
+| 2 — columns | `MISSING` |
+| 3-4 — unique indexes behind upserts | `MISSING — upsert will fail` |
+| 5 — money column types, absent | `ABSENT` |
+| 5 — money column types, present but not numeric | `WRONG TYPE — <type>` |
+
+Two earlier versions of this runbook got the gate wrong, both by listing
+failures instead of requiring success:
+
+- The first said the criterion was "no `ABSENT` objects". A dropped **table,
+  column or index** reports `MISSING`, so an operator checking for `ABSENT`
+  saw nothing. Measured: dropping `transactions.correlation_id` produced
+  `transactions.correlation_id | MISSING` and zero occurrences of `ABSENT`.
+- The second counted `MISSING|ABSENT` — and still missed `WRONG TYPE`, so a
+  money column restored as `REAL` or `DOUBLE PRECISION` passed the gate. That
+  is the same mistake as the first, committed inside the fix for it.
+
+So require every row to begin with `OK`. A whitelist cannot be incomplete in
+the dangerous direction; a blacklist of failure words can, and twice has:
+
+```bash
+psql -v ON_ERROR_STOP=1 -t -A -F'|' "$RESTORE_TARGET_URL" \
+     -f scripts/verify-migrate.sql > verify.out || {
+  echo "SCHEMA CHECK DID NOT RUN — this is not a pass"; exit 1
+}
+awk -F'|' 'NF>=2 && $2 !~ /^OK/ {n++} END {print n+0; exit(n != 0)}' verify.out || {
+  echo "SCHEMA CHECK FAILED — non-OK rows above" >&2; exit 1
+}
+```
+
+Four details, each of which was wrong in a draft of this command:
+
+- **`-t -A`** (tuples only, unaligned) matters. With aligned output the script's
+  later sections print their own header rows — two of them begin
+  `problem | user_id | …` — and a naive filter counts those headers as
+  failures. Measured: the aligned form reported **2** non-`OK` rows on a
+  database that was in fact clean, which is a gate that cries wolf every run
+  and therefore gets ignored.
+- **`ON_ERROR_STOP=1` and the `||` exit check** matter as much as the pattern.
+  Without them a `psql` that fails before emitting any row feeds empty input to
+  the counter, which prints `0` — a failed schema check reported as clean.
+- The pattern is `!~ /^OK/`, a **whitelist**. Anything else counts, including a
+  wording nobody has thought of yet. This makes the second field of every row
+  in `scripts/verify-migrate.sql` a **status**, and the file now holds to that
+  everywhere: the two duplicate-detection queries in its section 4 used to put
+  an id or a currency code there. Nothing could pass accidentally — a user id
+  is numeric and the codes are `CAD` and `USD` — but passing depended on the
+  values rather than on the shape, so both now emit `DUPLICATE`. Measured: a
+  database with two `CAD`→`USD` rows emits
+  `fx_rates duplicate pair|DUPLICATE|CAD|USD|2` and the gate fails. Note that
+  a database built from the schema sources already carries the unique
+  constraint, so reaching that state meant dropping it first, on a disposable
+  database — the query exists for databases from before the constraint.
+- **`exit(n != 0)`** matters for anything that is not a human reading the
+  number. The `||` guard above it covers only `psql` failing; `awk` printing
+  `3` still exited `0`, so a wrapper keyed on exit status would accept a
+  restore reporting `MISSING`, `ABSENT` or `WRONG TYPE`. The printed count is
+  kept — an operator wants to know *how many* — and the status now agrees with
+  it.
+
+Verified against three databases, printed count and exit status both: a clean
+restore reports `0` and exits `0`; a restore with a money column altered to
+`REAL` reports `1` (`transactions.amount | WRONG TYPE — REAL`) and exits `1`;
+a nonexistent target reports `DID NOT RUN` and exits `1` rather than printing
+`0`. Re-measured 2026-10-26 after the `exit(n != 0)` change.
+
+Any non-`OK` row means the backup predates a migration, which is exactly the
 discovery worth making now rather than during an outage.
 
 ### 3. Verify the data is coherent, not merely present
@@ -156,13 +228,92 @@ assurance.
 If any row reports `FAIL`, confirm whether the same discrepancy exists in
 production before concluding the restore caused it.
 
-### 4. Run the application's own test suite against the restore
+> **Step order is load-bearing, not stylistic.** §2 (schema check) and §3
+> (financial reconciliation) are read-only and must run **first**, on the
+> preserved restore, because they are the evidence that the backup is faithful.
+> §4 runs elsewhere entirely (below). The Phase 4 privilege probe that follows
+> creates a role and applies grants — a catalogue change on the restore
+> target's cluster. It does not alter table data, so it cannot invalidate §2 or
+> §3, but it is still a mutation and belongs after them, never before.
+
+### 4. Run the application's own test suite — against a SECOND, disposable copy
+
+> **Never point the test suite at `$RESTORE_TARGET_URL`.** The preserved
+> restore is the evidence that the backup is faithful, and §2 and §3 are
+> read-only precisely so that evidence survives them. The suite is **not**
+> read-only, so running it here destroys the thing you restored in order to
+> examine. An earlier version of this runbook said
+> `DATABASE_URL="$RESTORE_TARGET_URL" pnpm test`. That instruction was wrong
+> and is why this warning exists.
+
+**What the suite does to whatever database it is pointed at** — counted on this
+tree, not assumed:
+
+| Behaviour | Files |
+|---|---|
+| Run DDL against `DATABASE_URL` (mostly `initializeSchema()`) | 23 |
+| `DELETE` from `users` / `transactions` / `ledger_entries` / `transfer_intents` via the shared connection | 22 |
+
+Its fixtures also **insert** rows and key them on ids in the **9001–9807**
+range and on fixed fixture emails. On a production-derived copy those
+predicates are not guaranteed to be fictional: if a real customer holds `id =
+9402`, `DELETE FROM users WHERE id = ${USER_ID}` removes that customer's row —
+and the §3 reconciliation you already ran no longer describes anything.
+
+Two claims worth *not* making, having checked them: the two unconditional
+deletes in the suite are both harmless. `bootstrap-auth-deadlock.test.ts` runs
+`DELETE FROM users` against its own scratch database, and the
+`DELETE FROM users WHERE 1=1` in `repository-condition-injection.test.ts` is a
+**string payload** in an injection test that asserts the payload does *not*
+execute. The hazard is the 22 targeted deletes plus the DDL, not a table wipe.
+
+So make a second copy and use that:
 
 ```bash
-DATABASE_URL="$RESTORE_TARGET_URL" pnpm test
+# A separate database, restored from the SAME dump — not a clone of the
+# verified restore, so §2/§3 evidence is never in the path.
+export TEST_COPY_DB="manna_restore_testcopy_$(date -u +%Y%m%d%H%M)"
+createdb --maintenance-db "$RESTORE_TARGET_MAINTENANCE_URL" "$TEST_COPY_DB"
+pg_restore --no-owner --no-privileges --clean --if-exists \
+  --dbname "${RESTORE_TARGET_BASE_URL}/${TEST_COPY_DB}" "$DUMP_FILE"
+export TEST_COPY_URL="${RESTORE_TARGET_BASE_URL}/${TEST_COPY_DB}"
 ```
 
-That confirms the application's SQL matches the restored schema.
+**Sanitize it before running anything.** It holds real customer data, and the
+suite will log, mutate and delete rows in it. At minimum neutralise the
+directly identifying columns and the Plaid tokens, and do it *in* the copy:
+
+```bash
+psql -v ON_ERROR_STOP=1 "$TEST_COPY_URL" <<'SQL'
+BEGIN;
+UPDATE users SET
+  email         = 'sanitized+' || id || '@invalid.test',
+  name          = 'Sanitized User ' || id,
+  username      = 'sanitized_' || id,
+  password_hash = 'x';
+UPDATE bank_accounts SET plaid_access_token_enc = NULL;
+-- Balances and ledger rows are deliberately NOT altered: the point of this
+-- copy is that the application's SQL meets production-shaped money data.
+COMMIT;
+SQL
+
+DATABASE_URL="$TEST_COPY_URL" pnpm test
+```
+
+That confirms the application's SQL matches the restored schema, against
+production-shaped data, without touching the preserved restore.
+
+**Destroy the test copy as soon as the run finishes** — it is sanitized, not
+anonymous, and ids and amounts still correlate:
+
+```bash
+dropdb --maintenance-db "$RESTORE_TARGET_MAINTENANCE_URL" "$TEST_COPY_DB"
+```
+
+**If a second copy cannot be provisioned, skip this step and record it as not
+run.** Running it against the preserved restore to "get the check done" trades
+the only evidence you have for a weaker signal, and the schema check in §2
+already answers most of what this step adds.
 
 **It does not enumerate grants, and an earlier version of this runbook claimed
 it did.** `pg_restore --no-owner` makes the *restoring* role the owner of every
@@ -289,7 +440,7 @@ hold**:
 | Finding | Why it matters |
 |---|---|
 | Restore completed, and how long it took | Measured restore duration — one input to an RTO, not the RTO |
-| `verify-migrate.sql` reported no ABSENT objects | The backup is current with the code |
+| `verify-migrate.sql` ran successfully AND every row began with `OK` (count of non-`OK` rows = 0) | The backup is current with the code |
 | Row counts plausible against production | The backup is not truncated |
 | Money columns are NUMERIC | The restore is not silently corrupt |
 | **All seven** rows from `scripts/reconciliation-check.sql` report `PASS` — paste the output | The financial invariants survived. Aggregate and per-payment checks fail independently, and errors cancel in aggregates, so a subset is not evidence |

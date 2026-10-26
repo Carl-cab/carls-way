@@ -972,6 +972,1317 @@ branch protection so a failing audit can block a merge.
 
 ---
 
+## 2026-10-25 — Sprint 1 Task D: every GitHub Action pinned to a commit SHA
+
+**Purpose and scope.** All seven `uses:` references in `.github/workflows/`
+named a mutable tag (`@v4`, `@v3`). A tag is a pointer the action's owner can
+move, so whoever controls — or compromises — `actions/checkout` could repoint
+`v4` and have it run here on the next job, with no diff and no review in this
+repository. Pinned all of them to 40-hex commit SHAs, keeping a trailing
+`# vN` so the version stays legible.
+
+**Why it matters more than the usual supply-chain advice.** The jobs here are
+not neutral. `actions/checkout` handles the job token; the secret-scan job
+downloads and executes a third-party binary over the entire git history;
+CodeQL's job holds `security-events: write`. A moved tag in any of those is
+arbitrary code execution inside CI with those permissions. The existing
+hardening already recognised this for the *binary* — Gitleaks is pinned by
+version **and** verified against a published SHA256 — so the actions were the
+remaining unpinned executable input.
+
+**Provenance of the SHAs, which is the part worth checking.** This session's
+GitHub access is scoped to `Carl-cab/carls-way`, so the action repositories
+could not be read to resolve the tags (and should not be — the restriction is
+explicit). The SHAs were instead taken from this repository's own CI run on
+`6927ebd`, from the runner's `Download action repository 'owner/action@vN'
+(SHA:…)` lines. That is *stronger* provenance than a separate tag lookup: it
+pins to exactly the commits that produced the green checks on the current
+`master`, rather than to whatever the tag points at now.
+
+| Action | Pinned SHA |
+|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
+| `pnpm/action-setup` | `b906affcce14559ad1aafd4ab0e942779e9f58b1` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
+| `github/codeql-action` (init, autobuild, analyze) | `4bfa242aa49c5f7c6770b98670d354a7dfac05f8` |
+
+**Financial or security behaviour affected.** No application code changed. A
+CI supply-chain path is closed. No workflow trigger, permission, job name or
+step semantics altered — verified by parsing both files and confirming the
+four job names still read exactly `install · typecheck · lint · test · build`,
+`dependency audit`, `secret scan`, `analyze javascript-typescript`, which are
+the contexts branch protection must require.
+
+**Why a test and not just the edit.** Pinning is easy to do once and easy to
+lose: the obvious way to add a step is to copy `uses: owner/action@v4` from
+documentation. Nothing in typecheck, lint or the build reads a YAML file, so an
+unpinned action would reach `master` with six green checks and nothing would
+notice. `lib/__tests__/workflow-action-pinning.test.ts` is the only thing in
+the repository that would. It also asserts the workflow files are *found* —
+without that, deleting the directory would make every other assertion pass
+over an empty list, a green test guarding nothing.
+
+**Tests run and results.** 4 new cases. Full suite **58 files / 836 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings,
+`pnpm install --frozen-lockfile` succeeds. Mutation-checked: reverting one
+action to `@v4` fails the SHA assertion (and the sweep), and removing a `# vN`
+comment fails only the legibility assertion — each mutation caught by the
+intended test.
+
+**Also corrected:** `CLAUDE.md` said "57 files / 821 tests" while `master` was
+actually at 57 / 832 — stale by eleven tests before this change touched the
+line, which is exactly the drift the sentence beneath it warns about.
+
+**Commit / PR.** Commit `f5d0554` on branch `ci/pin-actions-to-shas`, PR
+**#68**, with `371a287` porting the `next` 16.4.3 security bump from PR #69.
+This entry's own corrections follow in a later commit on the same branch. Not
+merged.
+
+**Migration impact.** None.
+
+**Unresolved findings.**
+
+- A CI run log recorded `##[warning]Node.js 20 is deprecated. The following
+  actions target Node.js 20 but are being forced to run on Node.js 24:
+  actions/checkout@v4, actions/setup-node@v4, pnpm/action-setup@v4`. This is
+  about the *action runtime*, not the `node-version: 20` the jobs request, and
+  it is unrelated to pinning — but pinning freezes the affected versions, so
+  the eventual move to action majors that target Node 24 is now a deliberate
+  bump rather than something a tag would have done silently. Recorded, not
+  acted on.
+- The full-tree advisory audit reports **2 critical, 13 high, 8 moderate** in
+  devDependencies (vite, vitest, @vitest/mocker, brace-expansion, esbuild).
+  These do not ship, the blocking tier audits `--prod` only and is clean, and
+  that split is deliberate and documented in `ci.yml`. Worth a look for any
+  that is newly fixable; none blocks a merge.
+
+**Rollback requirement.** Revert the commit. Doing so restores mutable action
+references; prefer fixing forward.
+
+**Next recommended action.** Owner: branch protection remains the blocker —
+see the Sprint 1 report. A write to
+`PUT /repos/Carl-cab/carls-way/branches/master/protection` was *attempted*
+this session and refused by the egress proxy with "Write access to this GitHub
+API path is not permitted through this proxy", so enforcement is BLOCKED on
+owner action rather than merely unattempted.
+
+---
+
+## 2026-10-25 — two review corrections on the Actions pinning (PR #68)
+
+**Purpose and scope.** Review of `f5d0554` found two defects. Both real; one is
+a bypass in the guard that commit added.
+
+**1. The guard had a bypass (Minor, CWE-829).** The matcher required a bare
+`uses:`. YAML accepts whitespace before the colon and a quoted key, so all of
+these set the key `uses` and all of them run:
+
+```yaml
+- uses: owner/action@v4
+- uses : owner/action@v4
+- "uses": owner/action@v4
+- 'uses': owner/action@v4
+```
+
+Verified against a YAML parser: each parses to `{uses: "owner/action@v4"}`. A
+matcher requiring the bare form skips the other three, and because the
+remaining steps still satisfy the seven-reference floor, **the suite would pass
+while a mutable reference merged**. A guard with a bypass is worse than no
+guard, because it is trusted.
+
+All three matchers in the file — the line scanner, the legibility check and the
+belt-and-braces sweep — now tolerate optional quotes and whitespace. Parsing
+the YAML properly would be more thorough, but no YAML parser is available to
+this project and adding a dependency to lint two files is out of proportion;
+the reviewer said the same. So the blind spots are pinned by tests instead.
+
+**The restructuring is the substantive part.** The scanner is now a function
+over *text*, so the bypass spellings can be probed directly with synthetic
+input rather than by mutating the real workflows. Six spellings are asserted
+visible, a commented-out reference asserted ignored, and two cases assert that
+every spelling reaches the SHA check. Mutation-checked: restoring the narrow
+matcher fails five of them.
+
+That matters beyond this file. The previous version could only test what was
+already in `.github/workflows`, which means it could never have tested a form
+the repository does not use — exactly where a bypass lives.
+
+**2. The entry did not name its PR or SHA (Minor).** Corrected: commit
+`f5d0554`, PR **#68**, with `371a287` porting the `next` security bump. The
+learning recorded on PR #67 — that an entry cannot contain its own introducing
+SHA — explains why it arrives a commit later, but it does not excuse omitting
+the PR number, which was knowable at the time.
+
+**Financial or security behaviour affected.** None in the application. A CI
+supply-chain guard that could be bypassed by YAML syntax now cannot be.
+
+**Tests run and results.** 13 cases in
+`lib/__tests__/workflow-action-pinning.test.ts` (9 new, 4 → 13). Full suite
+**58 files / 845 tests passing** (836 + 9), typecheck clean, lint 0 errors /
+28 warnings.
+Mutation-checked: narrowing `USES_LINE` back to `uses:` fails five cases.
+
+**Commit / PR.** This entry's own commit on branch `ci/pin-actions-to-shas`,
+PR **#68**; the SHA is in the commit message.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The guard is a regex, not a parser. It now covers every
+spelling of the key that YAML permits for a mapping, verified against a parser,
+but a sufficiently exotic construction (a merge key, an anchor expanding to a
+`uses` mapping) would still slip past. Recorded rather than built for: those
+forms do not occur in hand-written workflows, and the cost of a YAML dependency
+is not justified by them.
+
+**Rollback requirement.** Revert the commit; the guard returns to a state where
+`uses : owner/action@v4` is invisible to it.
+
+**Next recommended action.** Unchanged: PR #69 first.
+
+---
+
+## 2026-10-26 — quoted action values in the pinning guard (PR #68)
+
+**Purpose and scope.** A third review finding on the same guard, and the same
+class of error for the third time: the matcher was wrong about what it was
+reading. `USES_LINE` captured `(\S+)`, so a YAML quoted scalar
+`uses: "owner/action@<40-hex>"` was captured *with* its closing quote, and the
+`$`-anchored SHA assertion then rejected a correctly pinned action.
+
+**Direction of the defect, stated plainly.** This one fails *closed*: it would
+have blocked a future workflow that quoted its values, not admitted a mutable
+reference. That makes it less dangerous than the `uses :` bypass it sits
+beside, and worth fixing on the same grounds — a guard whose blind spots are
+unprobed is trusted further than it has earned.
+
+**Change.** Both matchers now exclude quote characters from the captured value
+(`["']?([^\s"']+)`). Three spellings added to the synthetic matcher test
+(double-quoted value, single-quoted value, quoted key *and* value) and two
+quoted-value lines added to the SHA-acceptance case, including one with a
+trailing `# v4` comment.
+
+**Financial or security behaviour affected.** None in the application.
+
+**Tests run and results.** 16 cases in
+`lib/__tests__/workflow-action-pinning.test.ts` (13 → 16). Mutation-checked:
+restoring `(\S+)` fails 4 cases.
+
+**Commit / PR.** PR **#68**, branch `ci/pin-actions-to-shas`. The introducing
+SHA is named in the follow-up entry rather than here, for the reason recorded
+on PR #67 — an entry cannot contain its own commit's SHA.
+
+**Migration impact.** None.
+
+**Unresolved findings.** None open on this PR. The guard remains a regex rather
+than a YAML parse; that trade-off and its cost are recorded above.
+
+**Rollback requirement.** None — test-only change.
+
+**Next recommended action.** Owner review and merge of #68.
+
+---
+
+## 2026-10-26 — attribution correction for two entries on PR #68
+
+Appended, not edited: both entries above stay as written.
+
+**What was missing.** Two entries on this branch left their introducing SHA
+unrecorded. The entry "two review corrections on the Actions pinning" said
+"the SHA is in the commit message", which does not put it in the entry. The
+entry "quoted action values in the pinning guard" deferred its SHA to a
+follow-up entry that was never written — so the deferral, which is legitimate
+in itself, became a dangling promise.
+
+**The SHAs.**
+
+| Entry | Commit | PR |
+|---|---|---|
+| two review corrections on the Actions pinning (the `uses :` bypass) | `3927d2d` | #68 |
+| quoted action values in the pinning guard | `ea707f4` | #68 |
+
+Both on branch `ci/pin-actions-to-shas`, which also carries `f5d0554` (the
+original pinning change), `371a287` (porting the `next` 16.4.3 bump from PR
+#69) and `090d490` (merging `master` after #69 landed, resolving the
+`PROJECT_MEMORY.md` append conflict).
+
+**The pattern, since it is now three occurrences.** An entry cannot contain
+the SHA of the commit that introduces it, so the SHA has to arrive one commit
+later — and twice on this branch, and once on #70, that later commit recorded
+something else and the SHA was forgotten. "Named in a follow-up entry" is only
+true once the follow-up exists. The reliable form is to write the deferral and
+the follow-up in the same working session, which is what this entry does.
+
+**Financial or security behaviour affected.** None. Attribution only.
+
+**Tests run and results.** No code change; the suite on this branch is **58
+files / 848 tests passing** as of `090d490`.
+
+**Commit / PR.** PR **#68**; this entry's own SHA is the one case the rule
+genuinely cannot name, and nothing further is promised for it.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #68.
+
+---
+
+## 2026-10-26 — a latent time-dependent flake in the recovery suite (found via PR #68)
+
+**How it surfaced.** CI failed on `c703ee0`, a commit that touched only
+`PROJECT_MEMORY.md`. `install · typecheck · lint · test · build` reported **1
+failed | 847 passed**:
+`transfer-recovery-c1.test.ts > findStuckTransfers > flags a posted intent
+stuck past 24h for manual review, not a fresh one`, with
+`duplicate key value violates unique constraint
+idx_transfer_intents_provider_reference`,
+`Key (provider_reference_id)=(trf_c13_posted_1792977822725)`.
+
+**The defect, which is on `master` and not in PR #68.** The test helper built
+`provider_reference_id` as `trf_c13_${status}_${Date.now()}`. That column is
+covered by a unique index, and the failing case inserts **two `posted`
+intents back to back** — one aged 25 hours, one aged 1 hour. Two calls with
+the same status inside one millisecond therefore produce the *same* reference
+and the second insert raises 23505. Nothing about the assertion is wrong; the
+fixture collides with itself, and whether it does depends on how fast the
+runner is.
+
+**Measured, not inferred.** Against a real database, the two inserts the test
+makes:
+
+| Reference scheme | First insert | Second insert |
+|---|---|---|
+| `trf_c13_posted_<ms>` (old) | ok | **rejected, 23505** |
+| `trf_c13_posted_<ms>_<pid>_<n>` (new) | ok | ok |
+
+**Fix.** A per-call counter plus a run tag (`Date.now()` and the pid). The
+counter cannot collide within a run; the run tag keeps references distinct
+across runs in a reused database, which the suite's own guidance warns about.
+
+**Financial or security behaviour affected.** None — test fixture only. But
+worth stating why it mattered: this suite exists because the stuck-transfer
+query, the partial unique index and the `ON CONFLICT` sweep are database
+behaviour a mock cannot verify. A fixture that fails on its own id generation
+produces a red build that says nothing about the invariant under test, and a
+red build nobody can attribute is how a suite stops being believed.
+
+**Tests run and results.** Full suite **58 files / 848 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings. The collision reproduction above
+was run separately against a disposable database.
+
+**Commit / PR.** PR **#68**, branch `ci/pin-actions-to-shas`; SHA named in a
+later entry, and this time the follow-up is written in the same session — see
+the attribution-correction entry immediately above for why that matters.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The fix is carried on #68 because #68's CI is what
+went red and a separate PR would leave it red until that PR merged. It is
+**not** related to action pinning, and it belongs to `master`: every open
+branch shares the defect until one of them merges. Also unexamined: other
+fixtures in the suite that build identifiers from `Date.now()` may have the
+same shape. Not audited here, and not claimed to be clean.
+
+**Rollback requirement.** None — reverting restores a flaky fixture.
+
+**Next recommended action.** Owner review and merge of #68. Afterwards, a sweep
+for other `Date.now()`-derived identifiers in fixtures would be cheap and is
+worth doing once.
+
+---
+
+## 2026-10-21 — Redis degradation recovery: the latch is now a cooldown
+
+**Purpose and scope.** `lib/rate-limit.ts` held `let redisUnavailable = false`,
+set on the first Redis failure and cleared only by two test-only helpers. There
+was no production reset path, so the flag latched: an instance that saw one
+transient error counted in-process for the rest of its life, including after
+Redis recovered. Replaced with a 30s cooldown that retries, plus non-secret
+degradation accounting.
+
+**Why it was worse than it reads.** `new Redis(url)` almost never throws —
+ioredis connects lazily — so the construction `catch` was not the path that
+fired during an outage. The *command* catch in `checkRateLimit()` was. One
+dropped connection was therefore enough to convert every shared limit on that
+instance to `limit × instances` permanently, `money:send` and
+`money:transfer-execute` included. That is the "high-risk financial operations
+must not silently lose their intended shared velocity protection" case.
+
+**Financial or security behaviour affected.** Rate limiting is a security
+control, so this is a deliberate behaviour change. Fail-open is **preserved**:
+a Redis outage still yields a decision rather than a refusal, and a test
+asserts it for `schema:bootstrap` specifically, because refusing there would
+make `REDIS_URL` a hard dependency of the only schema-migration path — the
+Release 1.0 lockout shape. Fail-closed by risk class was considered and **not**
+implemented: refusing `money:send` during a Redis outage blocks customer
+payments, which is a policy decision for the owner, not a change to slip into
+a hardening commit. No balance, ledger, provider or credential path is touched.
+No live-money flag changed.
+
+Three further properties kept deliberately: the raw exception is still never
+logged (a Redis client error can embed its credential-bearing URL — asserted by
+a test that the line contains neither the password nor the host); construction
+is now serialised through one in-flight promise, because N concurrent cold
+requests each ran `new Redis(url)` and leaked all but the last; and
+`__setRedisClientForTests()` no longer clears the degraded flag, since nothing
+in production clears it as a side effect of acquiring a client and a helper
+that did would hide the transition the new tests exist to observe.
+
+**Tests run and results.** `lib/__tests__/rate-limit-degradation-recovery.test.ts`,
+12 new cases across degradation recording, cooldown bounding, recovery,
+concurrency, shared accounting with the verification route, and preserved
+fail-open. Full suite **58 files / 844 tests passing** on a fresh database with
+the CI fixture applied; typecheck clean; lint 0 errors / 28 warnings.
+Mutation-checked: restoring the permanent latch (`redisDownUntil > 0` instead
+of `Date.now() < redisDownUntil`) fails three cases, including "retries once
+the cooldown has elapsed, and recovers".
+
+**Commit / PR.** Commit `487b789` on branch `ops/redis-degradation-recovery`,
+PR **#67**, opened against `c2859f6` (the PR #65 merge). Not merged.
+
+**Migration impact.** None.
+
+**Readiness impact.** `Redis-backed rate limiting in production` stays
+**PARTIAL**, per the owner's instruction and on the merits: the never-recovers
+failure mode is gone and a fallback is now locally observable, but the counters
+are still per serverless instance and nothing external scrapes the signal. A
+passing verification POST still samples one instance.
+
+**Unresolved findings.**
+
+- Nothing *consumes* `rateLimitBackendHealth()` yet. The signal exists; the
+  alerting does not. That is the next step and it is an operations change, not
+  a code one.
+- Fail-closed-versus-fail-open by endpoint risk class remains an open owner
+  decision, recorded above.
+- `clientIdentifier()` still prefers an unvalidated `x-real-ip`. Untouched
+  here on purpose — see the header findings; it needs its own change.
+- Separately and more urgently: `pnpm audit --prod` began failing on `master`
+  at `c2859f6` with two newly published **high** advisories in
+  `follow-redirects` 1.16.0 (GHSA-q3jh-wrc6-jgq8, GHSA-8r9p-f939-6h3c), reached
+  via `plaid > axios > follow-redirects`. Both concern credential-header
+  exposure across a cross-origin redirect, and Plaid requests carry
+  `PLAID-SECRET` and `PLAID-CLIENT-ID`. Patched in 1.16.1. Handled in its own
+  change ahead of this one.
+
+**Rollback requirement.** Revert the commit. The previous behaviour was the
+latch, so a rollback reinstates a known defect rather than a neutral state —
+prefer fixing forward.
+
+**Next recommended action.** Owner: decide fail-open versus fail-closed by risk
+class, and whether `rateLimitBackendHealth()` should be surfaced on an
+authenticated operations route for scraping. Engineering: the
+`follow-redirects` advisory first, then header-trust boundaries.
+
+---
+
+## 2026-10-21 — three review corrections on the Redis cooldown (PR #67)
+
+**Purpose and scope.** Review of `6bf491e` found three defects; all three were
+verified against source before changing anything, and all three were real.
+
+**1. A connection leak, introduced by the fix itself (Major).**
+`markRedisDegraded()` set `redisClient = null` on every stage, including a
+*command* failure. Nothing calls `quit()` or `disconnect()` on the abandoned
+instance, so its socket and its own reconnect loop keep running while the next
+request after the cooldown constructs a brand new client. Repeated outages
+accumulate orphans — the same leak the serialised construction in that very
+commit exists to prevent, reintroduced one function later. Now only a
+`'construct'` failure discards the client; a command or verify failure keeps it,
+which also keeps ioredis's own reconnect machinery. `rateLimitBackendHealth()`
+already guarded `activeBackend` on `!inCooldown`, so retaining the client does
+not make health claim Redis is in use — asserted by a new test.
+
+**2. A self-contradicting readiness row (Minor).** The evidence string in
+`scripts/status/readiness.json` still said the limiter "sets
+`redisUnavailable=true`" and that "the flag LATCHES — the only resets are
+test-only", and cited `lib/rate-limit.ts:138` for a variable the same commit
+deleted. The suffix appended in that commit then said the latch had been
+replaced, so one field described one control two contradictory ways. The cause
+was mine: I **appended** to a current-status file as though it were
+append-only. Only `PROJECT_MEMORY.md` is. Rewritten to describe `redisDownUntil`
+and the cooldown, keeping the per-instance PARTIAL rationale and one explicit
+note that an earlier version described the old latch.
+
+The same stale claim was in two files the review did **not** flag —
+`CLAUDE.md`'s `REDIS_URL` row and the pre-flight step in
+`docs/STAFF_ONLY_REAL_RAIL_TEST_MATRIX.md` — found by sweeping for the class
+rather than the cited line. Both corrected. Line-number citations are now
+dropped rather than updated: `:138`, `:137`, `:95` went stale within a day of
+being written, which is an argument against citing lines in prose at all.
+The copy at `PROJECT_MEMORY.md:772` is in an already-merged entry and is
+corrected here by appending, not by editing it.
+
+**3. A test whose name over-claimed (nitpick, and the most instructive).**
+"serialises in-flight construction so concurrent callers share one client" ran
+with no `REDIS_URL`, so `getRedis()` returned `null` before it ever read
+`redisConstruction`. It would have passed with the serialisation deleted.
+Replaced with an isolated case that mocks `ioredis`, re-imports the module and
+asserts the constructor is called exactly once under five concurrent callers;
+the original is kept under an honest name covering what it actually tests. This
+is the fourth defect of the same shape in this work — a check covering part of
+its subject, described as covering all of it — and this time it was in the
+coverage claim for a leak fix.
+
+**Financial or security behaviour affected.** No behaviour change beyond the
+leak fix. Rate limiting still fails open, still never logs the raw exception.
+
+**Tests run and results.** 15 cases in
+`lib/__tests__/rate-limit-degradation-recovery.test.ts` (3 new). Full suite
+**58 files / 847 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+Mutation-checked individually: discarding the client on every stage fails
+"keeps the client across a command failure instead of orphaning it", and
+removing the in-flight promise fails "constructs the Redis client once under a
+concurrent cold start" — one test each, neither failing for the other's reason.
+
+**Commit / PR.** Commit `6b4433a` on branch `ops/redis-degradation-recovery`,
+PR **#67**. Not merged.
+
+**Migration impact.** None.
+
+**Readiness impact.** Unchanged: still **PARTIAL**.
+
+**Unresolved findings.** As in the preceding entry — nothing consumes
+`rateLimitBackendHealth()`, fail-open versus fail-closed by risk class is an
+owner decision, and `clientIdentifier()` still prefers an unvalidated
+`x-real-ip`.
+
+**Rollback requirement.** Revert the commit; the prior state carries the
+connection leak.
+
+**Next recommended action.** Unchanged: merge #66 first, then branch
+protection, then this PR.
+
+---
+
+## 2026-10-21 — the verification route's non-throwing failures now open the cooldown (PR #67)
+
+**Purpose and scope.** `verifyRateLimitBackend()` has two failure branches that
+return **without throwing**: the read-back marker not matching, and the cleanup
+`del` not removing exactly one key. Both returned
+`verification: 'failed'` with `activeBackend: 'in_memory_fallback'` while
+recording nothing, so the catch never saw them and no cooldown opened. The
+route therefore answered "the backend failed" while `rateLimitBackendHealth()`
+still reported `redis` and the next `checkRateLimit()` retried the retained
+client. One function, two contradictory answers about one control.
+
+Both branches now call `markRedisDegraded('verify')` before returning, so the
+answer, the health report and the limiter's next action agree.
+
+**The asymmetry is deliberate and is now pinned by a test.** The third branch,
+`NX` refusing the write, does **not** record a degradation and must not. `NX`
+refusing means the key already existed, which proves Redis answered correctly —
+the probe simply could not claim its name. Opening a cooldown there would
+demote a healthy backend on a 1-in-2^122 UUID clash. A comment says so at the
+branch, specifically to stop a future reader adding the call "for symmetry",
+and a test asserts the count stays zero.
+
+**Why this surfaced now.** The inconsistency predates this PR, but the previous
+code discarded the client on every failure and set a permanent latch, so the
+window was narrower. Retaining the client — the correct fix for the connection
+leak — is what made it reachable, which is a fair example of one fix exposing
+the next.
+
+**Financial or security behaviour affected.** Rate limiting only, and in the
+conservative direction: a verification failure now degrades the instance
+rather than leaving it claiming a backend it just failed to use. Still fails
+open. Raw exception still never logged.
+
+**Tests run and results.** 18 cases in
+`lib/__tests__/rate-limit-degradation-recovery.test.ts` (3 new). Full suite
+**58 files / 850 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+Mutation-checked in both directions: removing the two new calls fails exactly
+the two new branch tests, and adding the call to the collision branch fails the
+asymmetry test. Neither mutation is caught by the other's test.
+
+**Commit / PR.** Commit `c753907` on branch `ops/redis-degradation-recovery`,
+PR **#67**. Not merged.
+
+**Migration impact.** None.
+
+**Readiness impact.** Unchanged: **PARTIAL**.
+
+**Unresolved findings.** As before — nothing consumes
+`rateLimitBackendHealth()`, fail-open versus fail-closed by risk class is an
+owner decision, and `clientIdentifier()` still prefers an unvalidated
+`x-real-ip`.
+
+**Rollback requirement.** Revert the commit.
+
+**Next recommended action.** Unchanged: merge #66 first, then branch
+protection, then this PR.
+
+---
+
+## 2026-10-21 — corrections: missing commit SHAs, and two now-stale merge notes
+
+**Purpose and scope.** Review of `69ee273` noted that the entry for the
+verification-path fix recorded PR #67 but no implementing commit SHA, which the
+governance rule in `CLAUDE.md` requires for every material change ("commit SHA
+and PR"). Correct, and it applied to more than the flagged entry: **three** of
+this branch's entries named only the branch and PR. Each now carries its SHA —
+`487b789` (the cooldown), `6b4433a` (the three review corrections), `c753907`
+(the verification path) — filled in on entries that have never been merged,
+which completes them rather than editing history, the same precedent as the
+Phase 1 entry.
+
+**Two notes that the merges made stale, corrected here by appending rather
+than edited in place, because both are now history:**
+
+- The `follow-redirects` entry reads "Branch `sec/follow-redirects-advisory`,
+  cut from `c2859f6`. Not merged." It **is** merged: commit `939bb91`, PR #66,
+  merged as **`6927ebd`**. Post-merge CI on `master` was 4/4 green and
+  `pnpm audit --prod` reports no known vulnerabilities.
+- The Phase 2 and Phase 1 references elsewhere stand as written.
+
+**This branch's own state**, so the record is not left implying otherwise:
+`69ee273` merges `master` after #66 landed, resolving an append-only conflict
+in this file by keeping both sides; `207eb66` adds docstrings to
+`rateLimitBackendHealth()` and `getRedis()` after a docstring-coverage check
+reported 66.67% against an 80% threshold on the functions this diff touches.
+`checkInMemory` predates the PR and was deliberately left alone rather than
+widening the diff.
+
+**Financial or security behaviour affected.** None. Documentation only.
+
+**Tests run and results.** 58 files / 850 tests passing, typecheck clean,
+lint 0 errors / 28 warnings.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/redis-degradation-recovery`, PR **#67**. Recorded in the commit message,
+since an entry cannot name the SHA of the commit that introduces it — which is
+why the three SHAs above were added one commit later rather than at the time.
+
+**Migration impact.** None.
+
+**Unresolved findings.** None new. The open items on this PR are unchanged:
+nothing consumes `rateLimitBackendHealth()`, fail-open versus fail-closed by
+risk class is an owner decision, and `clientIdentifier()` still prefers an
+unvalidated `x-real-ip`.
+
+**Rollback requirement.** Revert the commit; documentation only.
+
+**Next recommended action.** Owner: branch protection, then #67.
+
+---
+
+## 2026-10-21 — health reported Redis on a timer rather than an observation
+
+**Purpose and scope.** `rateLimitBackendHealth()` computed
+`activeBackend: redisClient && !inCooldown ? 'redis' : …`. Once the 30s
+cooldown elapsed it reported `redis` — but the retained client is the one that
+just failed, and nothing had yet proved it works, so the very next
+`checkRateLimit()` could fall straight back to in-process counting while the
+health snapshot claimed shared limiting. The claim rested on a clock expiring,
+not on an observation. `degraded` is now part of the condition, and it clears
+only when a real Redis operation succeeds.
+
+**Second half, needed for the first to be usable.** `markRedisHealthy()` was
+called from exactly one place — the `checkRateLimit` success path — so a
+*passing operator verification* did not clear the flag. With `!degraded` added,
+that would have left health reporting the fallback indefinitely after the
+verification route said the backend was fine: the route and the health report
+disagreeing about one backend, which is the defect this same function already
+had once in the other direction. A completed set/get/delete round trip is proof
+the backend works, so it now clears the flag too.
+
+**The asymmetry holds, and is tested.** Neither an `NX` collision nor a failed
+cleanup reaches the clearing call, and neither should: `NX` refusing is not a
+backend failure, but it is not evidence of health either, so it must neither
+record nor clear a degradation.
+
+**Why this one is a fair catch rather than a regression.** It is the third
+finding in this PR of a single shape — *a state report disagreeing with what
+the code will actually do next* — and each has been in a different direction:
+the verification path recording nothing, health lying pessimistically about a
+retained client, and now health lying optimistically after a timer. Worth
+naming because the shape, not the instance, is what to look for here.
+
+**Financial or security behaviour affected.** Reporting only. No limit
+decision changes. Still fails open; raw exception still never logged. The
+direction is conservative: health now under-claims until recovery is observed.
+
+**Also corrected:** the docstring added one commit earlier said health
+"reports the fallback whenever a cooldown is open", which is now too narrow —
+it reports the fallback until a success is observed. Rewritten rather than left
+to go stale, since that is the error this PR has already corrected twice.
+
+**Tests run and results.** 21 cases in
+`lib/__tests__/rate-limit-degradation-recovery.test.ts` (3 new). Full suite
+**58 files / 853 tests passing**, typecheck clean, lint 0 errors / 28 warnings.
+Mutation-checked both halves: dropping `!degraded` fails three cases including
+the new post-cooldown one; removing `markRedisHealthy()` from the verification
+success path fails exactly one, and not the others.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/redis-degradation-recovery`, PR **#67**; the SHA is in the commit message,
+per the note in the preceding entry.
+
+**Migration impact.** None.
+
+**Readiness impact.** Unchanged: **PARTIAL**. If anything this strengthens the
+case for the row staying there — the health signal is now honest about not
+knowing, which is what a monitored path needs.
+
+**Unresolved findings.** Unchanged: nothing consumes
+`rateLimitBackendHealth()`, fail-open versus fail-closed by risk class is an
+owner decision, `clientIdentifier()` still prefers an unvalidated `x-real-ip`.
+
+**Rollback requirement.** Revert the commit; the prior state over-reports
+backend health in a bounded window.
+
+**Next recommended action.** Owner: branch protection, then #67.
+
+---
+
+## 2026-10-25 — Sprint 1 Task C: client identity gains provenance and validation
+
+**Purpose and scope.** `clientIdentifier()` returned the first non-empty
+`x-real-ip`, unvalidated, then the rightmost `x-forwarded-for` hop. It is the
+rate-limit key for `auth:login`, `auth:register`, `auth:password-reset`,
+`schema:bootstrap` and the webhook endpoints. Reworked into `clientIdentity()`,
+which resolves `x-vercel-forwarded-for` → `x-real-ip` → rightmost
+`x-forwarded-for`, validates each candidate as a syntactically plausible IP,
+and **reports which header the value came from**. `clientIdentifier()` is now a
+thin wrapper, so no call site changed.
+
+**What this does NOT do, stated first because it is the thing most likely to be
+overclaimed.** It does not make the identity unforgeable and it does not stop
+spoofing. An attacker who can set a header can send *valid* addresses and
+rotate them per request. Which of these headers the platform actually sets is
+still **unverified**: `api.vercel.com` and the deployment host both answer
+`403 CONNECT` through this environment's egress proxy — re-confirmed today —
+so Vercel's own documentation cannot be read from here, and third-party
+accounts contradict each other and the official docs.
+
+**What it does do.**
+
+1. **Narrows the key space** from "any string the client sends" to "any string
+   shaped like an IP". Each distinct key is a counter, so unvalidated client
+   input was also unbounded key cardinality in Redis, independent of whether
+   the limit could be evaded. A hostname, a sentence, an unsplit
+   comma-list, an out-of-range octet or 200 bytes of padding no longer becomes
+   a rate-limit key.
+2. **Falls through rather than discarding.** A junk value in the preferred
+   header no longer shadows a good value in a later one — otherwise an attacker
+   could *force* the collapse case deliberately by sending one junk header.
+   That is a new hazard the validation itself would have introduced, caught by
+   its own test.
+3. **Makes the open question answerable.** `clientIdentity().source` means an
+   operator can see which header a real request was keyed on, instead of my
+   asking the owner to find out what Vercel sends. That converts a blocked
+   question into a one-request observation.
+
+**Financial or security behaviour affected.** Rate-limit key derivation only.
+No limit value, no fail-open/closed policy, no money path. The collapse
+constant `'unknown-client'` is unchanged and now pinned by a test, deliberately,
+so changing it to a refusal cannot happen silently.
+
+**The fail-closed recommendation the sprint asked for** is now a table in
+`CLAUDE.md` under Known gaps, per bucket, distinguishing the two failure modes
+— Redis loss (`limit × instances`) and header loss (collapse to one key). They
+are not symmetrical: buckets keyed on an authenticated user id (`money:send`,
+`money:transfer-execute`, `schema:migrate-operator`) are *unaffected* by header
+loss, which narrows the money question to Redis availability alone. The money
+buckets are the only genuine dilemma and it is a business judgement — silently
+losing shared velocity protection versus refusing legitimate payments during an
+infrastructure fault. **Not implemented either way.** `auth:register`,
+`auth:password-reset` and `schema:bootstrap` key on the client alone, so a
+header collapse makes those limits *global*: three registrations an hour for
+the whole platform, and a break-glass path any anonymous caller can exhaust for
+everyone. Recommended to stay fail-open with an alert rather than become a
+refusal, since refusing recreates the Release 1.0 lockout shape.
+
+**Tests run and results.** 20 new cases in
+`lib/__tests__/client-identity.test.ts`. Full suite **58 files / 852 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings. Mutation-checked, each
+guard separately:
+
+| Mutation | Fails |
+|---|---|
+| read the leftmost `x-forwarded-for` hop (the original bypass) | 1 — "ignores the client-supplied prefix" |
+| drop validation so any non-empty string is a key | 8, including every rejected-input case |
+| no fall-through when the preferred header holds junk | 1 — "falls through to a usable header" |
+
+**Commit / PR.** `d858b39` on branch `sec/client-identity-provenance`, **PR
+#71**. Followed by `363dd74` on the same branch and PR, which replaces the
+character-class IP check with `net.isIP` after review: the old check accepted a
+bare `':'` as an address, so a junk `x-vercel-forwarded-for` was selected
+rather than skipped, and it rejected the IPv4-mapped form `::ffff:192.0.2.1`,
+sending a real client to the shared `unknown-client` bucket. That commit also
+adds `money:split-pay` to the Redis-loss decision table — a third bucket keyed
+on the authenticated user id, absent from the table as first written. Suite at
+`363dd74`: **58 files / 857 tests passing**. Carries the `next` 16.4.3 bump
+ported from PR #69. Not merged.
+
+(An earlier version of this paragraph said "the SHA is in the commit message",
+which does not put the SHA in the entry — the governance rule asks for the SHA
+and the PR, and PR #69 is the dependency bump, not this change.)
+
+**Migration impact.** None.
+
+**Unresolved findings.** The header-trust question itself. It needs one fact
+this environment cannot obtain: which of the three headers production actually
+sets. `clientIdentity().source` now makes that a single authenticated
+observation rather than a documentation hunt, but the observation still has to
+be made. Until then no limit keyed on a client IP should be described as
+per-client.
+
+**Rollback requirement.** Revert the commit; the previous behaviour accepts
+arbitrary strings as rate-limit keys.
+
+**Next recommended action.** Owner: PR #69 first (two unauthenticated RCEs),
+then branch protection, then report `clientIdentity().source` from one real
+request so the header question can be closed.
+
+---
+
+## 2026-10-26 — `source` alone does not answer the header-trust question (PR #71)
+
+**Purpose and scope.** A correction to this branch's own claim, appended
+rather than rewritten. Three places — `lib/rate-limit.ts`, `CLAUDE.md`, and
+the entry above — said `clientIdentity().source` converts the header-trust
+question into "a one-request observation". It does not.
+
+**Why.** A request supplying a forged `x-vercel-forwarded-for` and a request
+supplying nothing can both report `source: 'x-vercel-forwarded-for'` — in the
+first case because the platform overwrote the forged value, in the second
+because it set it. **The name is identical and the trust conclusion is
+opposite.** The deciding fact is whether the resolved `id` *equals* what the
+client sent, so the observation is a distinctive forged value plus that
+equality as a boolean, never the address. Found on PR #72 by review, against
+wording I had already corrected once (from one request to two) without
+noticing that the comparison itself was the wrong one.
+
+**Financial or security behaviour affected.** No code behaviour: `source` is
+reported the same way. What changes is what may be concluded from it, which is
+the whole point of the field existing.
+
+**Tests run and results.** Comment and documentation only; suite unchanged at
+**58 files / 857 tests passing**, typecheck clean, lint 0 errors / 28
+warnings.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`; SHA in a
+following entry per the PR #67 learning.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The question itself. It now needs a two-request
+comparison with an equality check, which is a slightly larger ask of the owner
+than what was recorded before — and that is the honest size of it.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #71; the observation
+itself remains an owner action.
+
+---
+
+## 2026-10-26 — the #67/#71 interaction, tested where neither suite reached (PR #71)
+
+**Purpose and scope.** The owner required that, after integrating the first of
+the two rate-limit PRs, the **combined** Redis-recovery and client-identity
+behaviour be tested before merging the second. #67 merged as `a08c82f`; this
+branch's base was updated to it and
+`lib/__tests__/rate-limit-identity-outage-interaction.test.ts` added.
+
+**Why a third file.** Each change was tested against the other's absence:
+the degradation suite drives outage and recovery with a fixed key string, the
+identity suite resolves headers with no Redis in play. Neither answered the
+question an operator has during an incident — **Redis down *and* the header is
+junk: which limits still hold?** The two failure modes are not symmetrical:
+
+| Failure | Effect on a client-keyed bucket | Effect on a user-id-keyed bucket |
+|---|---|---|
+| Redis unreachable | weakened to `limit × instances`, still per-key | weakened to `limit × instances`, still per-user |
+| No usable client header | **key collapses** — all callers share one bucket | **unaffected** — the key never came from a header |
+
+That bottom-right cell is the load-bearing claim in the money-bucket
+recommendation, and nothing executed it until now.
+
+**What the 7 cases pin.** Two users keep separate `money:send` counters during
+a total outage; the three money buckets stay separated from each other; a
+bucket still exhausts per user with Redis absent; every junk header resolves to
+the single `unknown-client` identity; a **forged but well-formed** address is
+used as a key and rotating it evades a client-keyed limit — recorded as a real
+evasion rather than implied, because valid IP syntax is not proof of a trusted
+proxy; the degradation line carries the stage and a count and **not** the
+connection URL, its password, the resolved client address or the email; and
+every bucket class, including both break-glass paths, is still **served**
+during an outage.
+
+**Mutation-checked, both directions:**
+
+| Mutation | Result |
+|---|---|
+| append `url=${process.env.REDIS_URL}` to the degradation line | leak case fails |
+| make `money:send` return `allowed: false` while degraded | 3 cases fail, including the explicit fail-open guard |
+
+**A defect in this very test file, found by that mutation run.** The "no Redis
+at all" case passed only because `REDIS_URL` happened to be **unset** in the
+environment. With it set, the unconfigured path tried to construct a real
+client; the case took 5,005 ms and failed. A test whose outcome depends on an
+ambient variable it never mentions is not a test of the thing it names. It now
+stubs the variable explicitly and passes in **both** environments in ~0.4 s.
+Two stray second arguments to `__setRedisClientForTests()` (which takes one)
+were removed in the same pass.
+
+**Financial or security behaviour affected.** None — no policy change. Every
+bucket still fails **open**, and these tests exist so that a future change to
+either mechanism cannot alter that silently.
+
+**Tests run and results.** 7 new cases; the five rate-limit and identity files
+together 69 passing before the addition. Full suite **61 files / 901 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings. (This read "recorded
+in the following entry with the merge SHA" — a deferral to an entry that was
+never written, which is the same dangling-promise shape already recorded twice
+on #68 and #70. An entry cannot contain its own introducing SHA; it can always
+contain its own test result, so there was nothing to defer.)
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`, base
+updated to `a08c82f` (post-#67). SHA in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None — tests only.
+
+**Unresolved findings.** The header-trust question itself, which still needs
+the two-request production comparison with an equality check. And the
+fail-open/fail-closed decision for the three money buckets, which is an owner
+judgement and is deliberately **not** implemented.
+
+**Next recommended action.** Owner review and merge of #71.
+
+---
+
+## 2026-10-26 — a zone suffix on IPv4 reopened the hole the validator exists to close (PR #71)
+
+**The defect, found by review and worse than reported.** `looksLikeIp()` split
+a value on `%`, validated the zone characters, then accepted the prefix when
+`isIP(prefix) !== 0`. A zone suffix is meaningful only on a **scoped IPv6**
+address (RFC 4007), so this accepted IPv4-with-zone.
+
+The reviewer's framing was that a malformed preferred header could outrank a
+valid `x-real-ip`. True, and measured. But the consequence is larger:
+
+```
+"203.0.113.9%junk"  accepted=true   isIP(prefix)=4
+"203.0.113.9%a"     accepted=true   isIP(prefix)=4
+"203.0.113.9%b"     accepted=true   isIP(prefix)=4
+distinct accepted keys from one address, 8 suffixes tried: 8
+```
+
+**One IPv4 address could mint unlimited distinct rate-limit keys** by rotating
+the suffix — defeating every client-keyed limit and growing counter
+cardinality without bound. Those two things are, verbatim, what this
+validator's own doc comment says it was introduced to prevent. The fix reopened
+its own purpose.
+
+**Fix.** The zone branch now requires `isIP(prefix) === 6`. Four cases added:
+IPv4-with-zone rejected (two forms), a zone with no address rejected, the
+key-minting case asserting four rotated suffixes all collapse to
+`unknown-client`, the precedence case from the review, and one asserting a
+genuine `fe80::1%eth0` still resolves — so the fix cannot be "achieved" by
+breaking the legitimate case. Mutation-checked: restoring `!== 0` fails 4.
+
+**The pattern, now at three.** Every defect in this one function has been a
+hand-rolled judgement about what "looks like an address" means: a bare `':'`
+accepted, the IPv4-mapped form rejected, a zone on IPv4 accepted. `isIP`
+decides correctly in all three. The durable lesson is written into the function
+itself: delegate the decision, and keep the function to splitting the zone off.
+
+**Financial or security behaviour affected.** Rate-limit key derivation. Before
+this fix, `auth:login`, `auth:register`, `auth:password-reset` and
+`schema:bootstrap` — every client-keyed bucket — were evadable by suffix
+rotation. The money buckets were **not** affected: they key on the
+authenticated user id, which is the asymmetry the interaction tests pin.
+
+**Tests run and results.** Full suite **61 files / 907 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`. SHA named
+in a later entry, written in the same session as this one.
+
+**Migration impact.** None. **Rollback requirement.** Reverting restores a
+client-keyed rate-limit evasion; fix forward.
+
+**Unresolved findings.** The header-trust question is untouched by this: valid
+syntax still is not proof of a trusted proxy, and the two-request production
+comparison with an equality check remains outstanding.
+
+**Next recommended action.** Owner review and merge of #71.
+
+---
+
+## 2026-10-25 — Sprint 1 Task E: Phase 0 runbook executed against synthetic data
+
+**Purpose and scope.** Every command in
+`docs/runbooks/backup-restore-rehearsal.md` had been written without ever being
+run, because running it needs a production backup and an owner-provisioned
+target. Ran the whole procedure against a **synthetic** source database
+instead, so the commands — and more importantly the verification steps — could
+be proven to work. Full command-level evidence:
+`docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
+
+**Phase 0 remains NOT RUN.** No customer data, no production credential, no
+production host. What is established is narrower: the procedure executes and
+each of its checks detects the failure it claims to detect. That second half is
+the point — a verification step that cannot fail is decoration.
+
+**Positive case.** `pg_dump` → `pg_restore --no-owner --no-privileges`: exit 0,
+zero stderr, 0.20 s. `verify-migrate.sql`: zero non-`OK` rows.
+Source/target row counts identical. `reconciliation-check.sql`: **7/7 PASS**,
+non-vacuously — the dataset carries one completed internal payment with both
+ledger legs and opening balances, because an empty database passes all seven
+checks for free. Application suite against the restored database: **57 files /
+832 tests passing** (this branch's count). Teardown left zero rehearsal
+databases and zero probe
+roles.
+
+**Negative cases, which are the substance.** Dropping
+`transactions.correlation_id` → caught by step 2. Crediting 20.00 against a
+25.00 payment → 3 of 7 reconciliation checks FAIL. Privilege probe with no
+grants → 114 unreachable rows (20 tables × 4 privileges + 17 sequences × 2);
+with the full grant set → 0. The last pair matters together: a probe returning
+0 means nothing unless it can return non-zero.
+
+**Financial or security behaviour affected.** None in the application. The new
+SQL fixture is **not** read-only — it runs `ALTER TABLE` and several `INSERT`s
+— so it is described here as what it is: a fixture that writes, intended only
+for a disposable synthetic source database. Calling it read-only, as a draft of
+this entry did, would mislead an operator about what happens if it is pointed
+at the wrong database. Otherwise: one audit document and a correction to a
+runbook. No application code.
+
+**Four findings, one of them a defect in a verification step.**
+
+1. **The runbook named the wrong failure word — corrected.** Step 2 said the
+   pass criterion was "no `ABSENT` objects". `verify-migrate.sql` emits
+   **two** words: sections 1-4 report `MISSING`, only section 5 reports
+   `ABSENT`. A dropped table, column or index is therefore invisible to an
+   operator checking for `ABSENT`. Not hypothetical — the first negative case
+   was *initially scored as "the check failed to detect a dropped column"*
+   because the measurement grepped for `absent`. The script was right and the
+   measurement was wrong; an operator following the runbook literally makes the
+   mirror-image error during an incident and calls a damaged restore clean. Now
+   requires every row to read `OK`, with both failure words tabulated and a
+   counting command that catches either.
+2. **`users.balance` diverges across the three schema sources**:
+   `verify-migrate.sql` requires it, `initializeSchema()` creates it, the test
+   fixture omits it — and `schema-source-parity.test.ts` only compares the
+   first two, so nothing flags it. **Deliberately not changed**: the omission
+   may be protective, since `CLAUDE.md` forbids new code touching the legacy
+   column and a fixture without it makes any such read fail loudly with 42703.
+   Owner judgement call.
+3. **Step 4 will fail against a real restore carrying audit history.**
+   `audit_logs.user_id` references `users(id)` with no `ON DELETE` clause, and
+   23 test files `DELETE FROM users` using hard-coded ids in the 9001-9807
+   band. Production ids increment from 1, so above roughly 9000 users those
+   bands overlap and the FK blocks the delete — surfacing as "the application
+   is incompatible with the backup" when it is the harness assuming it may
+   delete users it did not create. Observed here as an id collision of the
+   rehearsal's own making (synthetic user 9501 vs that file's `USER_ID = 9501`)
+   and fixed by renumbering to 99001+; the general hazard is **not** fixed,
+   because both remedies — renumbering test ids, or changing an audit-table
+   FK — deserve their own review.
+4. The fixture's own seeds `splitpayera`/`splitpayerb` carry 500.00 CAD with no
+   ledger entries, so `user_wallets_exactly_match_ledger` reports 2
+   discrepancies against an unmodified fixture database. Correct for a
+   split-payment test, wrong for a reconciliation source — and found *before*
+   any fault was injected, which is the strongest evidence here that step 3b
+   works.
+
+**Tests run and results.** Full suite **57 files / 832 tests passing** on this
+branch, typecheck clean, lint 0 errors / 28 warnings. The suite was
+additionally run against the restored database as runbook step 4, with the same
+result. (A draft said 58 / 836, which is the count on the companion
+`ci/pin-actions-to-shas` branch — a number measured on one tree and recorded
+against another, the same defect as the missing source-preparation step.)
+
+**Commit / PR.** This entry's own commit on branch
+`ops/phase0-synthetic-rehearsal`; the SHA is in the commit message. Carries the
+`next` 16.4.3 security bump ported from PR #69 so CI is green. Not merged.
+
+**Migration impact.** None. `schema_migrations` was empty in the restore, which
+is correct and expected: an empty tracking table means "not adopted into
+tracking", not "no migrations applied".
+
+**Unresolved findings.** Restore duration (0.20 s) is **not** transferable to
+production scale and must not be cited as an RTO input. Backup availability,
+recovery point, production restore duration, and production ownership and
+privileges are all still NOT RUN and need the owner-executed rehearsal.
+
+**Rollback requirement.** Revert the commit; documentation and one SQL fixture
+that writes to a disposable synthetic database and is referenced by nothing in
+the application.
+
+**Next recommended action.** Owner: merge PR #69 first (two unauthenticated
+RCEs), then authorize the Phase 0 production rehearsal with a designated
+operator and an isolated target.
+
+---
+
+## 2026-10-25 — five review corrections on the Phase 0 rehearsal (PR #70)
+
+**Purpose and scope.** Review of `225197c` found five defects, two of them
+Major. All five were verified by measurement before changing anything, and all
+five were real. Two of them are the same error I had just finished *correcting*
+in that very commit.
+
+**1. The audit was not reproducible from its own inputs (Major).** The source
+preparation included an ad-hoc `INSERT` typed at the command line, present in
+neither the committed fixture nor the write-up. Measured: from
+`test-schema.sql` + `restore-rehearsal-synthetic.sql` alone the source has
+**4** ledger entries, not the 6 reported, and
+`user_wallets_exactly_match_ledger` **FAILS** with 2 discrepancies — so the
+documented 7/7 PASS could not follow from the recorded inputs. The numbers were
+genuinely measured; they were measured on a state nobody else could recreate,
+which for evidence purposes is the same as not having them. The step is now
+inside the fixture, driven from `WHERE balance_cad <> 0` rather than hard-coded
+ids so a future seed with a balance is covered automatically. Re-verified: the
+two committed files alone now give 6 entries and 7/7 PASS.
+
+**2. The corrected schema gate still had a hole (Major).** The previous entry
+records fixing a gate that counted only `ABSENT` when the script also emits
+`MISSING`. The fix counted `MISSING|ABSENT` — and the script emits a **fourth**
+wording, `WRONG TYPE — <type>`, for a money column that is present but not
+numeric. A restore with `transactions.amount` as `REAL` passed the corrected
+gate. That is precisely the error being fixed, committed inside the fix.
+
+The gate is now a **whitelist**: every row must begin with `OK`. A whitelist
+cannot be incomplete in the dangerous direction; a blacklist of failure words
+can, and twice was.
+
+**3. A gate that cried wolf, found while verifying the fix.** The first
+whitelist used aligned `psql` output and reported **2** non-`OK` rows on a
+database that was clean — the script's later sections print their own header
+rows, two beginning `problem | user_id | …`, which the filter counted as
+failures. A gate that fails on every clean run is ignored within a week. Fixed
+with `-t -A` (tuples only). Caught because the fix was tested rather than
+assumed.
+
+**4. `psql` failure read as a clean result (Minor).** `grep`/`awk` over the
+output of a failed `psql` sees empty input and prints `0`. Now
+`-v ON_ERROR_STOP=1` with an explicit exit check that prints
+`SCHEMA CHECK DID NOT RUN — this is not a pass`. Verified against a nonexistent
+database.
+
+**5. A destructive fixture described as read-only (Minor).** The entry above
+called it "one new read-only SQL fixture". It runs `ALTER TABLE` and several
+`INSERT`s, one of which fabricates a ledger row for every user with a balance.
+Against a real database that is a schema change plus invented financial
+history. Corrected in both places in that entry, and the fixture now opens with
+a warning naming itself as writing and contrasting it with
+`verify-migrate.sql` and `reconciliation-check.sql`, which genuinely are
+read-only and safe anywhere.
+
+**6. A second misattributed number, found by re-running everything.** The audit
+reported step 4 as "58 files / 836 tests". That is the count on the companion
+`ci/pin-actions-to-shas` branch, which carries one extra test file; on this
+branch it is **57 / 832**. Same defect as #1 — a number measured on one tree
+and recorded against another. The rule now stated in the audit is that a number
+belongs to the tree it was measured on.
+
+**Also added:** the audit now records the complete command sequence in run
+order — source preparation, dump and restore, the gate, counts, all four fault
+injections, the privilege probe both ways, the suite, and teardown — because
+the omission of one command is what made the original unreproducible.
+
+**Financial or security behaviour affected.** None in the application. One SQL
+fixture that writes to a disposable database, one audit document, one runbook.
+
+**Tests run and results.** Entire documented sequence re-executed verbatim from
+the committed files: source 6 ledger entries; restore exit 0, 0 stderr, 0.23 s;
+gate 0 non-`OK`; 7 users; reconciliation 7 PASS / 0 FAIL; dropped column → gate
+1; `WRONG TYPE` → gate 1; unequal legs → 3 FAIL; nonexistent database → DID NOT
+RUN; privilege probe 114 → 0; suite 57 files / 832 tests; teardown 0 databases
+and 0 roles. Full suite on the branch **57 files / 832 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+**Commit / PR.** This entry's own commit on branch
+`ops/phase0-synthetic-rehearsal`, PR **#70**; the SHA is in the commit message.
+
+**Migration impact.** None.
+
+**Unresolved findings.** Phase 0 is still **NOT RUN**: no production backup
+inspected, no production restore performed, restore duration not transferable.
+
+**Rollback requirement.** Reverting restores an unreproducible audit and a
+schema gate that passes a wrongly typed money column. Fix forward.
+
+**Next recommended action.** Unchanged: PR #69 first (two unauthenticated
+RCEs), then branch protection.
+
+---
+
+## 2026-10-26 — the restore gate's exit status (PR #70)
+
+**Purpose and scope.** A sixth review finding on the Phase 0 rehearsal: the
+schema-check `awk` printed the count of non-`OK` rows and exited `0` whatever
+that count was. The `||` guard beside it covers only `psql` failing, so a
+wrapper keyed on exit status would accept a restore reporting `MISSING`,
+`ABSENT` or `WRONG TYPE`. An operator reading the printed number was
+unaffected, and nothing automated consumes the gate today, so this is
+hardening rather than a failure that occurred.
+
+**Financial or security behaviour affected.** None directly. It is a
+verification step in the procedure that would decide whether a restored
+financial database is usable, which is why it is worth getting right before
+anything depends on it.
+
+**Change.** `exit(n != 0)` added, printed count kept — an operator wants to
+know how many — so the status now agrees with the number. Runbook detail list
+grew from three items to four.
+
+**Tests run and results.** Re-measured on three databases, count and exit
+status both: clean restore `0`/`0`; `transactions.amount` altered to `REAL`
+`1`/`1`; nonexistent target `DID NOT RUN`/`1`. Commands recorded in the
+addendum to `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
+
+**Commit / PR.** PR **#70**, branch `ops/phase0-synthetic-rehearsal`; the
+introducing SHA arrives in a later entry, per the PR #67 learning.
+
+**Migration impact.** None. The fixture writes only to a disposable synthetic
+source, which was created and dropped within the measurement.
+
+**Unresolved findings.** **Phase 0 itself remains NOT RUN.** Every result here
+is synthetic. A production rehearsal needs owner authorization, a designated
+operator and an isolated secured target, and a validated procedure is not a
+performed restore.
+
+**Rollback requirement.** None — documentation and a disposable fixture.
+
+**Next recommended action.** Owner review and merge of #70, then authorization
+of the production rehearsal.
+
+---
+
+## 2026-10-26 — a status field for the duplicate diagnostics (PR #70)
+
+**Purpose and scope.** The rehearsal gate gives the second field of every
+`scripts/verify-migrate.sql` row its whole meaning: it counts any row whose
+`$2` does not begin with `OK`. Section 4's two duplicate-detection queries put
+an id or a currency code there instead of a status.
+
+**Not a live hole, stated plainly.** A user id is numeric and the currency
+codes are `CAD` and `USD`, so neither can begin with `OK` and duplicates were
+counted correctly. What was true is that passing depended on the *values* in
+that column rather than on the file's shape — a property not worth relying on
+in a financial verification step. Both queries now emit `DUPLICATE`.
+
+**Tests run and results.** Measured non-vacuously: on a disposable database
+the fixture's `fx_rates` unique constraint was dropped, two `CAD`→`USD` rows
+inserted, and the gate then emitted
+`fx_rates duplicate pair|DUPLICATE|CAD|USD|2`, counted 3 non-`OK` rows and
+exited non-zero. A first attempt at this negative case was **vacuous** — the
+`INSERT` failed on `provider NOT NULL` and the gate still reported `0`, which
+looked like a pass; worth recording, because a negative case that fails to
+create the fault it is testing is indistinguishable from one that passes.
+Full suite **57 files / 832 tests passing**.
+
+**Financial or security behaviour affected.** None. A verification step's
+output contract.
+
+**Commit / PR.** `14d10de` on branch `ops/phase0-synthetic-rehearsal`, PR
+**#70**. (Filled in by a follow-up commit: an entry cannot contain the SHA of
+the commit that introduces it, which is the PR #67 learning — but leaving the
+reference pointing at a "later entry" that did not yet exist was not good
+enough, so it is filled in rather than promised.) Preceded on this branch by
+`d53614e`, which made the gate exit non-zero, and `932ba2e`.
+
+**Migration impact.** None — `verify-migrate.sql` is read-only.
+
+**Unresolved findings.** **Phase 0 remains NOT RUN.** Also noted: on a
+database built from the current schema sources the `fx_rates` duplicate query
+can never return a row, because the unique constraint already exists. It
+exists for databases predating that constraint, which is exactly what a
+restore of an old backup could be.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #70.
+
+---
+
+## 2026-10-26 — the restore runbook told the operator to destroy its own evidence (PR #70)
+
+**Found by** reviewing the actual runbook against the owner's finalization
+directive, which requires the preserved restore to stay read-only for
+verification and financial reconciliation and any database-modifying
+application tests to run on a separate disposable, sanitized copy.
+
+**The defect.** §4 read
+`DATABASE_URL="$RESTORE_TARGET_URL" pnpm test` — the application suite pointed
+at the **same single restore** that §2 (schema check) and §3 (financial
+reconciliation) had just examined read-only. Those two steps are read-only
+*precisely* so the evidence survives them; §4 then mutated it. The runbook even
+noted in passing that "32 of the 55 test files perform DDL", but only while
+arguing about grants, and never drew the conclusion that this makes §4 unsafe.
+
+**Measured on this tree rather than assumed:**
+
+| Behaviour | Files |
+|---|---|
+| DDL against `DATABASE_URL` (mostly `initializeSchema()`) | 23 |
+| `DELETE` from `users` / `transactions` / `ledger_entries` / `transfer_intents` via the shared connection | 22 |
+
+Fixtures key on user ids **9001–9807** and fixed emails. On a
+production-derived copy those predicates are not guaranteed fictional: a real
+customer holding `id = 9402` is deleted by
+`DELETE FROM users WHERE id = ${USER_ID}`, after which the §3 reconciliation
+describes nothing.
+
+**Two alarming claims I checked and did NOT make.** The suite contains two
+unconditional deletes, and both are harmless:
+`bootstrap-auth-deadlock.test.ts` runs `DELETE FROM users` against its own
+scratch database, and the `DELETE FROM users WHERE 1=1` in
+`repository-condition-injection.test.ts` is a **string payload** in an
+injection test that asserts the payload does *not* execute. "The suite would
+wipe the users table" would have been false. The true hazard is narrower — 22
+targeted deletes plus DDL — and the narrower version is what is recorded.
+
+**The fix.** §4 now provisions a **second disposable database restored from the
+same dump** (not a clone of the verified restore, so the evidence is never in
+the path), sanitizes the directly identifying columns and the Plaid tokens *in
+that copy*, runs the suite there, and drops it. Balances and ledger rows are
+deliberately left intact, because the point of the step is that the
+application's SQL meets production-*shaped* money data. If a second copy cannot
+be provisioned the step is **skipped and recorded as not run**, rather than
+aimed at the preserved restore to get a check ticked.
+
+**Step order made a requirement.** §2 and §3 run first, on the preserved
+restore. The Phase 4 privilege probe that follows creates a role and applies
+grants — a catalogue change, not a data change, so it cannot invalidate §2 or
+§3, but it is still a mutation and belongs after them. Previously this ordering
+was true by accident of section numbering.
+
+**The synthetic audit was corrected by addendum, not edited.**
+`docs/audits/2026-10-25-restore-rehearsal-synthetic.md` records the old step 4
+as actually executed. In that run it was safe — synthetic rows, disposable
+target, dropped at teardown — and the addendum says so while pointing at the
+current procedure, because audits are immutable.
+
+**Financial or security behaviour affected.** No application code. The change
+prevents an operator following a documented procedure from destroying the only
+copy of restored financial data they had just reconciled.
+
+**Tests run and results.** Documentation only; full suite **57 files / 832
+tests passing** on this branch's base before rebasing onto the post-#67/#71
+master.
+
+**Commit / PR.** PR **#70**, branch `ops/phase0-synthetic-rehearsal`; SHA in a
+later entry.
+
+**Migration impact.** None.
+
+**Unresolved findings.** **Phase 0 remains NOT RUN** and the readiness row
+still says so. No owner-authorized production-backup restore has been performed
+or verified, and nothing here should be read as moving that.
+
+**Rollback requirement.** None — reverting restores a procedure that tells the
+operator to overwrite their own evidence.
+
+**Next recommended action.** Owner review and merge of #70, then authorization
+of the real Phase 0 rehearsal with a designated operator.
+
 ## 2026-10-25 — Sprint 1 documentation: status records brought current
 
 **Purpose and scope.** Sprint 1's engineering sits on five branches with open

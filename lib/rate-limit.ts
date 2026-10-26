@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 
 /**
  * Fixed-window rate limiting.
@@ -135,28 +136,170 @@ export type RateLimitRedisClient = {
 };
 
 let redisClient: RateLimitRedisClient | null = null;
-let redisUnavailable = false;
 
+/**
+ * ## Why this is a cooldown and not a boolean
+ *
+ * This was `let redisUnavailable = false`, set on the first failure and reset
+ * only by two test-only helpers. There was no production reset path, so the
+ * flag **latched**: one transient command error demoted that instance to
+ * in-process counting permanently, and it stayed demoted after Redis recovered
+ * — until the instance happened to recycle.
+ *
+ * That is worse than it sounds, because `new Redis(url)` almost never throws.
+ * ioredis connects lazily, so the construction `catch` below is not the path
+ * that fires in an outage; the *command* catch in `checkRateLimit` is. A single
+ * dropped connection was therefore enough to turn every shared limit on that
+ * instance into `limit × instances` for the rest of its life, including
+ * `money:send` and `money:transfer-execute`.
+ *
+ * A timestamp instead of a boolean gives the same protection against hammering
+ * a dead backend — no attempt while in cooldown — and then retries. Recovery
+ * becomes automatic rather than dependent on instance churn.
+ */
+let redisDownUntil = 0;
+const REDIS_RETRY_COOLDOWN_MS = 30_000;
+
+/** Non-secret degradation accounting, so a silent fallback becomes observable. */
+let redisDegradations = 0;
+let lastDegradationAt: number | null = null;
+let degraded = false;
+
+/**
+ * Serialises client construction.
+ *
+ * Without this, N concurrent requests arriving on a cold instance each await
+ * `import('ioredis')` and each run `new Redis(url)`, so the instance opens N
+ * connections and keeps only the last in `redisClient`; the rest leak. One
+ * in-flight promise means concurrent callers share a single construction.
+ */
+let redisConstruction: Promise<RateLimitRedisClient | null> | null = null;
+
+/**
+ * Record a degradation to in-process counting.
+ *
+ * `stage` says where it happened, which is the one piece of detail an operator
+ * needs and the one piece that cannot embed a credential. The raw error is
+ * still never logged: a Redis client error can carry its connection URL,
+ * password included.
+ */
+function markRedisDegraded(stage: 'construct' | 'command' | 'verify'): void {
+  // Only discard the client when construction itself failed — there is no
+  // usable client in that case anyway.
+  //
+  // Dropping it on a *command* failure looks tidier and is a connection leak.
+  // Nothing calls `quit()`/`disconnect()` on the abandoned instance, so its
+  // socket and its own reconnect loop keep running while the next request
+  // after the cooldown builds a brand new client; repeated outages accumulate
+  // orphans. That is the same leak the serialised construction above exists to
+  // prevent, reintroduced one function later. Keeping the client also keeps
+  // ioredis's own reconnect machinery, which is better at recovering a
+  // connection than discarding it and starting over.
+  if (stage === 'construct') redisClient = null;
+  redisDownUntil = Date.now() + REDIS_RETRY_COOLDOWN_MS;
+  redisDegradations += 1;
+  lastDegradationAt = Date.now();
+  degraded = true;
+  console.error(
+    `Rate limiter: Redis ${stage} failed, using in-process counters; ` +
+      `shared limits are degraded to per-instance for up to ${REDIS_RETRY_COOLDOWN_MS}ms. ` +
+      `degradation_count=${redisDegradations}`,
+  );
+}
+
+/** Note a successful Redis operation, so recovery is as visible as failure. */
+function markRedisHealthy(): void {
+  if (degraded) {
+    degraded = false;
+    console.error('Rate limiter: Redis recovered, shared limits are in effect again.');
+  }
+}
+
+/**
+ * The backend's health, with nothing secret in it.
+ *
+ * Exported so a monitored path can answer "are limits actually shared?" without
+ * an operator running the verification route by hand — and without the route's
+ * side effects. Still per-instance: that is a property of the deployment, not
+ * of this function, and no value here describes any instance but this one.
+ */
+export interface RateLimitBackendHealth {
+  configured: boolean;
+  activeBackend: 'redis' | 'in_memory_fallback';
+  /** True while a cooldown is suppressing reconnection attempts. */
+  inCooldown: boolean;
+  cooldownRemainingMs: number;
+  /** Cumulative degradations on this instance since it started. */
+  degradations: number;
+  lastDegradationAt: number | null;
+}
+
+/**
+ * Read this instance's backend health. Pure — no Redis contact, no side
+ * effects, unlike `verifyRateLimitBackend()`, so a monitored path can poll it
+ * freely.
+ *
+ * `activeBackend` is `'redis'` only on an *observation*: a client exists, no
+ * cooldown is open, and some Redis operation has succeeded since the last
+ * degradation. A retained client whose cooldown has merely elapsed still
+ * reports the fallback, because a timer expiring is not evidence the backend
+ * recovered.
+ */
+export function rateLimitBackendHealth(): RateLimitBackendHealth {
+  const now = Date.now();
+  const inCooldown = now < redisDownUntil;
+  return {
+    configured: Boolean(process.env.REDIS_URL),
+    // `!degraded` matters as much as `!inCooldown`. When the cooldown expires
+    // the client is still the one that just failed, and nothing has yet proved
+    // it works — the next command may fall straight back to in-process
+    // counting. Reporting `redis` in that window would claim shared limiting
+    // on the strength of a timer rather than an observation. `degraded` clears
+    // only when a real Redis operation succeeds.
+    activeBackend: redisClient && !inCooldown && !degraded ? 'redis' : 'in_memory_fallback',
+    inCooldown,
+    cooldownRemainingMs: inCooldown ? redisDownUntil - now : 0,
+    degradations: redisDegradations,
+    lastDegradationAt,
+  };
+}
+
+/**
+ * The shared Redis client, or `null` when rate limiting must count in process.
+ *
+ * Returns `null` without contacting Redis while a cooldown is open, which is
+ * what bounds a degradation instead of latching it (see `redisDownUntil`), and
+ * when `REDIS_URL` is unset. Concurrent callers on a cold instance share one
+ * construction through `redisConstruction` rather than each opening a
+ * connection.
+ */
 async function getRedis(): Promise<RateLimitRedisClient | null> {
-  if (redisUnavailable) return null;
+  if (Date.now() < redisDownUntil) return null;
   if (redisClient) return redisClient;
   if (!process.env.REDIS_URL) return null;
 
-  try {
-    // Optional dependency: only required when REDIS_URL is configured.
-    const mod = (await import('ioredis')) as unknown as {
-      default: new (url: string) => RateLimitRedisClient;
-    };
-    redisClient = new mod.default(process.env.REDIS_URL);
-    return redisClient;
-  } catch {
-    // A missing package or unreachable server must not take the app down; fall
-    // back to in-process counting. Do not log the connection error: it can
-    // contain a Redis URL with credentials.
-    console.error('Rate limiter: Redis unavailable, falling back to in-process counters.');
-    redisUnavailable = true;
-    return null;
-  }
+  if (redisConstruction) return redisConstruction;
+
+  redisConstruction = (async () => {
+    try {
+      // Optional dependency: only required when REDIS_URL is configured.
+      const mod = (await import('ioredis')) as unknown as {
+        default: new (url: string) => RateLimitRedisClient;
+      };
+      redisClient = new mod.default(process.env.REDIS_URL as string);
+      return redisClient;
+    } catch {
+      // A missing package or unreachable server must not take the app down; fall
+      // back to in-process counting. Do not log the connection error: it can
+      // contain a Redis URL with credentials.
+      markRedisDegraded('construct');
+      return null;
+    } finally {
+      redisConstruction = null;
+    }
+  })();
+
+  return redisConstruction;
 }
 
 const REDIS_VERIFICATION_TTL_MS = 5_000;
@@ -218,21 +361,47 @@ export async function verifyRateLimitBackend(): Promise<RateLimitBackendVerifica
     if (wrote !== 'OK') {
       // A random UUID collision is not expected, but do not overwrite any key
       // if it somehow occurs. The key was not created by this check.
+      //
+      // Deliberately does NOT record a degradation, unlike the two branches
+      // below. `NX` refusing means the key already existed, which says Redis
+      // answered correctly — the backend is healthy and the probe simply could
+      // not claim its key. Opening a cooldown here would demote a working
+      // backend on the strength of a 1-in-2^122 name clash. Do not add
+      // `markRedisDegraded` for symmetry with the branches below.
       return inMemoryVerification(true, 'failed', 'not_required');
     }
     keyMayExist = true;
 
+    // These two branches fail *without throwing*, so the catch below never
+    // sees them. Recording the degradation here is what keeps the answer this
+    // function returns — `verification: 'failed'`, `activeBackend:
+    // 'in_memory_fallback'` — consistent with what `rateLimitBackendHealth()`
+    // reports and with what the next `checkRateLimit()` actually does. Without
+    // it the route says the backend failed while health still says redis and
+    // the next call retries the retained client.
     const observed = await redis.get(key);
     if (observed !== marker) {
+      markRedisDegraded('verify');
       return inMemoryVerification(true, 'failed', 'ttl_fallback');
     }
 
     const deleted = await redis.del(key);
     keyMayExist = false;
     if (deleted !== 1) {
+      markRedisDegraded('verify');
       return inMemoryVerification(true, 'failed', 'ttl_fallback');
     }
 
+    // A completed set/get/delete round trip is proof the backend works, so it
+    // clears the degraded flag exactly as a successful rate-limit command
+    // does. Without this, `rateLimitBackendHealth()` would keep reporting the
+    // fallback after an operator's verification passed — the route and the
+    // health report disagreeing about the same backend, which is the defect
+    // this function already had once in the other direction.
+    //
+    // Placed after the delete check on purpose: neither an `NX` collision nor
+    // a failed cleanup reaches here, and neither should clear a degradation.
+    markRedisHealthy();
     return {
       configured: true,
       reachable: true,
@@ -243,7 +412,7 @@ export async function verifyRateLimitBackend(): Promise<RateLimitBackendVerifica
   } catch {
     // Do not log the connection error. Client errors often embed a URL and
     // credentials. The running limiter will use its documented memory fallback.
-    redisUnavailable = true;
+    markRedisDegraded('verify');
     return inMemoryVerification(true, 'failed', keyMayExist ? 'ttl_fallback' : 'not_required');
   } finally {
     if (keyMayExist) {
@@ -285,6 +454,7 @@ export async function checkRateLimit(
       await redis.pexpire(key, rule.windowSeconds * 1000);
     }
     const ttl = await redis.pttl(key);
+    markRedisHealthy();
     return {
       allowed: count <= rule.limit,
       remaining: Math.max(0, rule.limit - count),
@@ -294,8 +464,7 @@ export async function checkRateLimit(
   } catch {
     // Do not log `err`: a Redis client error can include its credential-bearing
     // connection URL. Preserve availability with the documented local fallback.
-    console.error('Rate limiter: Redis command failed, using in-process counter.');
-    redisUnavailable = true;
+    markRedisDegraded('command');
     pruneMemory();
     return checkInMemory(key, rule);
   }
@@ -313,8 +482,77 @@ export function rateLimitHeaders(result: RateLimitResult): Record<string, string
   };
 }
 
+/** Which header a client identity came from, or that none was usable. */
+export type ClientIdentitySource =
+  | 'x-vercel-forwarded-for'
+  | 'x-real-ip'
+  | 'x-forwarded-for'
+  | 'none';
+
+export interface ClientIdentity {
+  /** The rate-limit key. `'unknown-client'` when no header was usable. */
+  id: string;
+  /** Where it came from. Diagnostic only — never a trust decision. */
+  source: ClientIdentitySource;
+}
+
 /**
- * Client identifier for an unauthenticated request.
+ * Is this a syntactically plausible IP address?
+ *
+ * ## Why validate at all, given it does not stop spoofing
+ *
+ * It does not, and nothing here should be read as claiming it does: an attacker
+ * who can set the header can set it to a *valid* address just as easily as to
+ * garbage, and rotate it per request.
+ *
+ * What it does is narrow the key space from "any string the client sends" to
+ * "any string shaped like an IP". That removes a distinct class of problem from
+ * the rate limiter: a header carrying an empty value, a comma-joined list that
+ * slipped through, a hostname, or deliberate padding no longer becomes a
+ * *distinct Redis key*. Each unique key is a counter, and counters keyed on
+ * unvalidated client input are a memory and cardinality concern independent of
+ * whether the limit can be evaded.
+ *
+ * ## Why `net.isIP` rather than a character check
+ *
+ * A hand-written shape check was wrong in both directions, which is the usual
+ * outcome: `/^[0-9a-fA-F:]+$/` accepted a bare `':'` as an address — so a
+ * junk `x-vercel-forwarded-for` was *selected* instead of falling through to a
+ * valid `x-real-ip` — and it rejected the IPv4-mapped form `::ffff:192.0.2.1`,
+ * which contains dots, sending a real client to the shared `unknown-client`
+ * bucket. `isIP` decides both correctly and is not ours to get wrong.
+ *
+ * It does not accept a zone suffix, so the zone is split off and validated
+ * separately; `fe80::1%eth0` is a value a platform header can legitimately
+ * carry.
+ */
+function looksLikeIp(value: string): boolean {
+  if (value.length === 0 || value.length > 45) return false;
+  const pct = value.indexOf('%');
+  if (pct === -1) return isIP(value) !== 0;
+
+  // A zone suffix is only meaningful on a scoped IPv6 address (RFC 4007), so
+  // the prefix must be IPv6 — `=== 6`, not `!== 0`.
+  //
+  // Accepting a zone on IPv4 reopened the exact hole this validator exists to
+  // close. Measured: `203.0.113.9%a`, `%b`, `%c` … were each accepted as a
+  // *distinct* key, so one address could mint unlimited rate-limit keys and
+  // evade any client-keyed limit while blowing up counter cardinality — the
+  // two things validation was introduced to prevent. It also let a malformed
+  // preferred header outrank a valid `x-real-ip`.
+  //
+  // That is the third defect of one kind in this function: a bare `':'`
+  // accepted, the IPv4-mapped form rejected, and now a zone on IPv4 accepted.
+  // Each was a hand-rolled judgement about what "looks like an address" means.
+  // The lesson is in the comment above — delegate the decision to `isIP` and
+  // keep this function to splitting the zone off, nothing more.
+  const zone = value.slice(pct + 1);
+  if (!/^[0-9a-zA-Z._-]+$/.test(zone)) return false;
+  return isIP(value.slice(0, pct)) === 6;
+}
+
+/**
+ * Resolve the client identity for an unauthenticated request, with provenance.
  *
  * ## Which part of X-Forwarded-For can be trusted
  *
@@ -323,37 +561,104 @@ export function rateLimitHeaders(result: RateLimitResult): Record<string, string
  * *leftmost* entries are whatever the client made up, and only the entry
  * appended by the nearest trusted proxy is authentic — the rightmost one.
  *
- * This read the leftmost entry. Every rate limit keyed on it could therefore be
- * bypassed outright: send a different `X-Forwarded-For: <random>` per request
- * and each attempt looks like a new client, so the counter never accumulates.
- * That removes the ceiling from login, registration and password reset at once.
+ * An earlier version read the leftmost entry. Every rate limit keyed on it
+ * could therefore be bypassed outright: send a different
+ * `X-Forwarded-For: <random>` per request and each attempt looks like a new
+ * client, so the counter never accumulates. That removes the ceiling from
+ * login, registration and password reset at once.
  *
- * `x-real-ip` is preferred where present because a proxy that sets it writes a
- * single address it observed directly, with no client-supplied prefix to strip.
+ * ## What is still unverified, stated rather than implied
  *
- * Falls back to a constant when no forwarding header is present, which makes the
- * limit global rather than per-client. That is the safe direction: it throttles
- * more, not less.
+ * The order below prefers `x-vercel-forwarded-for`, then `x-real-ip`, then the
+ * rightmost `x-forwarded-for` hop. **Which of these the platform actually sets
+ * — and therefore which a client cannot forge — has not been verified.**
+ * Vercel's documentation is unreachable from the engineering environment
+ * (`api.vercel.com` and the deployment host both answer `403 CONNECT` through
+ * the egress proxy), and third-party accounts of the behaviour contradict each
+ * other and the official docs.
  *
- * This is correct for a deployment sitting behind exactly one trusted proxy,
- * which is how Vercel serves this app. Behind a chain of N trusted proxies the
- * authentic entry is the Nth from the right; that needs a configured hop count
- * rather than a fixed rule, and should be revisited if the topology changes.
+ * So this function does **not** claim an unforgeable identity. It reports where
+ * the value came from, which narrows the question without answering it.
+ *
+ * **`source` alone cannot answer it**, and it is worth being exact about why:
+ * a request that supplies a forged `x-vercel-forwarded-for` and a request that
+ * supplies nothing can both report `source: 'x-vercel-forwarded-for'` — in the
+ * first case because the platform overwrote the forged value, in the second
+ * because it set it. The name is identical; the trust conclusion is opposite.
+ * What separates them is whether the resolved `id` **equals** what the client
+ * sent. An operator settles it by sending a distinctive forged value and
+ * checking that equality, reporting the boolean rather than the address.
+ *
+ * Until that is done, treat every limit keyed on this as "best effort per
+ * apparent client", not "per client".
+ *
+ * ## The `'none'` case is an availability cliff, not merely a weak limit
+ *
+ * When no header is usable every caller shares the single key
+ * `'unknown-client'`. For `auth:login` the caller is keyed
+ * `${clientIdentifier(req)}:${email}`, so a collapse is still per-email. But
+ * `auth:register` (3/hour) and `schema:bootstrap` are keyed on the client
+ * alone — so a collapse makes those limits **global**: three registrations per
+ * hour for the whole platform, and a break-glass path any anonymous caller can
+ * exhaust for everyone.
+ *
+ * That is deliberately left as is. Both alternatives — refusing the request, or
+ * dropping the limit — are policy decisions about availability versus
+ * enforcement that belong to the owner, not to this function. It is recorded
+ * here and in `CLAUDE.md` so the choice is explicit rather than accidental.
  */
-export function clientIdentifier(req: { headers: { get(name: string): string | null } }): string {
-  const realIp = req.headers.get('x-real-ip')?.trim();
-  if (realIp) return realIp;
+export function clientIdentity(req: {
+  headers: { get(name: string): string | null };
+}): ClientIdentity {
+  // Platform-set on Vercel according to its documentation, and specifically
+  // described there as surviving an upstream proxy that overwrites
+  // x-forwarded-for. Preferred first for that reason — not because it has been
+  // confirmed unforgeable from here.
+  const vercel = req.headers.get('x-vercel-forwarded-for')?.trim();
+  if (vercel && looksLikeIp(vercel)) {
+    return { id: vercel, source: 'x-vercel-forwarded-for' };
+  }
 
+  // A proxy that sets this writes a single address it observed directly, with
+  // no client-supplied prefix to strip.
+  const realIp = req.headers.get('x-real-ip')?.trim();
+  if (realIp && looksLikeIp(realIp)) {
+    return { id: realIp, source: 'x-real-ip' };
+  }
+
+  // Rightmost hop only. Correct for a deployment behind exactly one trusted
+  // proxy, which is how Vercel serves this app. Behind a chain of N trusted
+  // proxies the authentic entry is the Nth from the right; that needs a
+  // configured hop count rather than a fixed rule, and should be revisited if
+  // the topology changes.
   const forwarded = req.headers.get('x-forwarded-for');
   if (forwarded) {
     const hops = forwarded
       .split(',')
       .map((hop) => hop.trim())
       .filter((hop) => hop.length > 0);
-    if (hops.length > 0) return hops[hops.length - 1];
+    for (let i = hops.length - 1; i >= 0; i -= 1) {
+      if (looksLikeIp(hops[i])) return { id: hops[i], source: 'x-forwarded-for' };
+    }
   }
 
-  return 'unknown-client';
+  // Falls back to a constant, which makes the limit global rather than
+  // per-client. See the note above: that throttles more, not less, but for
+  // client-keyed buckets it is an availability cliff rather than a safe
+  // default.
+  return { id: 'unknown-client', source: 'none' };
+}
+
+/**
+ * Client identifier for an unauthenticated request.
+ *
+ * Thin wrapper over `clientIdentity()`, kept because every call site wants the
+ * key and not the provenance. Callers that need to report *where* the identity
+ * came from — an operations diagnostic, not a trust decision — use
+ * `clientIdentity()` directly.
+ */
+export function clientIdentifier(req: { headers: { get(name: string): string | null } }): string {
+  return clientIdentity(req).id;
 }
 
 /** Test-only: clear in-process counters between cases. */
@@ -364,12 +669,21 @@ export function __resetInMemoryCounters(): void {
 /** Test-only: inject a Redis double without creating any network connection. */
 export function __setRedisClientForTests(client: RateLimitRedisClient | null): void {
   redisClient = client;
-  redisUnavailable = false;
+  redisConstruction = null;
+  // Deliberately does NOT clear `redisDownUntil` or `degraded`. Injecting a
+  // client is not a recovery event, and nothing in production clears either
+  // flag as a side effect of acquiring one — a helper that did would hide the
+  // very transition the degradation tests exist to observe. Use
+  // `__resetRateLimitBackendForTests()` for isolation between cases.
 }
 
 /** Test-only: restore Redis module state between isolated tests. */
 export function __resetRateLimitBackendForTests(): void {
   redisClient = null;
-  redisUnavailable = false;
+  redisDownUntil = 0;
+  redisConstruction = null;
+  redisDegradations = 0;
+  lastDegradationAt = null;
+  degraded = false;
   memoryCounters.clear();
 }
