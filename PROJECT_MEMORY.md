@@ -2707,3 +2707,130 @@ decision record instead of restating the dilemma.
 **Next recommended action.** Owner: make the decision recorded in 0007. If the
 answer is "keep fail-open", the follow-up work is the three observability asks,
 not a code change to the limiter.
+
+---
+
+## 2026-10-26 — Sprint 1 finalization: five PRs merged, status records reconciled
+
+**Purpose and scope.** Close Sprint 1 by integrating the five completed PRs in
+the authorized order, then bring the status records in line with the tree that
+resulted. No feature work, no rail work, and no live-money behaviour.
+
+**Merged, in the directed order, each with `expectedHeadSha` and with the
+required checks verified BY NAME rather than by count.**
+
+| PR | Subject | Merge SHA |
+|---|---|---|
+| #69 | `next` → 16.4.3 (two unauthenticated RCE + one DoS) | `1bc81df` |
+| #68 | Every GitHub Action pinned to a commit SHA | `ce7255a` |
+| #67 | Redis degradation recovery — cooldown, not a latch | `a08c82f` |
+| #71 | Client identity validation | `0b609f4` |
+| #70 | Synthetic backup restore verification | `e0f3f0d` |
+
+Checking by name mattered: a count-based reading of the checks API reports
+"ALL GREEN 1/1" when exactly one check has reported and nothing is pending,
+which is indistinguishable from a fully green commit. Every merge in this
+sprint was gated on the four required contexts individually.
+
+**The #67 / #71 combined requirement was satisfied before #71 was merged, not
+after.** Both touch rate limiting, so `rate-limit-identity-outage-interaction.test.ts`
+(7 cases) was written against the tree that already contained #67 and pinned:
+the three money buckets survive a total Redis outage because they key on the
+authenticated user id; they stay separate from one another; a bucket still
+exhausts per user with no Redis at all (`vi.stubEnv('REDIS_URL','')`, so the
+test states its precondition instead of inheriting it); junk headers all
+collapse to `unknown-client`; the degradation line leaks no URL, password,
+address or email; and every bucket class — including both break-glass paths —
+is still **served** during an outage. One finding is recorded as a real
+evasion rather than smoothed over: a *well-formed forged* address is used as a
+key, so rotating it evades a client-keyed limit. That is why the money buckets
+key on the user id and not on a header.
+
+**A third defect of the same class in `looksLikeIp`, found by review and
+measured worse than reported.** A zone suffix was accepted whenever the prefix
+parsed as any IP, so `203.0.113.9%a`, `%b`, `%c` … were each accepted as a
+**distinct** key — one IPv4 address could mint unlimited rate-limit keys and
+walk out of any limit keyed on it. A zone is meaningful only on a scoped IPv6
+address (RFC 4007), so the guard is `isIP(prefix) === 6`, not `!== 0`. Fixed
+and pinned by a test that asserts four zone variants all collapse to
+`unknown-client`.
+
+**Status reconciliation — what was stale, specifically.** Each of these read as
+confirmation of something no longer true:
+
+- `CURRENT_STATUS.md` was anchored to `6927ebd` / "57 files / 832 tests" after
+  `master` had moved five times. **This is the third time this file has needed
+  that correction**, which is now noted in the file itself.
+- It said `master` is "`protected: false` with no rulesets, so none of the six
+  passing CI checks is enforced." False: ruleset `25851827` is active with all
+  four contexts required, `strict: true`, `bypass_actors: []`.
+- It said SHA-pinning "remains an open owner decision." Done in #68.
+- It said secret scanning and CodeQL were "ADVISORY, NOT ENFORCING." Both are
+  now required contexts.
+- It described `PlaidTransferProvider` and `CanadianEFTProvider` as
+  "placeholder implementations (throw 'Not implemented')." Measured: 604 and
+  677 lines, **zero** occurrences of that string. Both are fully implemented
+  and gated off by default. This one mattered most — a reader planning live
+  work would have had the wrong model of what exists.
+- `CLAUDE.md` said "61 files / 901 tests"; measured 907. Six stale, one
+  revision after the same drift was corrected by measuring.
+
+**Financial and security behaviour affected: none.** `lib/` and `app/` on the
+#72 branch are byte-identical to `master` — the branch is documentation-only,
+verified by an empty `git diff` over both trees. `PLAID_TRANSFER_LIVE` and
+`CA_EFT_LIVE` appear nowhere in the sprint diff; both remain default off.
+Cash-out stays design-only.
+
+**Tests run and their results.** Full suite on the merged tree, on a database
+created fresh for the run with the CI fixture applied: **61 files / 907 tests
+passing**, exit 0. `pnpm run typecheck` 0 errors. `pnpm run lint` 0 errors / 28
+unused-variable warnings. All four required checks green on `e0f3f0d`.
+
+**Dependency audit, both tiers, reported as measured.** Production
+dependencies: **no known vulnerabilities**. Full tree including dev: **24
+advisories — 2 critical, 13 high, 8 moderate, 1 low** — all dev-chain (e.g.
+`vitest > @vitest/mocker`, GHSA-qxg6-89mg-rqv8). `ci.yml` gates on production
+criticals/highs and reports the dev chain advisory-only. That split is
+documented and is **not** a suppression, so the 24 are recorded as open rather
+than as a clean scan.
+
+**Deliberately NOT claimed.** The production deployment is **unverified**.
+`api.vercel.com` and the deployment host both answer `403 CONNECT` from this
+environment, re-confirmed 2026-10-26, so whether the running deployment
+contains the `next` fix is unknown — the commit-level "Vercel success" status
+is a *build* signal on a commit, not proof of which deployment serves
+production. Until the owner confirms it, the two unauthenticated RCEs are
+treated as potentially live on the public deployment. Dependabot is
+**BLOCKED**, not clean: both alert endpoints answer 403, which is "unknown".
+Phase 0 remains **NOT RUN**.
+
+**Migration impact.** None. No schema source was touched.
+
+**Rollback requirement.** None for #72, which is documentation-only. Note for
+whoever reverts anything in this sprint: reverting the carrier of the `next`
+bump would reintroduce two unauthenticated RCE advisories, so check which
+commit carries `package.json` before reverting anything in this range.
+
+**Unresolved findings.** The header-trust question is still open and cannot be
+answered from here — `clientIdentity().source` names the header a value came
+from, not whether the platform overwrites a client-supplied one, and comparing
+two requests' `source` names does not settle it either, because the name is
+identical whether the forged value was overwritten or passed through. Only an
+**equality** answers it: does the resolved id equal the distinctive value the
+request supplied? Owner action, reported as a boolean, never as the id.
+Observability of the Redis degradation remains unscraped and unowned.
+
+**Next recommended action.** Owner: confirm the production deployment SHA;
+enable Dependabot; decide the money-bucket policy recorded in
+`docs/decisions/0007-money-bucket-policy-on-redis-loss.md`. Engineering: the
+Sprint 2 candidates are the three observability asks from 0007, a first-class
+entry point for baseline adoption, and decision 0005 Phase 2 — none of which
+requires a live rail.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`. An entry cannot
+contain its own introducing SHA, so this one does not state it — and
+deliberately does **not** promise a follow-up entry naming it. This file
+already carries three such promises that were never kept, and each one reads
+like a pointer to evidence that does not exist. The merge SHA of PR #72 is
+recoverable from the PR itself, which is a durable reference; that is the whole
+of the answer, not a placeholder for one.

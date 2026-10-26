@@ -4,13 +4,19 @@
 **Audience:** The account owner + engineering. Many steps are owner-only and external.
 **Golden rule:** Do not enable a live flag until every prerequisite above it in this document is complete. Live flags default OFF and must be set deliberately.
 
-**Verified against:** `master` at `1bc81df`, on 2026-10-26, by reading the tree
-— not by exercising any rail. This line exists because the value of a go/no-go
-procedure is entirely in its currency: §4.1 read "NOT YET BUILT" for an
-endpoint that had been built and merged, and an operator who finds one stale
-blocker has no way to tell which of the others are stale too. **Re-anchor this
-line whenever the document is revised, and treat an unanchored copy as
-unverified.**
+**Verified against:** `master` at `e0f3f0d`, on 2026-10-26, by reading the tree
+— not by exercising any rail. `e0f3f0d` is the tip after Sprint 1's five
+merges (#69 `1bc81df`, #68 `ce7255a`, #67 `a08c82f`, #71 `0b609f4`, #70
+`e0f3f0d`); the previous anchor read `1bc81df`, the first of those five. None
+of the five touched a live flag or any rail, so **no box in this document
+changed state as a result** — re-anchored to keep the line honest about what
+tree it was read against, which is the whole point of having it.
+
+This line exists because the value of a go/no-go procedure is entirely in its
+currency: §4.1 read "NOT YET BUILT" for an endpoint that had been built and
+merged, and an operator who finds one stale blocker has no way to tell which of
+the others are stale too. **Re-anchor this line whenever the document is
+revised, and treat an unanchored copy as unverified.**
 
 A box checked here means *verified in the tree or by a recorded run*, named in
 the item. It never means "exercised against a live rail" — nothing in this

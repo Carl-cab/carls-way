@@ -1,22 +1,33 @@
 # Manna — Current Status
 
-Last updated: **2026-10-25** — verified against commit `6927ebd` on `master`
-(PR #66 merged: `follow-redirects` pinned). `master` was re-fetched at the
-start of Sprint 1 and had not moved in four days.
+Last updated: **2026-10-26** — verified against commit `e0f3f0d` on `master`,
+the tip after Sprint 1's five pull requests were merged in the authorized
+order:
+
+| PR | Subject | Merge SHA |
+|---|---|---|
+| #69 | `next` bumped to 16.4.3 (three advisories) | `1bc81df` |
+| #68 | Every GitHub Action pinned to a commit SHA | `ce7255a` |
+| #67 | Redis degradation recovery (cooldown, not a latch) | `a08c82f` |
+| #71 | Client identity validation | `0b609f4` |
+| #70 | Synthetic backup restore verification | `e0f3f0d` |
+
 Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on `master` at `6927ebd`, on a database created fresh for the run and
-with the CI fixture applied: **57 files / 832 tests** pass, typecheck clean,
-lint 0 errors / 28 warnings, build clean. Earlier baselines on this file:
-55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`.
+Measured on the merged tree, on a database created fresh for the run and with
+the CI fixture applied: **61 files / 907 tests** pass, typecheck 0 errors, lint 0
+errors / 28 warnings. Earlier baselines on this file: 55 / 778 at `4e63bb9`,
+56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`, 57 / 832 at `6927ebd`.
 
-**The previous header claimed verification against `6d8861c` and "57 files /
+**An earlier header claimed verification against `6d8861c` and "57 files /
 821 tests" while `master` had moved on three times (`1d4d783`, `c2859f6`,
 `6927ebd`) and the suite had reached 832.** Both numbers were stale in the
 direction that invites trust, which is the failure this file has already been
-corrected for once.
+corrected for once. The note is kept because the same drift recurred during
+Sprint 1: this header read `6927ebd` / 832 after five merges had moved
+`master` five times.
 
 ## ⚠ Two things on this list are worse than "unverified"
 
@@ -49,12 +60,28 @@ backstop but have never been confirmed enabled.
 **What is NOT verified, stated here because the rest of this file reads as
 confirmation:** nothing about the deployment. `api.vercel.com` and the
 production host both return `403 CONNECT` from this environment's egress proxy
-— re-confirmed 2026-10-25 — so the production SHA, whether `REDIS_URL` or
+— re-confirmed 2026-10-26 — so the production SHA, whether `REDIS_URL` or
 `CRON_SECRET` is set, whether the cron fires, and deployment health are all
-unverified rather than passing. `master` is also still `protected: false` with
-no rulesets, so none of the six passing CI checks is enforced; a write to the
-protection API from this environment is refused by the egress proxy, so that
-is blocked on owner action rather than unattempted.
+unverified rather than passing.
+
+**Branch protection has since moved to VERIFIED, and this file previously said
+the opposite.** It read "`master` is also still `protected: false` with no
+rulesets, so none of the six passing CI checks is enforced." That is no longer
+true. Read from the rulesets API on 2026-10-26: ruleset `25851827`, *"master CI
+and security checks"*, `enforcement: active`, `target: branch`, included ref
+`refs/heads/master`, `bypass_actors: []`, and one `required_status_checks` rule
+with `strict_required_status_checks_policy: true` requiring exactly the four
+contexts — `install · typecheck · lint · test · build`, `dependency audit`,
+`secret scan`, `analyze javascript-typescript`. The owner acted; the four
+checks are enforced and up-to-date-with-base is required.
+
+Two limits on that, so it is not read as more than it is. The ruleset contains
+**only** `required_status_checks` — there is no required-review rule and no
+force-push restriction, so a direct push to `master` that passes CI is not
+blocked by it. And the **classic** branch-protection API answers `403` to this
+environment, so a `protected: false` reading taken from that endpoint reflects
+this session's token, not the absence of protection; the ruleset is the
+authority.
 
 The header previously read "2026-06-28 (Phase B3.2b Settlement Balance
 Executor complete)" while the body had been revised as recently as
@@ -107,7 +134,7 @@ misleading of the two failure modes.
   - `lib/providers/TransferProvider.ts`: Core interface with 7 methods (createIntent, reviewTransfer, confirmTransfer, executeTransfer, cancelTransfer, getTransferStatus, handleWebhookEvent)
   - `lib/providers/TransferProviderFactory.ts`: Central selection logic — US+sandbox→SandboxUS, CA+sandbox→SandboxCA, US+live→Plaid, CA+live→CanadianEFT
   - `SandboxUSProvider` and `SandboxCAProvider` — fully implemented, behavior unchanged, no real API calls
-  - `PlaidTransferProvider` and `CanadianEFTProvider` — placeholder implementations (throw "Not implemented")
+  - `PlaidTransferProvider` and `CanadianEFTProvider` — **implemented, not placeholders.** This line read 'placeholder implementations (throw "Not implemented")', which was stale: measured 2026-10-26 the two files are 604 and 677 lines and contain **zero** occurrences of "Not implemented". Both are gated off by default (`PLAID_TRANSFER_LIVE`, `CA_EFT_LIVE`; any value other than `true`, including unset, selects sandbox), both persist an idempotency key before calling the provider and claim the intent under `SELECT … FOR UPDATE`, and both signal a successful submit by throwing an error carrying `__submitted` after recording `processing` themselves. Neither contains any reference to `balance_cad` or `balance_usd` — verified by grep — so the "no provider may update balances" constraint below holds for the live providers as written, not merely by their being unimplemented
   - **Critical constraint:** No provider may update balances — all balance changes happen ONLY via settlement webhooks
   - All provider selection routed through factory — no provider logic elsewhere in application
 - ✅ **Phase A4 Settlement Processor Skeleton**: State machine and settlement event processing structure
@@ -156,12 +183,14 @@ misleading of the two failure modes.
 - **Static analysis** — CodeQL `javascript-typescript`, `security-extended`,
   in its own workflow so `security-events: write` is not granted to the job
   running the test suite.
-- **ADVISORY, NOT ENFORCING.** A detection only *fails the check*; it does not
-  *block a merge* until the owner marks these four as required under branch
-  protection: `install · typecheck · lint · test · build`,
-  `dependency audit`, `secret scan`, `analyze javascript-typescript`. That
-  cannot be set from a session. Until it is done, treat secret scanning as a
-  signal rather than a gate.
+- **NOW ENFORCING (corrected 2026-10-26).** This bullet read "ADVISORY, NOT
+  ENFORCING … until the owner marks these four as required under branch
+  protection." The owner has since done so: ruleset `25851827` requires all
+  four contexts on `refs/heads/master` with `strict` on and no bypass actors
+  (evidence in the header section above). A detection now blocks a merge, so
+  secret scanning is a gate rather than only a signal. What remains advisory is
+  the *dev-dependency* tier of `dependency audit` — see the audit note below —
+  not the check itself.
 - **SCOPED BY BASE BRANCH, and this is wider than the scanners.** Both
   workflow files carry a single `on:` block filtered to
   `branches: [master, 'integration/**']`. Because `ci.yml` holds the `verify`,
@@ -171,7 +200,23 @@ misleading of the two failure modes.
   into a feature branch is therefore unchecked; only the eventual PR into
   `master` is covered. Widening the filters, or accepting the gap knowingly, is
   an owner decision.
-- SHA-pinning of the third-party actions remains an open owner decision.
+- **SHA-pinning is done (PR #68, `ce7255a`).** This bullet read "remains an
+  open owner decision." Every `uses:` in every workflow file now names a
+  40-character commit SHA with the human-readable tag in a trailing comment;
+  measured on the merged tree by listing every `uses:` that does not match
+  `@[0-9a-f]{40}`, which returns nothing.
+  `lib/__tests__/workflow-action-pinning.test.ts` keeps it that way, and its
+  matchers tolerate YAML-quoted keys — an earlier version did not, and would
+  have passed over a quoted unpinned entry.
+
+- **Dependency audit, both tiers, measured on the merged tree 2026-10-26.**
+  Production dependencies: **no known vulnerabilities** (`pnpm audit --prod`).
+  Full tree including dev: **24 advisories — 2 critical, 13 high, 8 moderate,
+  1 low**, all in the dev chain (for example `vitest > @vitest/mocker`,
+  GHSA-qxg6-89mg-rqv8). `ci.yml` fails the build only on production-dependency
+  criticals and highs and reports the dev chain advisory-only; that is a
+  documented tier split, not a suppression. The dev findings are real and are
+  recorded here as open, not as clean.
 
 ### `/api/migrate` — Phase 1 hardening applied
 

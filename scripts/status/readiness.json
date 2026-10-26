@@ -17,7 +17,7 @@
     "percentage would be invented."
   ],
   "updated": "2026-10-26",
-  "verifiedAgainstCommit": "master at 6927ebd, verified by fresh inspection on 2026-10-25 (git fetch; master unchanged for four days). Sprint 1 engineering sits on five unmerged branches with open PRs #68-#71 plus the pre-existing #67; statuses below describe master unless a row names a PR.",
+  "verifiedAgainstCommit": "master at e0f3f0d, the tip after Sprint 1's five pull requests were merged on 2026-10-26: #69 -> 1bc81df, #68 -> ce7255a, #67 -> a08c82f, #71 -> 0b609f4, #70 -> e0f3f0d. Suite measured on that tree: 61 files / 907 tests passing, typecheck 0 errors, lint 0 errors / 28 warnings. All four required checks are green on e0f3f0d and are now ENFORCED by ruleset 25851827. Rows describe master unless a row names a PR. The previous version of this line read '6927ebd' and 'five unmerged branches', which the merges made false.",
   "gates": {
     "A": {
       "title": "Bank linking",
@@ -208,18 +208,18 @@
     },
     {
       "name": "Secret scanning in CI",
-      "status": "PARTIAL",
-      "evidence": "Gitleaks 8.21.2 runs on every PR into master over full history (233 commits, no leaks on 6927ebd), pinned by version and verified against a published SHA256, with --redact and SARIF commitMessage stripping. Remains PARTIAL for one reason only: the check is not enforced by branch protection, so a detection would not block a merge."
+      "status": "VERIFIED",
+      "evidence": "VERIFIED 2026-10-26. Gitleaks 8.21.2 runs on every PR into master over full history, pinned by version and verified against a published SHA256, with --redact and SARIF commitMessage stripping; it succeeded on master at e0f3f0d. The single reason this row was PARTIAL — \"the check is not enforced by branch protection, so a detection would not block a merge\" — no longer holds: secret scan is one of the four contexts required by ruleset 25851827. Scope note kept: the .gitleaks.toml allowlist is keyed on exact synthetic literals rather than on paths, so a real credential later pasted into an allowlisted file is still caught."
     },
     {
       "name": "Static analysis (CodeQL) in CI",
-      "status": "PARTIAL",
-      "evidence": "CodeQL security-extended runs on every PR into master and weekly, with least-privilege permissions and security-events: write isolated from the test job. Succeeded on 6927ebd. Remains PARTIAL because the check is not enforced by branch protection."
+      "status": "VERIFIED",
+      "evidence": "VERIFIED 2026-10-26. CodeQL security-extended runs on every PR into master and weekly, with least-privilege permissions and security-events: write isolated from the job running the test suite; analyze javascript-typescript succeeded on master at e0f3f0d. The single reason this row was PARTIAL — not enforced by branch protection — no longer holds: it is one of the four contexts required by ruleset 25851827. VERIFIED here means the control runs and gates, not that the codebase is free of defects CodeQL cannot see."
     },
     {
       "name": "Branch protection enforcing required checks",
-      "status": "BLOCKED",
-      "evidence": "BLOCKED ON OWNER ACTION, now proven by attempt rather than inferred. GET /repos/Carl-cab/carls-way/branches/master reports protected: false and GET /rulesets returns []. A PUT to /branches/master/protection was ATTEMPTED on 2026-10-25 with the full required-checks payload and was refused: \"Write access to this GitHub API path is not permitted through this proxy\" (HTTP 403). So this is not merely unattempted. The four contexts to require, verified against both the workflow job names and the live check-run names, are: install · typecheck · lint · test · build; dependency audit; secret scan; analyze javascript-typescript. Until set, all six green checks are advisory — and two dependency advisories have now reached master behind them in five days."
+      "status": "VERIFIED",
+      "evidence": "VERIFIED 2026-10-26 by reading the rulesets API. The owner acted on the instructions recorded in the previous version of this row (which read BLOCKED). Ruleset 25851827, \"master CI and security checks\": enforcement active, target branch, conditions include refs/heads/master with no excludes, bypass_actors EMPTY, and one required_status_checks rule with strict_required_status_checks_policy true requiring exactly the four intended contexts — install · typecheck · lint · test · build; dependency audit; secret scan; analyze javascript-typescript. So the checks are enforced AND a PR must be up to date with master before merging. Two deliberate limits on the claim: the ruleset contains ONLY required_status_checks, so there is no required-review rule and no force-push restriction, and a direct push to master that passes CI is not blocked by it; and the CLASSIC protection API still answers 403 to this environment, so a protected:false reading taken from that endpoint reflects this session's token rather than the absence of protection — the ruleset is the authority. All five Sprint 1 PRs were merged through these required checks."
     },
     {
       "name": "Schema migration versioning (decision 0005 Phase 2)",
@@ -228,13 +228,18 @@
     },
     {
       "name": "GitHub Actions supply-chain pinning",
-      "status": "PARTIAL",
-      "evidence": "ENGINEERING COMPLETE, UNMERGED (PR #68). All seven uses: references in .github/workflows were mutable tags; now pinned to 40-hex commit SHAs taken from this repository's own CI run on 6927ebd, with lib/__tests__/workflow-action-pinning.test.ts enforcing it (nothing else in typecheck, lint or build reads a YAML file). Mutation-checked. PARTIAL rather than VERIFIED only because the PR is unmerged; master still carries mutable tags."
+      "status": "VERIFIED",
+      "evidence": "VERIFIED — PR #68 merged 2026-10-26 as ce7255a (this row previously read ENGINEERING COMPLETE, UNMERGED). Every uses: reference in .github/workflows now names a 40-hex commit SHA with the human-readable tag in a trailing comment. Measured on the merged tree by listing every uses: that does NOT match @[0-9a-f]{40}: the list is empty. lib/__tests__/workflow-action-pinning.test.ts enforces it on every run and its matchers tolerate YAML-quoted keys — an earlier version of those regexes did not, and would have read straight past a quoted unpinned entry. Mutation-checked: reintroducing a mutable tag fails the test. What pinning does NOT do is verify what is inside a pinned SHA; it removes tag mutability, not trust in the action."
     },
     {
       "name": "Production dependency advisories",
       "status": "PARTIAL",
-      "evidence": "MASTER FIXED, DEPLOYMENT UNVERIFIED. master carried next@16.3.8 with THREE open advisories: two unauthenticated remote code execution (Image Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r), all patched in >=16.4.1. PR #69 was merged on owner authorization 2026-10-26 as 1bc81df; master's package.json and pnpm-lock.yaml now both pin 16.4.3, verified by reading the merged tree. PARTIAL rather than VERIFIED because clearing master is not clearing the RUNNING DEPLOYMENT: production serves whatever its last build produced, and the deployed version cannot be read from this environment (403 CONNECT to both api.vercel.com and the deployment host). VERIFIED needs confirmation that the Vercel production deployment rebuilt from 1bc81df or later. Separately unresolved: both this advisory set and the follow-redirects one five days earlier reached master AFTER its last green run and were found only when an unrelated PR re-ran the audit — nothing watches an unchanged tree, and Dependabot alerts have never been confirmed enabled."
+      "evidence": "MASTER FIXED AND ENFORCED, DEPLOYMENT STILL UNVERIFIED, DEV CHAIN OPEN. master carried next@16.3.8 with three open advisories — two unauthenticated RCE (Image Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r) — all patched in >=16.4.1. PR #69 merged 2026-10-26 as 1bc81df; measured on the merged tree at e0f3f0d, package.json declares next 16.4.3 and pnpm-lock.yaml resolves next@16.4.3, so master is fixed. Audit measured on that tree: production dependencies report NO known vulnerabilities (pnpm audit --prod), while the full tree including dev reports 24 advisories — 2 critical, 13 high, 8 moderate, 1 low — all in the dev chain (e.g. vitest > @vitest/mocker, GHSA-qxg6-89mg-rqv8). ci.yml fails the build only on production-dependency criticals and highs and reports the dev chain advisory-only; that is a documented tier split, NOT a suppression, and the 24 are recorded here as open rather than clean. PARTIAL for two independent reasons: the RUNNING DEPLOYMENT is not confirmed to have rebuilt from 1bc81df or later (403 CONNECT to both api.vercel.com and the deployment host from this environment, re-confirmed 2026-10-26), and the dev-chain advisories are unresolved. The structural gap also persists: nothing watches an unchanged tree — see the Dependabot row."
+    },
+    {
+      "name": "Dependabot alerts enabled",
+      "status": "BLOCKED",
+      "evidence": "BLOCKED ON OWNER ACTION, proven by attempt rather than inferred. GET /repos/Carl-cab/carls-way/dependabot/alerts and GET /repos/Carl-cab/carls-way/vulnerability-alerts BOTH answer HTTP 403 to this session, re-confirmed 2026-10-26. A 403 means this token may not read the setting — it is NOT evidence that alerts are disabled, and it is not a clean scan; the state is genuinely UNKNOWN from here and is recorded as blocked rather than guessed. This matters because it is the only durable backstop for the failure that has now happened twice: both the next advisory set and the follow-redirects one five days earlier reached master AFTER its last green CI run, and each was found only because an unrelated PR happened to re-run the audit. CI cannot detect an advisory disclosed against an unchanged tree. Owner action, two minutes, no secret involved: GitHub → repository Settings → Advanced Security (or Code security and analysis) → enable Dependency graph, then Dependabot alerts, and optionally Dependabot security updates; then report whether the alert list is non-empty. A scheduled dependency scan has been prepared on branch ci/scheduled-dependency-scan (daily, workflow_dispatch, contents: read + issues: write, opens one deduplicated issue on failure, and treats an unreachable advisory service as a FAILURE rather than a pass). It is NOT part of Sprint 1's authorized five PRs and awaits separate authorization; it is a complement to Dependabot, not a substitute, because it reads the same advisory source CI already reads."
     }
   ],
   "ownerActions": [
@@ -243,12 +248,8 @@
       "why": "PR #69 is merged (1bc81df) and master now pins next@16.4.3, so the advisory is cleared on master. The running deployment is a separate fact: it serves whatever its last build produced, and this environment cannot read the deployed version (403 CONNECT). Until the rebuild is confirmed, treat the two unauthenticated RCEs as potentially still live on the public deployment."
     },
     {
-      "action": "Set branch protection on master requiring the four checks",
-      "why": "Set branch protection on master requiring these four contexts, with 'require branches up to date', a pull-request review, and force-push blocked: install · typecheck · lint · test · build / dependency audit / secret scan / analyze javascript-typescript. https://github.com/Carl-cab/carls-way/settings/rules — needs repo Admin; a write attempt from this environment is refused by the egress proxy."
-    },
-    {
-      "action": "Confirm Dependabot alerts are enabled",
-      "why": "Confirm Dependabot alerts are enabled for the repository. Two advisories have reached master behind green CI in five days because nothing watches an unchanged tree."
+      "action": "Enable Dependabot alerts, then report whether the alert list is non-empty",
+      "why": "Both /dependabot/alerts and /vulnerability-alerts answer HTTP 403 to this session (re-confirmed 2026-10-26), so the state is UNKNOWN from here, not disabled and not clean. This is the only durable backstop for a failure that has now happened twice: both the next advisory set and the follow-redirects one five days earlier reached master AFTER its last green CI run, because CI cannot detect an advisory disclosed against an unchanged tree. Settings -> Advanced Security (or Code security and analysis) -> enable Dependency graph, then Dependabot alerts, optionally Dependabot security updates. No secret involved. Then say only whether the list is empty or not."
     },
     {
       "action": "Compare two production requests to settle header trust",
@@ -267,8 +268,12 @@
       "why": "Run POST /api/admin/operations/redis-rate-limit with a SuperAdmin or OperationsAdmin session and report pass/fail only. It samples one serverless instance and does not move the row to VERIFIED."
     },
     {
-      "action": "Review and merge PRs #67, #68, #70, #71, #72",
-      "why": "Review and merge PRs #67, #68, #70, #71 and #72 — all green, all with review findings resolved."
+      "action": "Nothing outstanding on the Sprint 1 PRs — all five are merged",
+      "why": "Kept as a closed item rather than deleted, so the list does not silently lose a step. Merged in the authorized order with expectedHeadSha on every merge and the required checks verified BY NAME beforehand: #69 -> 1bc81df, #68 -> ce7255a, #67 -> a08c82f, #71 -> 0b609f4, #70 -> e0f3f0d. #72 is the documentation reconciliation and is the last of the five. No further owner action is needed here."
+    },
+    {
+      "action": "Decide whether to authorize the scheduled dependency scan (prepared, unmerged)",
+      "why": "Branch ci/scheduled-dependency-scan adds a daily workflow plus workflow_dispatch with contents: read and issues: write, reusing ci.yml's two-tier audit and opening one deduplicated issue on failure. It deliberately treats an unreachable advisory service as a FAILURE, where ci.yml warns and passes, because an availability failure is not a clean bill of health. It is NOT one of Sprint 1's authorized five PRs, so no PR has been opened and nothing is merged. It complements Dependabot rather than replacing it — it reads the same advisory source CI already reads, so it closes the unchanged-tree gap only on a schedule."
     }
   ]
 }
