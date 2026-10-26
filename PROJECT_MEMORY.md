@@ -1632,3 +1632,280 @@ owner decision, `clientIdentifier()` still prefers an unvalidated `x-real-ip`.
 backend health in a bounded window.
 
 **Next recommended action.** Owner: branch protection, then #67.
+
+---
+
+## 2026-10-25 — Sprint 1 Task C: client identity gains provenance and validation
+
+**Purpose and scope.** `clientIdentifier()` returned the first non-empty
+`x-real-ip`, unvalidated, then the rightmost `x-forwarded-for` hop. It is the
+rate-limit key for `auth:login`, `auth:register`, `auth:password-reset`,
+`schema:bootstrap` and the webhook endpoints. Reworked into `clientIdentity()`,
+which resolves `x-vercel-forwarded-for` → `x-real-ip` → rightmost
+`x-forwarded-for`, validates each candidate as a syntactically plausible IP,
+and **reports which header the value came from**. `clientIdentifier()` is now a
+thin wrapper, so no call site changed.
+
+**What this does NOT do, stated first because it is the thing most likely to be
+overclaimed.** It does not make the identity unforgeable and it does not stop
+spoofing. An attacker who can set a header can send *valid* addresses and
+rotate them per request. Which of these headers the platform actually sets is
+still **unverified**: `api.vercel.com` and the deployment host both answer
+`403 CONNECT` through this environment's egress proxy — re-confirmed today —
+so Vercel's own documentation cannot be read from here, and third-party
+accounts contradict each other and the official docs.
+
+**What it does do.**
+
+1. **Narrows the key space** from "any string the client sends" to "any string
+   shaped like an IP". Each distinct key is a counter, so unvalidated client
+   input was also unbounded key cardinality in Redis, independent of whether
+   the limit could be evaded. A hostname, a sentence, an unsplit
+   comma-list, an out-of-range octet or 200 bytes of padding no longer becomes
+   a rate-limit key.
+2. **Falls through rather than discarding.** A junk value in the preferred
+   header no longer shadows a good value in a later one — otherwise an attacker
+   could *force* the collapse case deliberately by sending one junk header.
+   That is a new hazard the validation itself would have introduced, caught by
+   its own test.
+3. **Makes the open question answerable.** `clientIdentity().source` means an
+   operator can see which header a real request was keyed on, instead of my
+   asking the owner to find out what Vercel sends. That converts a blocked
+   question into a one-request observation.
+
+**Financial or security behaviour affected.** Rate-limit key derivation only.
+No limit value, no fail-open/closed policy, no money path. The collapse
+constant `'unknown-client'` is unchanged and now pinned by a test, deliberately,
+so changing it to a refusal cannot happen silently.
+
+**The fail-closed recommendation the sprint asked for** is now a table in
+`CLAUDE.md` under Known gaps, per bucket, distinguishing the two failure modes
+— Redis loss (`limit × instances`) and header loss (collapse to one key). They
+are not symmetrical: buckets keyed on an authenticated user id (`money:send`,
+`money:transfer-execute`, `schema:migrate-operator`) are *unaffected* by header
+loss, which narrows the money question to Redis availability alone. The money
+buckets are the only genuine dilemma and it is a business judgement — silently
+losing shared velocity protection versus refusing legitimate payments during an
+infrastructure fault. **Not implemented either way.** `auth:register`,
+`auth:password-reset` and `schema:bootstrap` key on the client alone, so a
+header collapse makes those limits *global*: three registrations an hour for
+the whole platform, and a break-glass path any anonymous caller can exhaust for
+everyone. Recommended to stay fail-open with an alert rather than become a
+refusal, since refusing recreates the Release 1.0 lockout shape.
+
+**Tests run and results.** 20 new cases in
+`lib/__tests__/client-identity.test.ts`. Full suite **58 files / 852 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings. Mutation-checked, each
+guard separately:
+
+| Mutation | Fails |
+|---|---|
+| read the leftmost `x-forwarded-for` hop (the original bypass) | 1 — "ignores the client-supplied prefix" |
+| drop validation so any non-empty string is a key | 8, including every rejected-input case |
+| no fall-through when the preferred header holds junk | 1 — "falls through to a usable header" |
+
+**Commit / PR.** `d858b39` on branch `sec/client-identity-provenance`, **PR
+#71**. Followed by `363dd74` on the same branch and PR, which replaces the
+character-class IP check with `net.isIP` after review: the old check accepted a
+bare `':'` as an address, so a junk `x-vercel-forwarded-for` was selected
+rather than skipped, and it rejected the IPv4-mapped form `::ffff:192.0.2.1`,
+sending a real client to the shared `unknown-client` bucket. That commit also
+adds `money:split-pay` to the Redis-loss decision table — a third bucket keyed
+on the authenticated user id, absent from the table as first written. Suite at
+`363dd74`: **58 files / 857 tests passing**. Carries the `next` 16.4.3 bump
+ported from PR #69. Not merged.
+
+(An earlier version of this paragraph said "the SHA is in the commit message",
+which does not put the SHA in the entry — the governance rule asks for the SHA
+and the PR, and PR #69 is the dependency bump, not this change.)
+
+**Migration impact.** None.
+
+**Unresolved findings.** The header-trust question itself. It needs one fact
+this environment cannot obtain: which of the three headers production actually
+sets. `clientIdentity().source` now makes that a single authenticated
+observation rather than a documentation hunt, but the observation still has to
+be made. Until then no limit keyed on a client IP should be described as
+per-client.
+
+**Rollback requirement.** Revert the commit; the previous behaviour accepts
+arbitrary strings as rate-limit keys.
+
+**Next recommended action.** Owner: PR #69 first (two unauthenticated RCEs),
+then branch protection, then report `clientIdentity().source` from one real
+request so the header question can be closed.
+
+---
+
+## 2026-10-26 — `source` alone does not answer the header-trust question (PR #71)
+
+**Purpose and scope.** A correction to this branch's own claim, appended
+rather than rewritten. Three places — `lib/rate-limit.ts`, `CLAUDE.md`, and
+the entry above — said `clientIdentity().source` converts the header-trust
+question into "a one-request observation". It does not.
+
+**Why.** A request supplying a forged `x-vercel-forwarded-for` and a request
+supplying nothing can both report `source: 'x-vercel-forwarded-for'` — in the
+first case because the platform overwrote the forged value, in the second
+because it set it. **The name is identical and the trust conclusion is
+opposite.** The deciding fact is whether the resolved `id` *equals* what the
+client sent, so the observation is a distinctive forged value plus that
+equality as a boolean, never the address. Found on PR #72 by review, against
+wording I had already corrected once (from one request to two) without
+noticing that the comparison itself was the wrong one.
+
+**Financial or security behaviour affected.** No code behaviour: `source` is
+reported the same way. What changes is what may be concluded from it, which is
+the whole point of the field existing.
+
+**Tests run and results.** Comment and documentation only; suite unchanged at
+**58 files / 857 tests passing**, typecheck clean, lint 0 errors / 28
+warnings.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`; SHA in a
+following entry per the PR #67 learning.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The question itself. It now needs a two-request
+comparison with an equality check, which is a slightly larger ask of the owner
+than what was recorded before — and that is the honest size of it.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #71; the observation
+itself remains an owner action.
+
+---
+
+## 2026-10-26 — the #67/#71 interaction, tested where neither suite reached (PR #71)
+
+**Purpose and scope.** The owner required that, after integrating the first of
+the two rate-limit PRs, the **combined** Redis-recovery and client-identity
+behaviour be tested before merging the second. #67 merged as `a08c82f`; this
+branch's base was updated to it and
+`lib/__tests__/rate-limit-identity-outage-interaction.test.ts` added.
+
+**Why a third file.** Each change was tested against the other's absence:
+the degradation suite drives outage and recovery with a fixed key string, the
+identity suite resolves headers with no Redis in play. Neither answered the
+question an operator has during an incident — **Redis down *and* the header is
+junk: which limits still hold?** The two failure modes are not symmetrical:
+
+| Failure | Effect on a client-keyed bucket | Effect on a user-id-keyed bucket |
+|---|---|---|
+| Redis unreachable | weakened to `limit × instances`, still per-key | weakened to `limit × instances`, still per-user |
+| No usable client header | **key collapses** — all callers share one bucket | **unaffected** — the key never came from a header |
+
+That bottom-right cell is the load-bearing claim in the money-bucket
+recommendation, and nothing executed it until now.
+
+**What the 7 cases pin.** Two users keep separate `money:send` counters during
+a total outage; the three money buckets stay separated from each other; a
+bucket still exhausts per user with Redis absent; every junk header resolves to
+the single `unknown-client` identity; a **forged but well-formed** address is
+used as a key and rotating it evades a client-keyed limit — recorded as a real
+evasion rather than implied, because valid IP syntax is not proof of a trusted
+proxy; the degradation line carries the stage and a count and **not** the
+connection URL, its password, the resolved client address or the email; and
+every bucket class, including both break-glass paths, is still **served**
+during an outage.
+
+**Mutation-checked, both directions:**
+
+| Mutation | Result |
+|---|---|
+| append `url=${process.env.REDIS_URL}` to the degradation line | leak case fails |
+| make `money:send` return `allowed: false` while degraded | 3 cases fail, including the explicit fail-open guard |
+
+**A defect in this very test file, found by that mutation run.** The "no Redis
+at all" case passed only because `REDIS_URL` happened to be **unset** in the
+environment. With it set, the unconfigured path tried to construct a real
+client; the case took 5,005 ms and failed. A test whose outcome depends on an
+ambient variable it never mentions is not a test of the thing it names. It now
+stubs the variable explicitly and passes in **both** environments in ~0.4 s.
+Two stray second arguments to `__setRedisClientForTests()` (which takes one)
+were removed in the same pass.
+
+**Financial or security behaviour affected.** None — no policy change. Every
+bucket still fails **open**, and these tests exist so that a future change to
+either mechanism cannot alter that silently.
+
+**Tests run and results.** 7 new cases; the five rate-limit and identity files
+together 69 passing before the addition. Full suite **61 files / 901 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings. (This read "recorded
+in the following entry with the merge SHA" — a deferral to an entry that was
+never written, which is the same dangling-promise shape already recorded twice
+on #68 and #70. An entry cannot contain its own introducing SHA; it can always
+contain its own test result, so there was nothing to defer.)
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`, base
+updated to `a08c82f` (post-#67). SHA in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None — tests only.
+
+**Unresolved findings.** The header-trust question itself, which still needs
+the two-request production comparison with an equality check. And the
+fail-open/fail-closed decision for the three money buckets, which is an owner
+judgement and is deliberately **not** implemented.
+
+**Next recommended action.** Owner review and merge of #71.
+
+---
+
+## 2026-10-26 — a zone suffix on IPv4 reopened the hole the validator exists to close (PR #71)
+
+**The defect, found by review and worse than reported.** `looksLikeIp()` split
+a value on `%`, validated the zone characters, then accepted the prefix when
+`isIP(prefix) !== 0`. A zone suffix is meaningful only on a **scoped IPv6**
+address (RFC 4007), so this accepted IPv4-with-zone.
+
+The reviewer's framing was that a malformed preferred header could outrank a
+valid `x-real-ip`. True, and measured. But the consequence is larger:
+
+```
+"203.0.113.9%junk"  accepted=true   isIP(prefix)=4
+"203.0.113.9%a"     accepted=true   isIP(prefix)=4
+"203.0.113.9%b"     accepted=true   isIP(prefix)=4
+distinct accepted keys from one address, 8 suffixes tried: 8
+```
+
+**One IPv4 address could mint unlimited distinct rate-limit keys** by rotating
+the suffix — defeating every client-keyed limit and growing counter
+cardinality without bound. Those two things are, verbatim, what this
+validator's own doc comment says it was introduced to prevent. The fix reopened
+its own purpose.
+
+**Fix.** The zone branch now requires `isIP(prefix) === 6`. Four cases added:
+IPv4-with-zone rejected (two forms), a zone with no address rejected, the
+key-minting case asserting four rotated suffixes all collapse to
+`unknown-client`, the precedence case from the review, and one asserting a
+genuine `fe80::1%eth0` still resolves — so the fix cannot be "achieved" by
+breaking the legitimate case. Mutation-checked: restoring `!== 0` fails 4.
+
+**The pattern, now at three.** Every defect in this one function has been a
+hand-rolled judgement about what "looks like an address" means: a bare `':'`
+accepted, the IPv4-mapped form rejected, a zone on IPv4 accepted. `isIP`
+decides correctly in all three. The durable lesson is written into the function
+itself: delegate the decision, and keep the function to splitting the zone off.
+
+**Financial or security behaviour affected.** Rate-limit key derivation. Before
+this fix, `auth:login`, `auth:register`, `auth:password-reset` and
+`schema:bootstrap` — every client-keyed bucket — were evadable by suffix
+rotation. The money buckets were **not** affected: they key on the
+authenticated user id, which is the asymmetry the interaction tests pin.
+
+**Tests run and results.** Full suite **61 files / 907 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`. SHA named
+in a later entry, written in the same session as this one.
+
+**Migration impact.** None. **Rollback requirement.** Reverting restores a
+client-keyed rate-limit evasion; fix forward.
+
+**Unresolved findings.** The header-trust question is untouched by this: valid
+syntax still is not proof of a trusted proxy, and the two-request production
+comparison with an equality check remains outstanding.
+
+**Next recommended action.** Owner review and merge of #71.
