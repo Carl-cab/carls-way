@@ -706,3 +706,73 @@
 
 **Total: 1,532+ hours, ~12 weeks, multiple teams**
 
+
+---
+
+## Sprint 1 (2026-10-25) — status changes, with evidence
+
+Appended rather than re-marked in place, per the governance rule: an item moves
+only when a change verifies it, naming the evidence. Nothing below is marked
+complete on the strength of an unmerged PR.
+
+| Item | Change | Evidence |
+|---|---|---|
+| GitHub Actions supply-chain pinning | *(new)* → **PARTIAL** | All seven `uses:` pinned to commit SHAs taken from this repo's CI run on `6927ebd`; `lib/__tests__/workflow-action-pinning.test.ts` enforces it; mutation-checked. PR #68, **unmerged** — `master` still carries mutable tags |
+| Production dependency advisories | *(new)* → **PARTIAL** | `next@16.3.8` on `master` carried two unauthenticated RCE advisories and a DoS, all patched `>=16.4.1`. **PR #69 merged on owner authorization 2026-10-26 as `1bc81df`**; `master`'s `package.json` and `pnpm-lock.yaml` now both pin `16.4.3`, verified by reading the merged tree, and `pnpm audit --prod` is clean. PARTIAL, not VERIFIED: clearing `master` is not clearing the **running deployment**, which serves its last build and whose version cannot be read from this environment (`403 CONNECT`). Needs confirmation that Vercel production rebuilt from `1bc81df` or later |
+| Database backup and restore verification | NOT RUN → **PARTIAL** | Runbook executed end to end against synthetic production-shaped data: restore exit 0 / 0.20 s, `verify-migrate.sql` 0 non-OK rows, counts identical, reconciliation 7/7 PASS non-vacuously, app suite passed against the restore, teardown clean. Negative cases prove the **exercised** checks can fail — schema verification, reconciliation, and both outcomes of the privilege probe; not every check in this row has a negative case. `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`. **Production rehearsal still NOT RUN** |
+| Branch protection enforcing required checks | BLOCKED → **BLOCKED** (now proven) | A `PUT` to `/branches/master/protection` was *attempted* and refused: "Write access to this GitHub API path is not permitted through this proxy" (403). Previously inferred from a read 403; now established by attempt |
+| Secret scanning in CI | PARTIAL → **PARTIAL** (unchanged, reason narrowed) | Gitleaks runs on every PR into `master`, full history, pinned by version and SHA256, `--redact`, SARIF `commitMessage` stripped. PARTIAL now for one reason only: not enforced by branch protection |
+| Static analysis (CodeQL) in CI | PARTIAL → **PARTIAL** (unchanged, reason narrowed) | Runs on every PR and weekly, least-privilege, succeeded on `6927ebd`. PARTIAL only because not enforced |
+| Redis-backed rate limiting in production | PARTIAL → **PARTIAL** (unchanged) | PR #67 removes the never-recovers latch and reports health on an observation; PR #71 validates the client identity and reports its provenance. Neither makes shared limiting VERIFIED: counters remain per serverless instance and nothing scrapes the degradation signal |
+| Header trust (`clientIdentifier`) | **unverified** | PR #71 adds `clientIdentity().source`, which names the header the value came from — not whether the platform *overwrites* a client-supplied one. Neither does comparing two requests' `source` names: if both select `x-vercel-forwarded-for`, the name is **identical** whether the platform overwrote the forged value or passed it through. What settles it is an **equality** — does the resolved id equal the distinctive value that request supplied? Report that boolean, never the id. Two requests: one with no IP headers, one supplying forged `x-real-ip` / `x-forwarded-for` / `x-vercel-forwarded-for`. If the forged value survives, the header is attacker-controlled whatever `source` says. Vercel's docs remain unreachable (`403 CONNECT`) |
+
+### Explicitly NOT advanced
+
+- **Phase 0** stays **NOT RUN**. The procedure is validated; no production
+  backup was inspected, no production restore performed. Restore duration
+  (0.20 s on a trivial dataset) is not an RTO input.
+- **Vercel operational verification** stays **NOT RUN** in every particular —
+  production SHA, health, Redis behaviour, `CRON_SECRET`, cron firing, logs,
+  error monitoring, alert ownership. Both `api.vercel.com` and the deployment
+  host answer `403 CONNECT`; no Vercel CLI and no token in this environment.
+- **Bank linking, domestic money movement and cross-border movement** are
+  unchanged. No live flag was touched; both default off. Sprint 1 was security
+  and recovery foundations and moved none of the three business gates.
+
+---
+
+## 2026-10-26 — Sprint 1 finalization: re-marked after the five merges
+
+The section above was written while all five PRs were open, so several of its
+rows named an unmerged PR as the reason for PARTIAL. Those reasons are now
+discharged. Re-marked here as a new section rather than by editing the rows
+above, per this file's own rule, and each row names what verifies it.
+
+**Measured against `master` at `e0f3f0d`** — the tip after #69 (`1bc81df`),
+#68 (`ce7255a`), #67 (`a08c82f`), #71 (`0b609f4`), #70 (`e0f3f0d`). Suite on
+that tree: **61 files / 907 tests passing**; typecheck 0 errors; lint 0 errors
+/ 28 warnings.
+
+| Item | Change | Evidence |
+|---|---|---|
+| GitHub Actions supply-chain pinning | PARTIAL → **VERIFIED** | PR #68 merged as `ce7255a`, so the stated reason for PARTIAL ("`master` still carries mutable tags") is gone. Measured on the merged tree: every `uses:` not matching `@[0-9a-f]{40}` — the list is **empty**. `workflow-action-pinning.test.ts` holds it, with matchers that tolerate YAML-quoted keys. Pinning removes tag mutability, not trust in what a pinned SHA contains |
+| Branch protection enforcing required checks | BLOCKED → **VERIFIED** | The owner acted. Ruleset `25851827` "master CI and security checks": `enforcement: active`, include `refs/heads/master`, `bypass_actors: []`, `required_status_checks` with `strict: true` and exactly the four contexts. Read from the rulesets API 2026-10-26. Scope limit: the ruleset holds **only** `required_status_checks` — no required review, no force-push restriction. The classic protection API still 403s this session, so a `protected: false` from that endpoint is a token artefact, not an absence of protection |
+| Secret scanning in CI | PARTIAL → **VERIFIED** | Its single stated reason for PARTIAL — not enforced — no longer holds; `secret scan` is a required context. Green on `e0f3f0d` |
+| Static analysis (CodeQL) in CI | PARTIAL → **VERIFIED** | Same: `analyze javascript-typescript` is a required context and is green on `e0f3f0d`. VERIFIED means the control runs and gates, not that the tree is free of what CodeQL cannot see |
+| Redis-backed rate limiting in production | PARTIAL → **PARTIAL** (unchanged; reason narrowed) | #67 and #71 are now merged, so the "unmerged" clause is gone, but neither changes the row: the counters are still module-level and therefore per serverless instance, nothing external scrapes `rateLimitBackendHealth()`, and a verification POST proves only the instance that served it. The never-recovers latch **is** gone — `redisUnavailable` no longer exists; a failure opens a 30 s cooldown and retries |
+| Production dependency advisories | PARTIAL → **PARTIAL** (unchanged; two reasons now) | `master` is fixed and the fix is now *enforced* by required checks. Still PARTIAL because the **running deployment** is unconfirmed, and because the full audit on the merged tree reports **24 dev-chain advisories (2 critical, 13 high, 8 moderate, 1 low)** — production deps are clean, the dev chain is not. ci.yml's tier split is documented, not a suppression; these are recorded open |
+| Dependabot alerts enabled | *(new)* → **BLOCKED** | `/dependabot/alerts` and `/vulnerability-alerts` both answer **403** to this session (2026-10-26). A 403 is "unknown", not "disabled" and not "clean". It is the only backstop for an advisory disclosed against an **unchanged** tree, which has now bitten twice. Owner action is a settings toggle, no secret |
+| Live providers implemented | *(correction)* → **unchanged, but mis-described** | `CURRENT_STATUS.md` called `PlaidTransferProvider` and `CanadianEFTProvider` "placeholder implementations (throw 'Not implemented')". Measured: 604 and 677 lines, **zero** occurrences of "Not implemented", both carrying idempotency keys, `FOR UPDATE` claims and the `__submitted` signal, and **zero** `balance_cad`/`balance_usd` references. Corrected there. **No flag was touched; both remain default off** |
+
+### Still explicitly NOT advanced
+
+- **Phase 0 remains NOT RUN.** The procedure is validated synthetically only.
+  No production backup was inspected and no production restore performed.
+- **Vercel operational verification remains NOT RUN** in every particular.
+  Re-confirmed 2026-10-26: `api.vercel.com` and the deployment host both
+  answer `403 CONNECT` from this environment.
+- **No live-money flag was changed.** `PLAID_TRANSFER_LIVE` and `CA_EFT_LIVE`
+  are absent from the whole Sprint 1 diff; `lib/` and `app/` on the #72 branch
+  are byte-identical to `master`. Cash-out stays design-only.
+- **The three business gates are untouched.** Sprint 1 was security, recovery
+  and supply-chain foundations.

@@ -2282,3 +2282,777 @@ operator to overwrite their own evidence.
 
 **Next recommended action.** Owner review and merge of #70, then authorization
 of the real Phase 0 rehearsal with a designated operator.
+
+## 2026-10-25 — Sprint 1 documentation: status records brought current
+
+**Purpose and scope.** Sprint 1's engineering sits on five branches with open
+PRs; this brings the three status records in line with what is actually true of
+`master`, and records what Sprint 1 did and did not establish.
+
+**The stalest claim, corrected.** `CURRENT_STATUS.md` read "verified against
+commit `6d8861c`" with "57 files / 821 tests" while `master` had moved on three
+times (`1d4d783`, `c2859f6`, `6927ebd`) and the suite had reached 832. Both
+numbers were stale in the direction that invites trust — a file that reads as
+confirmation, confirming something four commits old. This is the second time
+this file has needed that correction; the first was a stale *date* on current
+content, and the note about it is still in the file.
+
+**Task G: coverage inventoried rather than expanded.** Every area the sprint
+named already has isolated coverage — duplicate financial requests, concurrent
+transfer execution, Redis failure during sensitive operations, webhook delivery
+failure and retries, dead-letter recovery, unknown transfer outcomes, ledger
+consistency, reconciliation discrepancies, migration interruption. My first
+sweep appeared to show gaps in dead-letter, webhook-retry and unknown-outcome
+coverage; that was a too-narrow grep (hyphens and camelCase), and checking
+variants found nine, three and eleven files respectively. **No tests were added
+for Task G**, because adding them would have been duplicating coverage to look
+productive. The suite runs in sandbox only; no production ledger was touched
+and no real money moved.
+
+**Status changes recorded.** `scripts/status/readiness.json` gains two rows
+(Actions supply-chain pinning; production dependency advisories), and four rows
+have their evidence rewritten. `PRODUCTION_READINESS_BACKLOG.md` gains an
+appended Sprint 1 block rather than in-place re-marking, per the governance
+rule. Owner actions are now ordered with PR #69 first, because `master` is
+carrying two unauthenticated RCEs.
+
+**Three things deliberately NOT advanced**, stated because a sprint report is
+where false completion gets manufactured:
+
+- **Phase 0 stays NOT RUN.** The procedure is validated synthetically; no
+  production backup was inspected and no production restore performed. The
+  0.20 s restore duration is not an RTO input and is labelled as such
+  everywhere it appears.
+- **Vercel operational verification stays NOT RUN in every particular** —
+  production SHA, health, Redis behaviour, `CRON_SECRET`, cron firing, logs,
+  error monitoring, alert ownership. Both `api.vercel.com` and the deployment
+  host answer `403 CONNECT`, re-confirmed today; no CLI, no token.
+- **No business gate moved.** Bank linking, domestic movement and cross-border
+  movement are where they were. Both live flags remain off and neither was
+  touched. Sprint 1 was security and recovery foundations.
+
+**Financial or security behaviour affected.** The status records themselves are
+documentation only. But this branch is **not** documentation-only: it carries
+the `next` 16.3.8 → 16.4.3 bump, ported here so a status branch cannot
+reintroduce a version with two unauthenticated RCE advisories
+(GHSA-673q-mjm6-r5xr among them) and a DoS, all patched in `>=16.4.1`.
+Merging this branch therefore clears the advisory on `master` as a side effect
+— which is also why the readiness action no longer names PR #69 as the only
+route. It does not clear the **running deployment**, which carries whatever
+the last build produced.
+
+(An earlier version of this line read "None. Documentation and readiness data
+only," which was wrong about the branch's own diff.)
+
+**Tests run and results.** Full suite on this branch **57 files / 832 tests
+passing** (documentation-only on top of `master`), typecheck clean, lint
+0 errors / 28 warnings, `readiness.json` parses and the report renders.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; this entry's own
+commit SHA is in the commit message. Corrected in place, before this entry was
+ever merged, on two counts: it named no PR, and it said it "carries the `next`
+16.4.3 bump ported from PR #69 so CI is green", which stopped being true when
+`master` was merged into this branch. #69 merged first as `1bc81df`, so the
+bump now reaches this branch *from* `master` and the branch's own
+`package.json`/`pnpm-lock.yaml` diff against `master` is empty. Editing rather
+than appending here because the entry had not yet reached `master`, so this is
+finishing a draft, not rewriting history — and a false statement left standing
+for the sake of a rule about history would serve nobody reading it later.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The pattern worth carrying out of this sprint: two
+dependency advisories reached `master` in five days, both *after* its last
+green run, and both were found only because an unrelated PR re-ran the audit.
+Green CI on an unchanged tree is not evidence of a clean tree. Dependabot
+alerts are named in `ci.yml` as the backstop and have never been confirmed
+enabled — that is now the first-order gap, ahead of anything else in the CI
+configuration.
+
+**Rollback requirement.** Revert the commit; documentation only.
+
+**Next recommended action.** Owner: PR #69, then branch protection, then
+confirm Dependabot.
+
+---
+
+## 2026-10-26 — two corrections to the Sprint 1 corrections (PR #72)
+
+**1. The header-trust owner action still could not answer the question.**
+The previous round corrected it from one production request to two, but kept
+it to reporting `clientIdentity().source` for each. That does not settle
+anything: if both requests select `x-vercel-forwarded-for`, **the source name
+is identical whether the platform overwrote the forged value or passed it
+through.** What distinguishes the two cases is an *equality* — does the
+resolved id equal the distinctive value that request supplied? The action now
+asks for that boolean per request, alongside the source name, and explicitly
+not the id or the IP. Had this gone to the owner as written, two source names
+would have come back and the question would have looked answered while being
+untouched.
+
+**2. The shape guard added yesterday reproduced the bug it was added for.**
+It tested truthiness, so `action: []` passed, the template literal rendered it
+as the empty string, and the report emitted `|  |  |` with **exit 0** — a
+silent empty row, which is exactly the failure mode the guard exists to catch.
+Measured before and after. It now requires a non-empty string for both fields;
+mutation-checked, an array entry gives exit 1.
+
+That is the third fix in this review round to carry the defect it was fixing
+(the earlier two: a blacklist gate corrected with another blacklist, and a
+pinning matcher widened for quoted keys but not quoted values). The pattern is
+worth naming: a fix written while holding one example in mind tends to cover
+that example and not the class.
+
+**Financial or security behaviour affected.** None directly. One of the two
+is a security *question* whose answer was about to be mis-recorded.
+
+**Tests run and results.** `readiness.json` parses (13 rows, 8 actions), the
+report renders 8 owner-action rows with zero `undefined` and zero empty cells,
+and an array-valued entry exits 1. Full suite unchanged at **57 files / 832
+tests passing**.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a following
+entry, per the PR #67 learning.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The header-trust question itself remains open and is
+now the only owner action whose wording has been corrected twice.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #72.
+
+---
+
+## 2026-10-26 — correction to the 2026-10-25 rollback line (PR #72)
+
+Appended, not edited: the earlier entry stays as written.
+
+**What was wrong.** Its **Rollback requirement** read "Revert the commit;
+documentation only." The status and readiness edits are documentation only, but
+the branch also carries `next` and `eslint-config-next` 16.3.8 → 16.4.3 and the
+matching `pnpm-lock.yaml` change. **Reverting this PR therefore reverts that
+bump and reintroduces two unauthenticated RCE advisories** (Image
+Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) plus a DoS
+(GHSA-p3m5-59mp-jv5r). A rollback instruction is read under time pressure, so
+one that omits a security consequence is worse than none.
+
+**The correct instruction.** To undo the status-record changes, revert only the
+documentation files — `CURRENT_STATUS.md`, `PRODUCTION_READINESS_BACKLOG.md`,
+`scripts/status/readiness.json`, `scripts/status/report.mjs` and this file.
+Leave `package.json` and `pnpm-lock.yaml` at 16.4.3 unless the bump itself is
+being rolled back deliberately, and then only with the advisories in view.
+
+**Also stale in that entry.** Its "Next recommended action" names PR #69 as
+the route to clearing the advisory. The same bump rides on #68, #70, #71 and
+#72, so whichever merges first clears `master`; #69 is merely the smallest
+such PR. Corrected in `readiness.json` and `CURRENT_STATUS.md` by `8a33404`,
+and noted here so the chronological record is not left pointing at one branch.
+
+**Financial or security behaviour affected.** None by this append. It corrects
+a *procedure* whose previous wording would have silently undone a security fix.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a following
+entry per the PR #67 learning.
+
+**Migration impact.** None. **Rollback requirement.** None — this entry is
+itself the correction.
+
+**Next recommended action.** Owner review and merge of #72.
+
+---
+
+## 2026-10-26 — the rollback correction over-corrected (PR #72)
+
+The entry above says reverting this PR "therefore reverts that bump". That is
+true only in one case, and stating it unconditionally replaced an under-claim
+with an over-claim.
+
+**The condition.** `master` is at `6927ebd` carrying `next@16.3.8`, verified
+just now; this branch carries `16.4.3`. The same bump rides on #68, #70, #71
+and #72. So:
+
+- If **#72 merges first**, its merge is what moves `master` to `16.4.3`, and
+  reverting it does reintroduce the advisories.
+- If **another carrier merges first**, `master` is already at `16.4.3` and
+  #72's `package.json`/`pnpm-lock.yaml` diff against it is empty. Reverting
+  #72 then touches no dependency and the advisories stay fixed.
+
+**So the correct instruction is conditional:** before reverting any of these
+five PRs, check whether the one being reverted is the carrier that moved
+`master` to `16.4.3` — `git log -1 --format=%H -- package.json` on `master`
+answers it. If it is, revert only the documentation files and leave
+`package.json` and `pnpm-lock.yaml` alone. If it is not, a full revert is
+safe on that axis.
+
+**Why this is recorded rather than quietly edited.** It is the fifth correction
+this round to a correction of mine, and the second where the fix overshot
+rather than fell short. The failure mode is consistent enough to be worth
+stating: having found an under-claim, I asserted its opposite without checking
+whether the opposite held in every case. The check here took one command.
+
+**Financial or security behaviour affected.** None. A rollback procedure's
+precision.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a following
+entry per the PR #67 learning.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #72. Note that
+CodeRabbit has auto-paused reviews on this PR and on #70 after the volume of
+commits; last reviewed commits are `551ee88` and `44dbd7d`, both current heads,
+so nothing is unreviewed — but a further push to either will not be reviewed
+automatically until someone resumes it.
+
+---
+
+## 2026-10-26 — PR #69 merged: the Next.js RCE advisories cleared from master
+
+**Purpose and scope.** The owner authorized merging PR #69 ("merge 69"). Merged
+as **`1bc81df`**, a merge commit of `a85aa63` onto `6927ebd`.
+
+**Preconditions re-verified immediately before merging**, not carried from
+earlier in the session: PR open and not merged, `mergeable_state: clean`, base
+`6927ebd` equal to then-current `master`, all **six** checks green on
+`a85aa63`, and the file list confined to `package.json` (the `next` /
+`eslint-config-next` pair), `pnpm-lock.yaml` (version pins only — no package
+added or removed) and a `PROJECT_MEMORY.md` entry. No application code.
+Merged with `expectedHeadSha` set to `a85aa63`, so a push between verification
+and merge would have refused rather than merged something unreviewed.
+
+**Financial or security behaviour affected.** Three remotely reachable
+advisories against `next@16.3.8` are closed on `master`: two **unauthenticated
+remote code execution** (Image Optimization; `use cache` typed arrays,
+GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r). `next` is the HTTP
+layer in front of every route, so this is the broadest-surface fix in the
+sprint. No live-money flag, schema, credential or balance change.
+
+**Verified after merging.** Fetched `origin/master` and read the merged tree:
+`1bc81df` pins `16.4.3` in `package.json` **and** in `pnpm-lock.yaml`. Stated
+as a read of the tree rather than an inference from the merge succeeding.
+
+**What this does NOT establish.** The **running deployment** is not known to
+carry `16.4.3`. Production serves whatever its last build produced, and the
+deployed version cannot be read from this environment (`403 CONNECT` to both
+`api.vercel.com` and the deployment host). Until the Vercel production rebuild
+is confirmed, the two RCEs should be treated as potentially live on the public
+deployment. This distinction is now the open half of the readiness row.
+
+**It also resolves a conditional recorded earlier today.** The append on PR #72
+said reverting a carrier reverts the bump *only if* that carrier introduced it
+to `master`. #69 is that carrier. So: reverting `1bc81df` reintroduces the
+advisories, while #68, #70, #71 and #72 now have an **empty** dependency diff
+against `master` and reverting any of them touches no dependency.
+
+**Records updated with the evidence named** (`CURRENT_STATUS.md`,
+`PRODUCTION_READINESS_BACKLOG.md`, `scripts/status/readiness.json`): the
+advisory row moves BLOCKED → **PARTIAL**, and the first owner action changes
+from "merge a next bump" to "confirm the production deployment rebuilt from
+`1bc81df` or later".
+
+**Commit / PR.** Merge commit **`1bc81df`**, PR **#69**, branch
+`sec/next-rce-advisories`. The record of these status updates is PR **#72**
+(`docs/sprint1-status`); its SHA follows in a later entry.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The deployment rebuild, above. And item 2 of
+`CURRENT_STATUS.md` is untouched and is now the first-order gap: **nothing
+watches an unchanged tree.** Both this advisory set and `follow-redirects` five
+days earlier reached `master` after its last green run and surfaced only
+because an unrelated PR re-ran the audit. Dependabot alerts have still never
+been confirmed enabled.
+
+**Rollback requirement.** Reverting `1bc81df` restores two unauthenticated
+RCEs. Do not roll it back; fix forward if `16.4.3` causes a problem.
+
+**Next recommended action.** Owner: confirm the production rebuild, then
+confirm Dependabot alerts, then branch protection so a failing `dependency
+audit` can block a merge.
+
+---
+
+## 2026-10-26 — documentation structure audited against the tree, two gaps closed (PR #72)
+
+**Purpose and scope.** The owner specified a seven-item documentation
+structure and asked that it be implemented. Audited against `master` at
+`1bc81df` rather than from memory.
+
+**What already existed — all seven.** `CLAUDE.md` (619 lines),
+`CURRENT_STATUS.md` (338), `PROJECT_MEMORY.md` (971),
+`PRODUCTION_READINESS_BACKLOG.md` (708), `GO_LIVE_RUNBOOK.md` (205),
+`docs/decisions/` (6 records), `docs/audits/` (1 report). Also
+`docs/runbooks/` (3), which the owner's list does not name but which carries
+the executable procedures. The backlog does carry per-task **Owner** and
+**Acceptance Criteria** (76 matching lines), which its stated purpose
+requires.
+
+**Gap 1: the go/no-go runbook was not in the governance contract.**
+`CLAUDE.md` opened its Documentation Governance section with "Four files carry
+different kinds of truth" and named four files plus two directories.
+`GO_LIVE_RUNBOOK.md` appeared **nowhere** in `CLAUDE.md`, and `docs/runbooks/`
+only incidentally, in one line about baseline adoption. So the file a session
+would need before any live-money decision had no stated rule for keeping it
+current and no instruction to consult it. The table now carries all five files
+and all three directories, each with its rule, and states the backlog's
+owner/acceptance-criteria requirement explicitly.
+
+**Gap 2: the runbook had drifted, in the direction that destroys its value.**
+Measured against `master`:
+
+| Runbook claim | Reality on `1bc81df` |
+|---|---|
+| §4.1 "Execute endpoint (**NOT YET BUILT**)" | `app/api/transfers/[id]/execute/route.ts` exists, live-gated, with a persisted idempotency key, `SELECT ... FOR UPDATE` claim and `money:transfer-execute` rate limiting |
+| §4.2 "Confirm `webhooks/plaid` handles `TRANSFER.STATUS_UPDATE`" | Handler exists and handles `TRANSFER_EVENTS_UPDATE` — the event Plaid actually sends; the runbook named an event that does not arrive |
+| §4.2 "Confirm the Executor updates balances, never the provider" | Verified: both live providers contain **zero** references to `balance_cad`/`balance_usd`; balances are written only in `SettlementExecutor.ts` and `apply-settlement.ts` |
+| §6 `POST /api/migrate` outstanding | Already run against production |
+
+**Why this mattered more than a tidy-up.** A go/no-go procedure's whole value
+is that an unchecked box is genuinely unchecked. One stale blocker gives an
+operator no way to tell which of the others are stale, so the document stops
+being a gate. Corrected items are now checked **with their evidence named**,
+and the sections that genuinely remain — sandbox end-to-end execution, a
+webhook-driven settlement transition, the dead-letter replay drill, the
+authorization-gated correlation-index migration — are left unchecked and
+restated as what they are.
+
+**What was deliberately NOT marked done.** Nothing was promoted on the
+strength of code reading alone where the item asks for execution. §4.1 keeps an
+open item for exercising the endpoint in a provider sandbox; §4.2 keeps one for
+an observed settlement transition. The runbook now states that a checked box
+means "verified in the tree or by a recorded run", **never** "exercised against
+a live rail", because nothing in this repository has been.
+
+**Verification anchor added.** The runbook now carries the commit and date it
+was verified against, with an instruction to re-anchor on revision and to treat
+an unanchored copy as unverified — the same rule `CURRENT_STATUS.md` already
+has, and for the same reason recorded there: a stale date on current content
+invites trust.
+
+**Financial or security behaviour affected.** None. No code changed. The
+corrections *reduce* the chance of a live flag being enabled against a
+misleading checklist.
+
+**Tests run and results.** Documentation only; full suite re-run to confirm no
+collateral change.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`, carried there rather
+than on a sixth branch because every open branch appends to this file and a new
+one would add another merge conflict to resolve. SHA named in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None — reverting restores
+a runbook that understates what is built.
+
+**Unresolved findings.** `docs/audits/` holds one report on `master`; the Phase
+0 synthetic rehearsal audit is still unmerged on #70. And the runbook's
+remaining 🔴 owner-only sections (legal, FBO/funding, provider approvals) are
+unverifiable from here by construction.
+
+**Next recommended action.** Owner review and merge of #72.
+
+---
+
+## 2026-10-26 — money-bucket policy recommendation written, nothing implemented (PR #72)
+
+**Purpose and scope.** The owner's finalization directive asked for a concise
+recommendation on fail-open versus fail-closed for the three money buckets when
+Redis is unavailable, including risks to legitimate transfers and to abuse
+prevention, while preserving the emergency schema-repair path. Written as
+`docs/decisions/0007-money-bucket-policy-on-redis-loss.md`, decided against
+`master` at `0b609f4`.
+
+**The question is narrower than it looks.** Read from source: `money:send`
+(20/h), `money:split-pay` (30/h) and `money:transfer-execute` (10/h) all key on
+the **authenticated user id**. Header loss therefore cannot collapse them —
+that failure mode belongs to the client-keyed buckets — so only Redis loss is
+in scope. The interaction tests added on #71 pin this.
+
+**Recommendation: keep all three fail-open, and add a signal rather than a
+refusal.** The asymmetry decides it. Fail-closed converts a Redis outage into a
+**payments outage** for every customer while the database, providers and
+application are healthy. Fail-open raises one user's ceiling to
+`limit × instances`, **by an unmeasured factor** — corrected in place before
+this entry reached `master`; it read "a low single-digit multiplier on the
+Hobby plan, not caller-controllable", which this repository has no evidence
+for and this environment cannot obtain (`403 CONNECT` to Vercel). The layer
+that survives a Redis outage and caps volume is `velocity_checks`. The
+per-intent idempotency key with `SELECT ... FOR UPDATE` is **not** such a
+layer and was wrongly listed as one: it stops a replay double-debiting *one*
+intent and says nothing about a caller creating many. Worst case is "sends more
+often than the nominal limit during an outage, still bounded by
+`velocity_checks`", not "money moves twice". See the 2026-10-26 entry on the
+review that caught both.
+
+**The real defect named.** It is not the fail-open choice; it is that the
+degradation is **unobservable**. `rateLimitBackendHealth()` already reports the
+active backend, a cumulative degradation count and the remaining cooldown, and
+nothing scrapes it. The three asks are therefore: scrape it, alert on sustained
+degradation with a named owner, and move these three counters to PostgreSQL —
+which the application cannot run without — removing the dilemma instead of
+choosing a side, alongside decision 0005 Phase 2's counter table.
+
+**Explicitly preserved.** `schema:migrate-operator` and `schema:bootstrap`
+remain fail-open regardless of the decision above; refusing them makes an
+optional variable a hard dependency of the only schema-migration path and of
+the command-line break-glass, which is the Release 1.0 lockout shape.
+
+**Financial or security behaviour affected.** **None — nothing is implemented.**
+No fail-closed path exists and none should until the owner decides, because
+doing it unilaterally would either weaken a financial control or interrupt
+customers.
+
+**Noted in passing, not a defect.** `money:transfer-execute` keys on
+`String(user.userId)` while the other two use `user:${user.userId}`. Keys are
+namespaced per bucket so this cannot collide; recorded because it is cheaper to
+note than to rediscover.
+
+**Tests run and results.** Documentation only. `readiness.json` parses and the
+report renders with no `undefined` cells; the owner action now points at the
+decision record instead of restating the dilemma.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner: make the decision recorded in 0007. If the
+answer is "keep fail-open", the follow-up work is the three observability asks,
+not a code change to the limiter.
+
+---
+
+## 2026-10-26 — Sprint 1 finalization: five PRs merged, status records reconciled
+
+**Purpose and scope.** Close Sprint 1 by integrating the five completed PRs in
+the authorized order, then bring the status records in line with the tree that
+resulted. No feature work, no rail work, and no live-money behaviour.
+
+**Merged, in the directed order, each with `expectedHeadSha` and with the
+required checks verified BY NAME rather than by count.**
+
+| PR | Subject | Merge SHA |
+|---|---|---|
+| #69 | `next` → 16.4.3 (two unauthenticated RCE + one DoS) | `1bc81df` |
+| #68 | Every GitHub Action pinned to a commit SHA | `ce7255a` |
+| #67 | Redis degradation recovery — cooldown, not a latch | `a08c82f` |
+| #71 | Client identity validation | `0b609f4` |
+| #70 | Synthetic backup restore verification | `e0f3f0d` |
+
+Checking by name mattered: a count-based reading of the checks API reports
+"ALL GREEN 1/1" when exactly one check has reported and nothing is pending,
+which is indistinguishable from a fully green commit. Every merge in this
+sprint was gated on the four required contexts individually.
+
+**The #67 / #71 combined requirement was satisfied before #71 was merged, not
+after.** Both touch rate limiting, so `rate-limit-identity-outage-interaction.test.ts`
+(7 cases) was written against the tree that already contained #67 and pinned:
+the three money buckets survive a total Redis outage because they key on the
+authenticated user id; they stay separate from one another; a bucket still
+exhausts per user with no Redis at all (`vi.stubEnv('REDIS_URL','')`, so the
+test states its precondition instead of inheriting it); junk headers all
+collapse to `unknown-client`; the degradation line leaks no URL, password,
+address or email; and every bucket class — including both break-glass paths —
+is still **served** during an outage. One finding is recorded as a real
+evasion rather than smoothed over: a *well-formed forged* address is used as a
+key, so rotating it evades a client-keyed limit. That is why the money buckets
+key on the user id and not on a header.
+
+**A third defect of the same class in `looksLikeIp`, found by review and
+measured worse than reported.** A zone suffix was accepted whenever the prefix
+parsed as any IP, so `203.0.113.9%a`, `%b`, `%c` … were each accepted as a
+**distinct** key — one IPv4 address could mint unlimited rate-limit keys and
+walk out of any limit keyed on it. A zone is meaningful only on a scoped IPv6
+address (RFC 4007), so the guard is `isIP(prefix) === 6`, not `!== 0`. Fixed
+and pinned by a test that asserts four zone variants all collapse to
+`unknown-client`.
+
+**Status reconciliation — what was stale, specifically.** Each of these read as
+confirmation of something no longer true:
+
+- `CURRENT_STATUS.md` was anchored to `6927ebd` / "57 files / 832 tests" after
+  `master` had moved five times. **This is the third time this file has needed
+  that correction**, which is now noted in the file itself.
+- It said `master` is "`protected: false` with no rulesets, so none of the six
+  passing CI checks is enforced." False: ruleset `25851827` is active with all
+  four contexts required, `strict: true`, `bypass_actors: []`.
+- It said SHA-pinning "remains an open owner decision." Done in #68.
+- It said secret scanning and CodeQL were "ADVISORY, NOT ENFORCING." Both are
+  now required contexts.
+- It described `PlaidTransferProvider` and `CanadianEFTProvider` as
+  "placeholder implementations (throw 'Not implemented')." Measured: 604 and
+  677 lines, **zero** occurrences of that string. Both are fully implemented
+  and gated off by default. This one mattered most — a reader planning live
+  work would have had the wrong model of what exists.
+- `CLAUDE.md` said "61 files / 901 tests"; measured 907. Six stale, one
+  revision after the same drift was corrected by measuring.
+
+**Financial and security behaviour affected: none.** `lib/` and `app/` on the
+#72 branch are byte-identical to `master` — the branch is documentation-only,
+verified by an empty `git diff` over both trees. `PLAID_TRANSFER_LIVE` and
+`CA_EFT_LIVE` appear nowhere in the sprint diff; both remain default off.
+Cash-out stays design-only.
+
+**Tests run and their results.** Full suite on the merged tree, on a database
+created fresh for the run with the CI fixture applied: **61 files / 907 tests
+passing**, exit 0. `pnpm run typecheck` 0 errors. `pnpm run lint` 0 errors / 28
+unused-variable warnings. All four required checks green on `e0f3f0d`.
+
+**Dependency audit, both tiers, reported as measured.** Production
+dependencies: **no known vulnerabilities**. Full tree including dev: **24
+advisories — 2 critical, 13 high, 8 moderate, 1 low** — all dev-chain (e.g.
+`vitest > @vitest/mocker`, GHSA-qxg6-89mg-rqv8). `ci.yml` gates on production
+criticals/highs and reports the dev chain advisory-only. That split is
+documented and is **not** a suppression, so the 24 are recorded as open rather
+than as a clean scan.
+
+**Deliberately NOT claimed.** The production deployment is **unverified**.
+`api.vercel.com` and the deployment host both answer `403 CONNECT` from this
+environment, re-confirmed 2026-10-26, so whether the running deployment
+contains the `next` fix is unknown — the commit-level "Vercel success" status
+is a *build* signal on a commit, not proof of which deployment serves
+production. Until the owner confirms it, the two unauthenticated RCEs are
+treated as potentially live on the public deployment. Dependabot is
+**BLOCKED**, not clean: both alert endpoints answer 403, which is "unknown".
+Phase 0 remains **NOT RUN**.
+
+**Migration impact.** None. No schema source was touched.
+
+**Rollback requirement.** None for #72, which is documentation-only.
+
+**And the open question from the 2026-10-26 rollback correction is now
+settled.** That entry could only say "if #72 is the carrier, reverting it
+reintroduces the advisories; if another carrier merged first, #72's dependency
+diff is empty" — because at the time no carrier had merged. The answer is
+**#69, merged as `1bc81df`**, which is what moved `master` to `next@16.4.3`.
+So, concretely: **do not revert `1bc81df`** — it is the only commit in this
+range whose revert reintroduces two unauthenticated RCE advisories. #68, #70,
+#71 and #72 all carry an empty `package.json`/`pnpm-lock.yaml` diff against the
+`master` that followed it, so reverting any of those four is safe on the
+dependency axis. Recorded here rather than left as a conditional, because a
+conditional whose condition has since been decided is just an unanswered
+question with extra steps.
+
+**Unresolved findings.** The header-trust question is still open and cannot be
+answered from here — `clientIdentity().source` names the header a value came
+from, not whether the platform overwrites a client-supplied one, and comparing
+two requests' `source` names does not settle it either, because the name is
+identical whether the forged value was overwritten or passed through. Only an
+**equality** answers it: does the resolved id equal the distinctive value the
+request supplied? Owner action, reported as a boolean, never as the id.
+Observability of the Redis degradation remains unscraped and unowned.
+
+**Next recommended action.** Owner: confirm the production deployment SHA;
+enable Dependabot; decide the money-bucket policy recorded in
+`docs/decisions/0007-money-bucket-policy-on-redis-loss.md`. Engineering: the
+Sprint 2 candidates are the three observability asks from 0007, a first-class
+entry point for baseline adoption, and decision 0005 Phase 2 — none of which
+requires a live rail.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`. An entry cannot
+contain its own introducing SHA, so this one does not state it — and
+deliberately does **not** promise a follow-up entry naming it. This file
+already carries three such promises that were never kept, and each one reads
+like a pointer to evidence that does not exist. The merge SHA of PR #72 is
+recoverable from the PR itself, which is a durable reference; that is the whole
+of the answer, not a placeholder for one.
+
+---
+
+## 2026-10-26 — review of the reconciliation found two claims I could not support
+
+Appended rather than folded into the entry above, because the findings are
+about that entry's own accuracy and the correction is worth more than the tidy
+version of it.
+
+**How the review nearly did not happen.** CodeRabbit's commit status on
+`7253d96` read **`success` with the description `Review paused`**. Green, and
+it meant the head had *never been reviewed* — auto-review was paused at
+`551ee88`, and a triggered review had aborted with "Head commit changed"
+because a commit was pushed while it was in flight. The status was reported as
+an approval in this session before the description was read. **This is the same
+defect as the "ALL GREEN 1/1" reading from earlier in the sprint**: a green
+signal accepted without checking what it asserts. Both times the signal was
+technically accurate and the inference was wrong. The monitor was rewritten to
+reject a CodeRabbit status whose description is `Review paused`, which is the
+only version of this guard that would have caught it.
+
+**The Major finding, and it was right.** Decision 0007 justified keeping the
+money buckets fail-open partly on this: "On Vercel's Hobby plan the instance
+count is small and not controllable by the caller, so this is a multiplier in
+the low single digits, not an unbounded hole." Nothing in this repository
+establishes an instance count — no deployment limit, no observed value — and
+this environment cannot obtain one (`403 CONNECT` to `api.vercel.com` and the
+deployment host). That is **an invented quantitative bound used to justify a
+security posture**, which is exactly what this project's rules prohibit, and it
+was written in the same document that elsewhere insists on not inferring
+Redis's state from a variable being set. Withdrawn, not softened: the
+multiplier is now recorded as **unbounded until someone with deployment access
+establishes a concurrency ceiling**.
+
+**A second error in the same paragraph.** It listed the per-intent idempotency
+key and `SELECT ... FOR UPDATE` claim among the controls constraining abuse
+during an outage. They are not: they prevent *one* intent being debited twice
+and say nothing about a caller creating *many* intents. Conflating "cannot
+double-debit an intent" with "cannot exceed a volume" is how a rate-limit
+decision gets argued from a control that was never a rate limit. The only layer
+that survives a Redis outage and actually caps volume is `velocity_checks`.
+
+**The recommendation did not change, and that is the point.** It rests on the
+asymmetry — fail-closed makes a cache outage a total, customer-visible payments
+outage while the database, providers and application are healthy; fail-open
+loosens an aggregate ceiling for users actively abusing the system. That
+ordering holds whether `instances` is 2 or 200. What the unknown size changes is
+the **urgency of moving the counter to PostgreSQL**, which removes the dilemma
+rather than choosing a side. An argument that survives the removal of its
+weakest premise was not relying on it; the premise still had to go.
+
+**Also corrected from the same review.** `GO_LIVE_RUNBOOK.md` had its header
+re-anchored to `e0f3f0d` while §4.1 and §4.2 still cited `1bc81df` — the same
+staleness one level down, in the document whose entire contract is about
+currency. Re-anchored, having first confirmed that the execute, webhook,
+provider and settlement paths are unchanged between the two commits, so the
+evidence carries rather than needing a re-read. And §4.1's idempotency box
+claimed the key "guarantees a single debit" unconditionally; provider
+idempotency records are retained for a bounded period and `submitting` is
+deliberately retryable, so a retry landing after expiry is **not** protected
+and must go through `POST /api/admin/transfers/[id]/reconcile`. The retention
+window is the provider's, is unverified here, and is deliberately not asserted
+as a number.
+
+**Tests run and their results.** Documentation only; no source file changed.
+`readiness.json` parses and the report renders with no `undefined` cells and
+exit 0. The four required checks were green on `7253d96` before these edits and
+re-run on the new head.
+
+**Financial or security behaviour affected.** None in code. In *documentation*,
+two overstatements of financial-safety guarantees were removed — the unbounded
+abuse multiplier and the unconditional single-debit claim. Neither changed
+behaviour, and both would have misled someone deciding whether a rail was safe
+to enable, which is the only reason these documents exist.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Unchanged and now better-founded: the owner
+decision in 0007, with the note that establishing the Vercel concurrency
+ceiling is a prerequisite for ever calling the fail-open risk *bounded*.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`.
+
+---
+
+## 2026-10-26 — the fix for an overstatement contained the same overstatement
+
+Two findings on the correction commit `0f307b2`, both valid, and the first is
+embarrassing in a useful way.
+
+**I contradicted myself inside one commit.** `GO_LIVE_RUNBOOK.md` §4.1 was
+corrected to say the idempotency key prevents a duplicate submission *only
+while the provider retains the record*. In the same commit,
+`docs/decisions/0007` said the worst case is "not 'money moves twice', which
+the per-intent idempotency key **does prevent**" — flatly, no qualifier. So
+the commit whose entire purpose was withdrawing an unsupportable guarantee
+restated a different unsupportable guarantee one file over. Qualified now in
+both, and in `CLAUDE.md`, which carried the unconditional form too.
+
+**And the correction was wrong about where a retry can happen.** The runbook
+said "`submitting` is deliberately retryable **here**", inside the §4.1 box
+about the execute endpoint. Verified against the code rather than taken on the
+reviewer's word: `app/api/transfers/[id]/execute/route.ts:101` is
+`if (row.status !== 'ready')` → 409 `wrong_status`, so a row already in
+`submitting` can never be re-submitted through that endpoint. The `submitting`
+writes in that route are its *own* claim inside one invocation, not a retry of
+a pre-existing row. `PlaidTransferProvider.executeTransfer()` does accept
+`submitting` to resume (line 279), but the route is its only caller, so **that
+branch is unreachable over HTTP**. Recovery is
+`POST /api/admin/transfers/[id]/reconcile`, and `reconcileTransfer()` requires
+`submitting`.
+
+> **That last claim is WRONG — see the next entry.** The route sets
+> `submitting` *before* calling `executeTransfer()`, so that branch is on the
+> happy path of every live execute, not unreachable. The pointer is inline
+> because a reader of this entry would otherwise act on the false version, and
+> "unreachable" is the kind of claim that gets working code deleted.
+
+That distinction is worth more than the wording. "A stranded intent is
+retryable" and "a stranded intent is recoverable by an admin through
+reconciliation" describe different security postures, and the first would tell
+an operator that a client can drive recovery. It cannot.
+
+**The pattern across both review rounds.** Three claims in this PR overstated a
+guarantee: the instance-count bound, the unconditional single-debit key, and
+client-reachable retry. Each was a true statement with its conditions stripped
+off, and each read as *more* reassuring than the code supports — which is the
+direction that matters in a go/no-go document. Writing the qualifier down is
+cheap; discovering its absence while deciding whether to enable a rail is not.
+`CLAUDE.md` now carries the bounded form, so the next reader of the
+authoritative reference does not re-derive the unqualified one.
+
+**Financial or security behaviour affected.** None in code. Three
+documentation overstatements of financial-safety properties removed.
+
+**Tests run and their results.** Documentation only; no source file changed.
+All four required checks were green on `0f307b2` before these edits and re-run
+on the new head. `readiness.json` parses and the report renders, exit 0.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Unchanged: the owner decision in 0007.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`.
+
+---
+
+## 2026-10-26 — the over-correction that would have deleted working code
+
+A third review round on `cc97572`, one finding, and it is the most useful of
+the eight this PR produced.
+
+**What I wrote, and why it was wrong.** Correcting the `submitting` retry claim,
+I wrote that `PlaidTransferProvider.executeTransfer()`'s tolerance of
+`status === 'submitting'` is "unreachable over HTTP, because the route is its
+only caller and the route gates on `ready`". The gate is real; the conclusion
+is not. Verified by reading the ordering:
+
+1. `app/api/transfers/[id]/execute/route.ts` claims a `ready` intent and
+   `UPDATE … SET status = 'submitting'` inside a transaction (gated
+   `AND status = 'ready'`).
+2. The transaction commits.
+3. Line 166 then calls `provider.executeTransfer(...)`.
+4. `PlaidTransferProvider` line 279 re-reads the row, sees `submitting`, and
+   passes **because of** the `intent.status !== 'submitting'` clause.
+
+So that clause is on the **happy path of every live execute**. Calling it
+unreachable is not a harmless imprecision: it is the kind of note that gets a
+branch deleted as dead code during a cleanup, and deleting it would make every
+live execute throw `Cannot execute intent in status: submitting`. The
+documentation would have caused the outage, not the code.
+
+**The real distinction.** The route refuses a **pre-existing** `submitting`
+intent — a row that was already in that state when the request arrived — which
+is a different thing from the `submitting` state the route itself just wrote.
+Both facts are true at once, and collapsing them in either direction produces a
+false statement: "retryable here" (round two) overstated what a client can do,
+"unreachable" (round three) understated what the code relies on.
+
+**The pattern, now four for four.** Every claim this PR got wrong was a
+*boundary* claim — the instance-count bound, the idempotency retention bound,
+who can trigger a retry, and which code paths reach a branch. None was a wrong
+fact; each was a correct fact with its scope mis-drawn. Worth knowing about
+this class of document: the risk is not inventing things, it is asserting the
+edges of true things without tracing them.
+
+**Financial or security behaviour affected.** None in code. One documentation
+claim corrected that could have motivated a behaviour-breaking change.
+
+**Tests run and their results.** Documentation only; no source file changed.
+All four required checks were green on `cc97572` before this edit. `lib/` and
+`app/` remain byte-identical to `master` — re-verified, and the four
+`PLAID_TRANSFER_LIVE`/`CA_EFT_LIVE` matches in the branch diff are all prose,
+including the sentences asserting no flag changed.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Unchanged: the owner decision in 0007.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`.

@@ -248,11 +248,13 @@ reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
 **Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **61 files /
-901 tests** as of this writing — measured on the merged tree after PR #68
-landed, not carried over from either side of the merge. Both branches had
-written a different number here (844 and 836) and the merge conflicted on
-exactly this sentence; resolving it by measuring is the only way the number
-means anything. The suite is expected to stay fully green.
+907 tests** — measured on `master` at `e0f3f0d`, the tip after Sprint 1's five
+PRs, on a database created fresh for the run with the CI fixture applied; all
+907 pass. Not carried over from either side of a merge: the branches had
+written 844 and 836 here and the merge conflicted on exactly this sentence,
+and resolving it by measuring is the only way the number means anything. It
+then read 901 for one more change, which was itself six tests stale — the same
+drift, one revision later. The suite is expected to stay fully green.
 That count was stale at "51 files / 735 tests" for several changes; it is a
 number worth keeping current precisely because it is the thing a reader checks
 a run against.
@@ -312,18 +314,28 @@ the route is still yours to catch by hand.
 
 ## Documentation Governance
 
-Four files carry different kinds of truth, and conflating them is how a session
-ends up acting on a stale claim:
+Five files and three directories carry different kinds of truth, and conflating
+them is how a session ends up acting on a stale claim:
 
-| File | Holds | Rule |
+| Path | Holds | Rule |
 |---|---|---|
-| `CLAUDE.md` | Engineering instruction | Must match the tree. Correct it in place when the code moves |
-| `CURRENT_STATUS.md` | Verified current state | Carries the commit it was verified against |
-| `PROJECT_MEMORY.md` | Chronological record | Append-only. Correct an old entry by appending, never by editing history |
-| `PRODUCTION_READINESS_BACKLOG.md` | Prioritized backlog | Re-mark an item only when a change verifies it, naming the evidence |
+| `CLAUDE.md` | Engineering instruction, safety rules, architecture, current priorities | Must match the tree. Correct it in place when the code moves |
+| `CURRENT_STATUS.md` | Verified state of the application and remaining blockers | Carries the commit it was verified against |
+| `PROJECT_MEMORY.md` | Chronological progress, decisions, merges, lessons learned | Append-only. Correct an old entry by appending, never by editing history |
+| `PRODUCTION_READINESS_BACKLOG.md` | Prioritized tasks, each with an **owner** and **acceptance criteria** | Re-mark an item only when a change verifies it, naming the evidence |
+| `GO_LIVE_RUNBOOK.md` | The current operational go/no-go procedure | Carries the commit and date it was verified against. **Every unchecked box must be genuinely unchecked**, and a checked box names its evidence. Re-anchor on every revision |
+| `docs/decisions/NNNN-<slug>.md` | Architectural decision records | One decision per file, numbered. Supersede by adding a new record, not by rewriting one |
+| `docs/audits/<date>-<topic>.md` | Dated, command-level audit evidence with commit SHAs and test results | **Immutable.** A later finding goes in a new audit or an explicitly marked addendum, never over the original |
+| `docs/runbooks/<topic>.md` | Executable operational procedures (backup/restore rehearsal, migration baseline adoption, Vercel access) | A procedure is only as good as its last execution: say whether it has been run, against what, and with which negative cases |
 
-Plus `docs/audits/<date>-<topic>.md` for dated, command-level audit evidence and
-`docs/decisions/NNNN-<slug>.md` for architectural decisions.
+**Why `GO_LIVE_RUNBOOK.md` is in this contract and not merely in the tree.** It
+drifted: §4.1 read "Execute endpoint (NOT YET BUILT)" while
+`app/api/transfers/[id]/execute/route.ts` was built, merged and gated, and §6
+listed `POST /api/migrate` as outstanding after it had been run against
+production. The cost is specific — an operator who finds one stale blocker in a
+go/no-go list cannot tell which of the remaining ones are stale, so the whole
+document stops being a gate and becomes a suggestion. Corrected 2026-10-26
+against `1bc81df`.
 
 A material change appends a `PROJECT_MEMORY.md` entry naming: purpose and scope;
 financial or security behaviour affected; tests run and their results; commit
@@ -393,10 +405,30 @@ routes do not change.
 **Live execution safety.** Both live providers persist a stable idempotency
 key derived from the intent id *before* calling the provider, and claim the
 intent inside a transaction with `SELECT ... FOR UPDATE`. The lock serialises
-the claim; it is the idempotency key, not the lock, that guarantees a single
-debit — a caller that finds `status='submitting'` with no reference recorded
-deliberately retries, because that state is indistinguishable from a crash
-between the provider call and the local write.
+the claim; it is the idempotency key, not the lock, that prevents a duplicate
+debit — **for as long as the provider retains that key.** Retention is bounded
+and provider-defined, so a retry arriving after expiry is not covered by the
+key and needs reconciliation. This paragraph said "guarantees a single debit"
+unconditionally until 2026-10-26; the guarantee is real and it is
+time-bounded, and the unqualified form was being quoted elsewhere to justify
+unrelated decisions. The window is deliberately not stated here as a number —
+confirm it against Plaid's and Stripe's current documentation.
+
+`PlaidTransferProvider.executeTransfer()` tolerates `status='submitting'`, and
+**that clause is load-bearing on the normal path — do not remove it as dead
+code.** The sequence: `app/api/transfers/[id]/execute/route.ts` claims a
+`ready` intent and sets it to `submitting` inside a transaction, commits, and
+*then* calls `executeTransfer()`, which re-reads the row and sees `submitting`.
+Every live execute therefore passes through that clause. An earlier version of
+this note called the branch "not reachable over HTTP", which was wrong in the
+direction that gets working code deleted.
+
+What the route *does* refuse is a **pre-existing** `submitting` intent — it
+gates on `status !== 'ready'` with a 409 `wrong_status` — which is a different
+thing from the `submitting` state it just wrote itself. So no client can
+re-submit a stranded intent; recovery is admin-only, below. The provider's
+tolerance exists because a `submitting` row with no reference recorded is
+indistinguishable from a crash between the provider call and the local write.
 
 Two things make `submitting` recoverable rather than terminal. The transition
 rules in `lib/settlement/settlement-rules.ts` allow `submitting → settled |

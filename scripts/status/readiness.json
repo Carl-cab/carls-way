@@ -16,8 +16,8 @@
     "NOT APPLICABLE. No percentages — there is no defined denominator, so a",
     "percentage would be invented."
   ],
-  "updated": "2026-10-20",
-  "verifiedAgainstCommit": "PR #65 on ops/redis-configuration-confirmed, which descends from 7a149d9 (the Phase 2 branch tip). NOTE: master's Phase 2 merge commit 1d4d783 is NOT an ancestor of this branch — the branch was cut from the pre-merge tip. The 7a149d9 and 1d4d783 trees are identical (cf87279) but the lineage differs; the reviewed head af1bc9d adds documentation commits and so has its own tree (bc95228). An earlier value here cited 1d4d783, which this branch does not contain.",
+  "updated": "2026-10-26",
+  "verifiedAgainstCommit": "master at e0f3f0d, the tip after Sprint 1's five pull requests were merged on 2026-10-26: #69 -> 1bc81df, #68 -> ce7255a, #67 -> a08c82f, #71 -> 0b609f4, #70 -> e0f3f0d. Suite measured on that tree: 61 files / 907 tests passing, typecheck 0 errors, lint 0 errors / 28 warnings. All four required checks are green on e0f3f0d and are now ENFORCED by ruleset 25851827. Rows describe master unless a row names a PR. The previous version of this line read '6927ebd' and 'five unmerged branches', which the merges made false.",
   "gates": {
     "A": {
       "title": "Bank linking",
@@ -173,8 +173,8 @@
   "operational": [
     {
       "name": "Database backup and restore verification",
-      "status": "NOT RUN",
-      "evidence": "Decision 0005 Phase 0. A backup that has never been restored is not a backup. Procedure drafted at docs/runbooks/backup-restore-rehearsal.md; requires owner action"
+      "status": "PARTIAL",
+      "evidence": "PROCEDURE VERIFIED SYNTHETICALLY, PRODUCTION REHEARSAL NOT RUN (PR #70). The Phase 0 runbook was executed end to end against a synthetic production-shaped database on 2026-10-25: pg_dump/pg_restore exit 0 with zero stderr in 0.20s; verify-migrate.sql zero non-OK rows; source and target row counts identical; reconciliation-check.sql 7/7 PASS non-vacuously; the application suite passed against the restored database; teardown left nothing behind. Negative cases confirm the checks can fail: a dropped column is caught by step 2, unequal payment legs fail 3 of 7 reconciliation checks, and the privilege probe reports 114 unreachable objects with no grants and 0 with the full set. Evidence: docs/audits/2026-10-25-restore-rehearsal-synthetic.md. What remains NOT RUN is everything production-only: backup availability, recovery point, real restore duration (0.20s on a trivial dataset is not transferable), and production ownership and privileges. Phase 0 is NOT complete."
     },
     {
       "name": "Redis-backed rate limiting in production",
@@ -208,45 +208,72 @@
     },
     {
       "name": "Secret scanning in CI",
-      "status": "PARTIAL",
-      "evidence": "Gitleaks merged and running, but advisory: no branch protection makes it blocking, and the branch filter excludes PRs not targeting master or integration/**"
+      "status": "VERIFIED",
+      "evidence": "VERIFIED 2026-10-26. Gitleaks 8.21.2 runs on every PR into master over full history, pinned by version and verified against a published SHA256, with --redact and SARIF commitMessage stripping; it succeeded on master at e0f3f0d. The single reason this row was PARTIAL — \"the check is not enforced by branch protection, so a detection would not block a merge\" — no longer holds: secret scan is one of the four contexts required by ruleset 25851827. Scope note kept: the .gitleaks.toml allowlist is keyed on exact synthetic literals rather than on paths, so a real credential later pasted into an allowlisted file is still caught."
     },
     {
       "name": "Static analysis (CodeQL) in CI",
-      "status": "PARTIAL",
-      "evidence": "Merged and running, same two caveats as secret scanning"
+      "status": "VERIFIED",
+      "evidence": "VERIFIED 2026-10-26. CodeQL security-extended runs on every PR into master and weekly, with least-privilege permissions and security-events: write isolated from the job running the test suite; analyze javascript-typescript succeeded on master at e0f3f0d. The single reason this row was PARTIAL — not enforced by branch protection — no longer holds: it is one of the four contexts required by ruleset 25851827. VERIFIED here means the control runs and gates, not that the codebase is free of defects CodeQL cannot see."
     },
     {
       "name": "Branch protection enforcing required checks",
-      "status": "BLOCKED",
-      "evidence": "Re-verified 2026-10-19 after merging #63: GitHub reports master as protected:false, so NONE of the six passing checks is required. The protection-detail endpoint 403s for scope, but the branch record is authoritative on whether any protection exists. Passing != enforced."
+      "status": "VERIFIED",
+      "evidence": "VERIFIED 2026-10-26 by reading the rulesets API. The owner acted on the instructions recorded in the previous version of this row (which read BLOCKED). Ruleset 25851827, \"master CI and security checks\": enforcement active, target branch, conditions include refs/heads/master with no excludes, bypass_actors EMPTY, and one required_status_checks rule with strict_required_status_checks_policy true requiring exactly the four intended contexts — install · typecheck · lint · test · build; dependency audit; secret scan; analyze javascript-typescript. So the checks are enforced AND a PR must be up to date with master before merging. Two deliberate limits on the claim: the ruleset contains ONLY required_status_checks, so there is no required-review rule and no force-push restriction, and a direct push to master that passes CI is not blocked by it; and the CLASSIC protection API still answers 403 to this environment, so a protected:false reading taken from that endpoint reflects this session's token rather than the absence of protection — the ruleset is the authority. All five Sprint 1 PRs were merged through these required checks."
     },
     {
       "name": "Schema migration versioning (decision 0005 Phase 2)",
       "status": "PARTIAL",
       "evidence": "schema_migrations plus registry, detection, drift and advisory-lock concurrency implemented and covered by 33 cases in lib/__tests__/migration-versioning.test.ts against fresh and populated PostgreSQL 16 databases. PARTIAL because baseline adoption has NOT been run against production and has no first-class entry point (measured: pnpm tsx and plain node both fail); and because whether the three migrations/ files were ever executed against production remains unknown by design."
+    },
+    {
+      "name": "GitHub Actions supply-chain pinning",
+      "status": "VERIFIED",
+      "evidence": "VERIFIED — PR #68 merged 2026-10-26 as ce7255a (this row previously read ENGINEERING COMPLETE, UNMERGED). Every uses: reference in .github/workflows now names a 40-hex commit SHA with the human-readable tag in a trailing comment. Measured on the merged tree by listing every uses: that does NOT match @[0-9a-f]{40}: the list is empty. lib/__tests__/workflow-action-pinning.test.ts enforces it on every run and its matchers tolerate YAML-quoted keys — an earlier version of those regexes did not, and would have read straight past a quoted unpinned entry. Mutation-checked: reintroducing a mutable tag fails the test. What pinning does NOT do is verify what is inside a pinned SHA; it removes tag mutability, not trust in the action."
+    },
+    {
+      "name": "Production dependency advisories",
+      "status": "PARTIAL",
+      "evidence": "MASTER FIXED AND ENFORCED, DEPLOYMENT STILL UNVERIFIED, DEV CHAIN OPEN. master carried next@16.3.8 with three open advisories — two unauthenticated RCE (Image Optimization; `use cache` typed arrays, GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r) — all patched in >=16.4.1. PR #69 merged 2026-10-26 as 1bc81df; measured on the merged tree at e0f3f0d, package.json declares next 16.4.3 and pnpm-lock.yaml resolves next@16.4.3, so master is fixed. Audit measured on that tree: production dependencies report NO known vulnerabilities (pnpm audit --prod), while the full tree including dev reports 24 advisories — 2 critical, 13 high, 8 moderate, 1 low — all in the dev chain (e.g. vitest > @vitest/mocker, GHSA-qxg6-89mg-rqv8). ci.yml fails the build only on production-dependency criticals and highs and reports the dev chain advisory-only; that is a documented tier split, NOT a suppression, and the 24 are recorded here as open rather than clean. PARTIAL for two independent reasons: the RUNNING DEPLOYMENT is not confirmed to have rebuilt from 1bc81df or later (403 CONNECT to both api.vercel.com and the deployment host from this environment, re-confirmed 2026-10-26), and the dev-chain advisories are unresolved. The structural gap also persists: nothing watches an unchanged tree — see the Dependabot row."
+    },
+    {
+      "name": "Dependabot alerts enabled",
+      "status": "BLOCKED",
+      "evidence": "BLOCKED ON OWNER ACTION, proven by attempt rather than inferred. GET /repos/Carl-cab/carls-way/dependabot/alerts and GET /repos/Carl-cab/carls-way/vulnerability-alerts BOTH answer HTTP 403 to this session, re-confirmed 2026-10-26. A 403 means this token may not read the setting — it is NOT evidence that alerts are disabled, and it is not a clean scan; the state is genuinely UNKNOWN from here and is recorded as blocked rather than guessed. This matters because it is the only durable backstop for the failure that has now happened twice: both the next advisory set and the follow-redirects one five days earlier reached master AFTER its last green CI run, and each was found only because an unrelated PR happened to re-run the audit. CI cannot detect an advisory disclosed against an unchanged tree. Owner action, two minutes, no secret involved: GitHub → repository Settings → Advanced Security (or Code security and analysis) → enable Dependency graph, then Dependabot alerts, and optionally Dependabot security updates; then report whether the alert list is non-empty. A scheduled dependency scan has been prepared on branch ci/scheduled-dependency-scan (daily, workflow_dispatch, contents: read + issues: write, opens one deduplicated issue on failure, and treats an unreachable advisory service as a FAILURE rather than a pass). It is NOT part of Sprint 1's authorized five PRs and awaits separate authorization; it is a complement to Dependabot, not a substitute, because it reads the same advisory source CI already reads."
     }
   ],
   "ownerActions": [
     {
-      "action": "Mark four checks required under branch protection",
-      "why": "Until then secret scanning and CodeQL fail the check but do not block a merge"
+      "action": "Confirm the production deployment rebuilt from 1bc81df or later",
+      "why": "PR #69 is merged (1bc81df) and master now pins next@16.4.3, so the advisory is cleared on master. The running deployment is a separate fact: it serves whatever its last build produced, and this environment cannot read the deployed version (403 CONNECT). Until the rebuild is confirmed, treat the two unauthenticated RCEs as potentially still live on the public deployment."
     },
     {
-      "action": "Decide on SHA-pinning third-party GitHub Actions",
-      "why": "Proposal in docs/decisions/0006-pin-third-party-actions.md; cannot be verified from this environment"
+      "action": "Enable Dependabot alerts, then report whether the alert list is non-empty",
+      "why": "Both /dependabot/alerts and /vulnerability-alerts answer HTTP 403 to this session (re-confirmed 2026-10-26), so the state is UNKNOWN from here, not disabled and not clean. This is the only durable backstop for a failure that has now happened twice: both the next advisory set and the follow-redirects one five days earlier reached master AFTER its last green CI run, because CI cannot detect an advisory disclosed against an unchanged tree. Settings -> Advanced Security (or Code security and analysis) -> enable Dependency graph, then Dependabot alerts, optionally Dependabot security updates. No secret involved. Then say only whether the list is empty or not."
     },
     {
-      "action": "Authorize a backup-restore rehearsal",
-      "why": "Decision 0005 Phase 0 blocks the credential split and therefore audit immutability"
+      "action": "Compare two production requests to settle header trust",
+      "why": "Send TWO production requests and report, for each, clientIdentity().source AND whether the resolved id EQUALS the forged value that request supplied — a boolean, never the id and never the IP. Request A sends no IP headers. Request B supplies a distinctive forged value in x-real-ip, x-forwarded-for and x-vercel-forwarded-for. The source name alone does NOT answer this: if both requests select x-vercel-forwarded-for the name is identical whether the platform overwrote the forged value or passed it through, so only the equality tells you which happened. If B's id equals what B sent, the header is attacker-controlled and every limit keyed on it is per-attempt, not per-client. PR #71 documents the question; this environment cannot answer it (403 CONNECT to both api.vercel.com and the deployment host)."
     },
     {
-      "action": "Decide whether CI should run on all base branches",
-      "why": "A PR targeting a feature branch currently runs no CI at all"
+      "action": "Decide the money-bucket policy on Redis loss (recommendation ready)",
+      "why": "A recommendation is written up in docs/decisions/0007-money-bucket-policy-on-redis-loss.md, reviewed against master at 0b609f4 (lib/rate-limit.ts is byte-identical at e0f3f0d): KEEP ALL THREE FAIL-OPEN — money:send 20/h, money:split-pay 30/h, money:transfer-execute 10/h, all keyed on the authenticated user id, so header loss cannot collapse them. Reasoning, corrected: fail-closed turns a Redis outage into a TOTAL customer-visible payments outage while the database, providers and application are all healthy; fail-open keeps the per-user limit in force on every instance and loosens the aggregate ceiling for the subset of users actively abusing the system during the window. TWO CLAIMS WERE WITHDRAWN from an earlier version of this row and of the decision record, because review was right that neither was supportable. (1) It said fail-open costs 'a single-digit multiplier'. The fallback is limit × instances and NOTHING IN THIS REPOSITORY ESTABLISHES THE INSTANCE COUNT — no deployment limit, no observed count — and this environment cannot obtain one (403 CONNECT to api.vercel.com and the deployment host). Treat the multiplier as UNBOUNDED until someone with deployment access establishes a concurrency ceiling. (2) It cited the per-intent idempotency key as a constraint on abuse. It is not: it prevents one intent being debited twice and says nothing about a caller creating many separate intents. The only control that survives a Redis outage and actually caps volume is velocity_checks. The recommendation still stands because it rests on the asymmetry of the two failure modes — a certain outage for everyone versus a loosened limit for attackers — which does not depend on the multiplier's size. What the unknown size does change is the urgency of ask 3. The asks: (1) scrape rateLimitBackendHealth(), which nothing does, so a silent demotion to per-instance counting is today indistinguishable from normal operation; (2) alert on sustained degradation with a named owner; (3) move these three counters to PostgreSQL, which the application cannot run without anyway, removing the dilemma instead of choosing a side. Nothing is implemented either way; this needs your decision."
     },
     {
-      "action": "Grant Vercel read access or run the CLI steps",
-      "why": "Deployment facts cannot be verified from this environment; see docs/runbooks/vercel-access.md"
+      "action": "Authorize the Phase 0 production backup/restore rehearsal",
+      "why": "Authorize the Phase 0 production backup/restore rehearsal with a designated operator and an isolated secured target. The procedure is now validated synthetically (PR #70); the production rehearsal itself is NOT RUN."
+    },
+    {
+      "action": "Run POST /api/admin/operations/redis-rate-limit as SuperAdmin or OperationsAdmin",
+      "why": "Run POST /api/admin/operations/redis-rate-limit with a SuperAdmin or OperationsAdmin session and report pass/fail only. It samples one serverless instance and does not move the row to VERIFIED."
+    },
+    {
+      "action": "Nothing outstanding on the Sprint 1 PRs — all five are merged",
+      "why": "Kept as a closed item rather than deleted, so the list does not silently lose a step. Merged in the authorized order with expectedHeadSha on every merge and the required checks verified BY NAME beforehand: #69 -> 1bc81df, #68 -> ce7255a, #67 -> a08c82f, #71 -> 0b609f4, #70 -> e0f3f0d. #72 is the documentation reconciliation and is the last of the five. No further owner action is needed here."
+    },
+    {
+      "action": "Decide whether to authorize the scheduled dependency scan (prepared, unmerged)",
+      "why": "Branch ci/scheduled-dependency-scan adds a daily workflow plus workflow_dispatch with contents: read and issues: write, reusing ci.yml's two-tier audit and opening one deduplicated issue on failure. It deliberately treats an unreachable advisory service as a FAILURE, where ci.yml warns and passes, because an availability failure is not a clean bill of health. It is NOT one of Sprint 1's authorized five PRs, so no PR has been opened and nothing is merged. It complements Dependabot rather than replacing it — it reads the same advisory source CI already reads, so it closes the unchanged-tree gap only on a schedule."
     }
   ]
 }

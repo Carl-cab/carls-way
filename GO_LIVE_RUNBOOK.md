@@ -4,6 +4,24 @@
 **Audience:** The account owner + engineering. Many steps are owner-only and external.
 **Golden rule:** Do not enable a live flag until every prerequisite above it in this document is complete. Live flags default OFF and must be set deliberately.
 
+**Verified against:** `master` at `e0f3f0d`, on 2026-10-26, by reading the tree
+— not by exercising any rail. `e0f3f0d` is the tip after Sprint 1's five
+merges (#69 `1bc81df`, #68 `ce7255a`, #67 `a08c82f`, #71 `0b609f4`, #70
+`e0f3f0d`); the previous anchor read `1bc81df`, the first of those five. None
+of the five touched a live flag or any rail, so **no box in this document
+changed state as a result** — re-anchored to keep the line honest about what
+tree it was read against, which is the whole point of having it.
+
+This line exists because the value of a go/no-go procedure is entirely in its
+currency: §4.1 read "NOT YET BUILT" for an endpoint that had been built and
+merged, and an operator who finds one stale blocker has no way to tell which of
+the others are stale too. **Re-anchor this line whenever the document is
+revised, and treat an unanchored copy as unverified.**
+
+A box checked here means *verified in the tree or by a recorded run*, named in
+the item. It never means "exercised against a live rail" — nothing in this
+repository has been.
+
 ---
 
 ## 0. Reality Check — Read First
@@ -77,27 +95,92 @@ real funds must back every balance.
 
 ## 4. Remaining Code Work (🟡 ENGINEERING) — BLOCKING for live transfers
 
-### 4.1 Execute endpoint (NOT YET BUILT)
+### 4.1 Execute endpoint (🟢 BUILT — verified in code, never run against a live rail)
 
 The live provider lifecycle is: `createIntent → review → confirm (ready) → **executeTransfer** (processing) → webhook → settled`.
 
-Today there is **no** `POST /api/transfers/[id]/execute` route. Without it a live
-transfer stops at `ready` and never submits to Plaid/Stripe.
+**This section said "NOT YET BUILT" until 2026-10-26, which was wrong.**
+`app/api/transfers/[id]/execute/route.ts` exists on `master` at `e0f3f0d`.
+Corrected because a go/no-go document is only usable if every unchecked box is
+genuinely unchecked — one stale blocker teaches an operator to discount the
+rest. (This line cited `1bc81df` after the header anchor had moved to
+`e0f3f0d`, which is the same staleness one level down. The execute, webhook,
+provider and settlement paths are **unchanged** between those two commits —
+`git diff --name-status 1bc81df e0f3f0d` over them returns nothing — so the
+evidence carries to the current anchor rather than needing to be re-read.)
 
-- [ ] Build `POST /api/transfers/[id]/execute` that:
-  - loads the intent, verifies ownership and `status = 'ready'`,
-  - reselects the provider via `getTransferProvider(region, toExecutionMode(execution_mode))`,
-  - calls `provider.executeTransfer(intentId, userId)` (sandbox providers throw by design — good),
-  - returns the resulting `processing` status.
-- [ ] Gate it so it is only reachable for `execution_mode = 'live'` intents.
-- [ ] Add an idempotency guard so a double-submit cannot create two ACH/ACSS transfers.
+- [x] `POST /api/transfers/[id]/execute` exists and loads the intent, verifies
+      ownership and `status = 'ready'`, reselects the provider through the
+      factory, calls `provider.executeTransfer()` (sandbox providers throw by
+      design) and records `processing`.
+- [x] Gated to `execution_mode = 'live'`. It also refuses when the factory
+      returns a *sandbox* provider, **before** claiming the intent, so a
+      disabled rail cannot strand an intent in `submitting`.
+- [x] Idempotency guard present: a stable key derived from the intent id is
+      persisted *before* the provider call, and the claim runs inside a
+      transaction with `SELECT ... FOR UPDATE`. It is the key, not the lock,
+      that prevents a duplicate submission — **but only while the provider
+      still holds that idempotency record.** This box previously said the key
+      "guarantees a single debit" without qualification, which overstates it:
+      provider idempotency records are retained for a bounded period, not
+      forever, so a retry arriving after expiry is not protected by the key.
+      The retention window is the provider's, is **not verified here**, and is
+      deliberately not asserted as a number — confirm it against Plaid's and
+      Stripe's current documentation before relying on any duration.
+- [x] **Recovery for a stranded `submitting` intent is admin-only, and does
+      NOT go through this endpoint.** A correction: this box briefly said
+      "`submitting` is deliberately retryable here", which is wrong about
+      *here*. `app/api/transfers/[id]/execute/route.ts` refuses any status
+      other than `ready` (`if (row.status !== 'ready')` → 409 `wrong_status`),
+      so a row already sitting in `submitting` can never be re-submitted
+      through it. The `submitting` writes inside that route are its own claim
+      within a single invocation, not a retry of a pre-existing row.
+      `PlaidTransferProvider.executeTransfer()` tolerates
+      `status === 'submitting'`, and **that clause is load-bearing on the
+      normal path** — a correction: this box briefly called it "unreachable
+      over HTTP", which is wrong and would invite deleting it as dead code,
+      breaking every live execute. The sequence is: the route claims a `ready`
+      intent and sets it to `submitting` inside a transaction, commits, and
+      *then* calls `executeTransfer()`, which re-reads the row and sees
+      `submitting`. So every live execute passes through that clause. What the
+      route refuses is a **pre-existing** `submitting` intent, which is a
+      different thing from the state it just wrote itself. Recovery of a
+      stranded intent is
+      `POST /api/admin/transfers/[id]/reconcile`, whose `reconcileTransfer()`
+      requires `submitting` and replays the provider authorization — returning
+      the intent to `ready` where no authorization was ever persisted, which is
+      what makes the `ready`-only rule a safety property rather than a trap.
+- [x] Rate limited per user id (`money:transfer-execute`) — the claim stops one
+      intent being submitted twice but not how many intents one account pushes
+      at a rail.
+- [ ] **Still required before live:** exercise this endpoint end to end in the
+      Plaid/Stripe **sandbox** with a live-shaped intent. Code review is not
+      execution, and no transfer has ever been submitted to a rail.
 
-### 4.2 Webhook settlement path (VERIFY)
+### 4.2 Webhook settlement path (🟡 PARTIAL — handlers verified present, settlement never exercised on a rail)
 
-- [ ] Confirm `app/api/webhooks/plaid` handles `TRANSFER.STATUS_UPDATE` and drives the
-      SettlementOrchestrator/Executor to move `processing → settled/failed/returned`.
-- [ ] Confirm `app/api/webhooks/stripe` handles ACSS PaymentIntent/Payout events similarly.
-- [ ] Confirm the SettlementExecutor updates balances **only** on settlement (never in the provider).
+Verified by reading `master` at `e0f3f0d`, not by running a rail. (Cited
+`1bc81df` until 2026-10-26; the webhook and settlement paths are unchanged
+between the two, so the reading stands at the current anchor.)
+
+- [x] `app/api/webhooks/plaid/route.ts` exists and handles
+      `TRANSFER_EVENTS_UPDATE` (the event Plaid actually sends; this section
+      previously named `TRANSFER.STATUS_UPDATE`), with
+      `lib/settlement/plaid-event-adapter.ts` mapping Plaid transfer statuses
+      onto settlement events and `plaid_transfer_event_cursors` persisting the
+      sync position.
+- [x] `app/api/webhooks/stripe/route.ts` exists and handles
+      `payment_intent.succeeded`, `charge.succeeded|failed|updated` and
+      `payout.created|paid|failed|canceled`.
+- [x] **Balance mutation boundary holds.** `PlaidTransferProvider.ts` and
+      `CanadianEFTProvider.ts` contain **zero** references to `balance_cad` or
+      `balance_usd` — measured, not assumed. Balances are written only by
+      `lib/settlement/SettlementExecutor.ts` and
+      `lib/settlement/apply-settlement.ts`.
+- [ ] **Still required before live:** a webhook-driven
+      `processing → settled/failed/returned` transition observed in a provider
+      sandbox, and a dead-letter replay drill. Both are listed under
+      operational proof and neither has been run.
 
 ### 4.3 Stripe SDK version pin (🟢 DONE)
 
@@ -142,10 +225,19 @@ Set these in the Vercel project (Production scope). **Add the two live flags LAS
 
 ---
 
-## 6. Database Migration (🟡 ENGINEERING)
+## 6. Database Migration (🟡 PARTIAL — the convergent reconciler has been run; one gated migration has not)
 
-- [ ] Deploy the code first (Vercel auto-deploys on push to `master`).
-- [ ] Call `POST /api/migrate` once, authenticated, to apply any `ALTER TABLE` changes
+**`POST /api/migrate` has already been run against production** (recorded in
+`CLAUDE.md` → Current Priorities). What remains here is not the reconciler but
+the authorization-gated migration below, plus re-running the reconciler after
+any *future* schema change. The step list is therefore a per-deploy procedure,
+not an outstanding blocker:
+
+- [ ] **Outstanding and separate:** apply the early-webhook correlation index
+      migration through the authorized maintenance procedure in
+      `sql/README.md`. It is deliberately **not** part of `/api/migrate`.
+- [ ] **Per deploy, repeat:** deploy the code first (Vercel auto-deploys on push to `master`).
+- [ ] **Per deploy, repeat:** call `POST /api/migrate` once, authenticated, to apply any `ALTER TABLE` changes
       (`curl -X POST -b <auth-cookie> https://<host>/api/migrate`). It is POST,
       not GET: a state-changing GET was reachable by cross-site request
       forgery. GET now answers 405 with a pointer.
