@@ -2806,10 +2806,20 @@ Phase 0 remains **NOT RUN**.
 
 **Migration impact.** None. No schema source was touched.
 
-**Rollback requirement.** None for #72, which is documentation-only. Note for
-whoever reverts anything in this sprint: reverting the carrier of the `next`
-bump would reintroduce two unauthenticated RCE advisories, so check which
-commit carries `package.json` before reverting anything in this range.
+**Rollback requirement.** None for #72, which is documentation-only.
+
+**And the open question from the 2026-10-26 rollback correction is now
+settled.** That entry could only say "if #72 is the carrier, reverting it
+reintroduces the advisories; if another carrier merged first, #72's dependency
+diff is empty" — because at the time no carrier had merged. The answer is
+**#69, merged as `1bc81df`**, which is what moved `master` to `next@16.4.3`.
+So, concretely: **do not revert `1bc81df`** — it is the only commit in this
+range whose revert reintroduces two unauthenticated RCE advisories. #68, #70,
+#71 and #72 all carry an empty `package.json`/`pnpm-lock.yaml` diff against the
+`master` that followed it, so reverting any of those four is safe on the
+dependency axis. Recorded here rather than left as a conditional, because a
+conditional whose condition has since been decided is just an unanswered
+question with extra steps.
 
 **Unresolved findings.** The header-trust question is still open and cannot be
 answered from here — `clientIdentity().source` names the header a value came
