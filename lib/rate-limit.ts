@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 
 /**
  * Fixed-window rate limiting.
@@ -344,21 +345,26 @@ export interface ClientIdentity {
  * unvalidated client input are a memory and cardinality concern independent of
  * whether the limit can be evaded.
  *
- * Deliberately permissive rather than exhaustive — this is a shape check, not
- * an address parser. IPv4 dotted quad, or anything hex-and-colon that looks
- * IPv6-ish, optionally with a zone or a bracketed port stripped by the caller.
+ * ## Why `net.isIP` rather than a character check
+ *
+ * A hand-written shape check was wrong in both directions, which is the usual
+ * outcome: `/^[0-9a-fA-F:]+$/` accepted a bare `':'` as an address — so a
+ * junk `x-vercel-forwarded-for` was *selected* instead of falling through to a
+ * valid `x-real-ip` — and it rejected the IPv4-mapped form `::ffff:192.0.2.1`,
+ * which contains dots, sending a real client to the shared `unknown-client`
+ * bucket. `isIP` decides both correctly and is not ours to get wrong.
+ *
+ * It does not accept a zone suffix, so the zone is split off and validated
+ * separately; `fe80::1%eth0` is a value a platform header can legitimately
+ * carry.
  */
 function looksLikeIp(value: string): boolean {
   if (value.length === 0 || value.length > 45) return false;
-  // IPv4 dotted quad, each octet 0-255.
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
-    return value.split('.').every((o) => Number(o) <= 255);
-  }
-  // IPv6: hex groups and colons, at least one colon, optional %zone.
-  if (/^[0-9a-fA-F:]+(%[0-9a-zA-Z._-]+)?$/.test(value) && value.includes(':')) {
-    return true;
-  }
-  return false;
+  const pct = value.indexOf('%');
+  if (pct === -1) return isIP(value) !== 0;
+  const zone = value.slice(pct + 1);
+  if (!/^[0-9a-zA-Z._-]+$/.test(zone)) return false;
+  return isIP(value.slice(0, pct)) !== 0;
 }
 
 /**

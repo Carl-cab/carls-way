@@ -89,6 +89,13 @@ describe('validation: arbitrary header content cannot become a rate-limit key', 
     ['an unsplit list', '1.2.3.4,5.6.7.8'],
     ['an out-of-range octet', '999.1.1.1'],
     ['padding', 'x'.repeat(200)],
+    // A bare colon is every character an IPv6 address is made of and no
+    // address at all. The character-class check this validator replaced
+    // accepted it, so a junk preferred header was *selected* rather than
+    // skipped — see the fall-through case below, which is the consequence.
+    ['a bare colon', ':'],
+    ['colons only', ':::'],
+    ['too many groups', '1:2:3:4:5:6:7:8:9'],
   ])('rejects %s in x-real-ip and does not key on it', (_label, value) => {
     const id = clientIdentity(req({ 'x-real-ip': value }));
     expect(id.id).not.toBe(value);
@@ -108,6 +115,20 @@ describe('validation: arbitrary header content cannot become a rate-limit key', 
   it('accepts IPv6, including a zone suffix', () => {
     expect(clientIdentity(req({ 'x-real-ip': '2001:db8::1' })).id).toBe('2001:db8::1');
     expect(clientIdentity(req({ 'x-real-ip': 'fe80::1%eth0' })).id).toBe('fe80::1%eth0');
+  });
+
+  it('accepts the IPv4-mapped IPv6 form', () => {
+    // It contains dots, so a hex-and-colon character check rejected it and sent
+    // a real client to the shared unknown-client bucket.
+    expect(clientIdentity(req({ 'x-real-ip': '::ffff:192.0.2.1' })).id).toBe('::ffff:192.0.2.1');
+  });
+
+  it('does not let a junk preferred header shadow a valid later one', () => {
+    // The specific regression: ':' passed the old shape check, so it won the
+    // precedence order and x-real-ip was never consulted.
+    expect(
+      clientIdentity(req({ 'x-vercel-forwarded-for': ':', 'x-real-ip': '203.0.113.5' })),
+    ).toEqual({ id: '203.0.113.5', source: 'x-real-ip' });
   });
 
   it('accepts the IPv4 boundary values', () => {

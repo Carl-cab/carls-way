@@ -508,7 +508,7 @@ arbitrary end user.
   | `auth:login` | `client:email` | `5 × instances` per email | still per-email | **leave fail-open** — a refusal locks out real users and the per-email key bounds the damage |
   | `auth:register` | client | `3 × instances` | **global 3/hour** | fail-open, but the collapse is an availability cliff worth alerting on |
   | `auth:password-reset` | client | `3 × instances` | **global 3/hour** | as above |
-  | `money:send`, `money:transfer-execute` | user id | `N × instances` | unaffected — keyed on the authenticated user | **owner decision.** Refusing protects velocity limits; it also blocks customer payments during an infrastructure fault |
+  | `money:send`, `money:split-pay`, `money:transfer-execute` | user id | `N × instances` | unaffected — keyed on the authenticated user | **owner decision, one policy for all three.** Refusing protects velocity limits; it also blocks customer payments during an infrastructure fault |
   | `schema:migrate-operator` | admin id | `6 × instances` | unaffected | leave fail-open — see the Release 1.0 lockout note above |
   | `schema:bootstrap` | client | `N × instances` | **global** — any anonymous caller can exhaust the break-glass for everyone | leave fail-open; refusing recreates the lockout this path exists to break |
 
