@@ -221,3 +221,38 @@ exists in production before concluding the restore caused it"*.
 | Recovery point / backup availability | **NOT RUN** — no production backup inspected |
 | Production restore duration | **NOT RUN** — 0.20 s here is not transferable |
 | Table ownership and privileges in production | **NOT RUN** — probe exercised on synthetic target only |
+
+---
+
+## Addendum, 2026-10-26 — the gate's exit status
+
+Review of this audit's own command record found that `awk` printed the non-`OK`
+row count and then exited `0` regardless of it. The `||` guard beside it covers
+only `psql` failing, so a wrapper keyed on exit status would have accepted a
+restore reporting `MISSING`, `ABSENT` or `WRONG TYPE`. An operator reading the
+printed number was unaffected, and nothing automated consumes it today — this
+is hardening, not a failure that occurred.
+
+`exit(n != 0)` added. Re-measured on three databases, count and status both:
+
+| Target | Printed | Exit |
+|---|---|---|
+| Clean synthetic restore | `0` | `0` |
+| `transactions.amount` altered to `REAL` | `1` | `1` |
+| Nonexistent database | `DID NOT RUN` | `1` |
+
+Commands, in run order:
+
+```bash
+createdb rehearse_$$
+psql -q -v ON_ERROR_STOP=1 -d rehearse_$$ -f lib/__tests__/helpers/test-schema.sql
+psql -q -v ON_ERROR_STOP=1 -d rehearse_$$ -f scripts/restore-rehearsal-synthetic.sql
+# gate as printed in the runbook, run against each target in turn
+psql -q -d rehearse_$$ -c "ALTER TABLE transactions ALTER COLUMN amount TYPE REAL;"
+dropdb rehearse_$$
+```
+
+The fault-injection step is the `ALTER` above; it is the negative case for the
+schema check and nothing else. The synthetic source is disposable and was
+dropped. **Phase 0 remains NOT RUN** — this exercises the procedure, not a
+production backup.

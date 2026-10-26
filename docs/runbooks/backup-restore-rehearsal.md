@@ -111,11 +111,12 @@ psql -v ON_ERROR_STOP=1 -t -A -F'|' "$RESTORE_TARGET_URL" \
      -f scripts/verify-migrate.sql > verify.out || {
   echo "SCHEMA CHECK DID NOT RUN — this is not a pass"; exit 1
 }
-awk -F'|' 'NF>=2 && $2 !~ /^OK/ {n++} END {print n+0}' verify.out
-# must be 0
+awk -F'|' 'NF>=2 && $2 !~ /^OK/ {n++} END {print n+0; exit(n != 0)}' verify.out || {
+  echo "SCHEMA CHECK FAILED — non-OK rows above" >&2; exit 1
+}
 ```
 
-Three details, each of which was wrong in a draft of this command:
+Four details, each of which was wrong in a draft of this command:
 
 - **`-t -A`** (tuples only, unaligned) matters. With aligned output the script's
   later sections print their own header rows — two of them begin
@@ -128,10 +129,18 @@ Three details, each of which was wrong in a draft of this command:
   the counter, which prints `0` — a failed schema check reported as clean.
 - The pattern is `!~ /^OK/`, a **whitelist**. Anything else counts, including a
   wording nobody has thought of yet.
+- **`exit(n != 0)`** matters for anything that is not a human reading the
+  number. The `||` guard above it covers only `psql` failing; `awk` printing
+  `3` still exited `0`, so a wrapper keyed on exit status would accept a
+  restore reporting `MISSING`, `ABSENT` or `WRONG TYPE`. The printed count is
+  kept — an operator wants to know *how many* — and the status now agrees with
+  it.
 
-Verified against three databases: a clean restore reports `0`, a restore with a
-money column altered to `REAL` reports `1` (`transactions.amount | WRONG TYPE —
-REAL`), and a nonexistent target reports `DID NOT RUN` rather than `0`.
+Verified against three databases, printed count and exit status both: a clean
+restore reports `0` and exits `0`; a restore with a money column altered to
+`REAL` reports `1` (`transactions.amount | WRONG TYPE — REAL`) and exits `1`;
+a nonexistent target reports `DID NOT RUN` and exits `1` rather than printing
+`0`. Re-measured 2026-10-26 after the `exit(n != 0)` change.
 
 Any non-`OK` row means the backup predates a migration, which is exactly the
 discovery worth making now rather than during an outage.

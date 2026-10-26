@@ -1101,3 +1101,45 @@ schema gate that passes a wrongly typed money column. Fix forward.
 
 **Next recommended action.** Unchanged: PR #69 first (two unauthenticated
 RCEs), then branch protection.
+
+---
+
+## 2026-10-26 — the restore gate's exit status (PR #70)
+
+**Purpose and scope.** A sixth review finding on the Phase 0 rehearsal: the
+schema-check `awk` printed the count of non-`OK` rows and exited `0` whatever
+that count was. The `||` guard beside it covers only `psql` failing, so a
+wrapper keyed on exit status would accept a restore reporting `MISSING`,
+`ABSENT` or `WRONG TYPE`. An operator reading the printed number was
+unaffected, and nothing automated consumes the gate today, so this is
+hardening rather than a failure that occurred.
+
+**Financial or security behaviour affected.** None directly. It is a
+verification step in the procedure that would decide whether a restored
+financial database is usable, which is why it is worth getting right before
+anything depends on it.
+
+**Change.** `exit(n != 0)` added, printed count kept — an operator wants to
+know how many — so the status now agrees with the number. Runbook detail list
+grew from three items to four.
+
+**Tests run and results.** Re-measured on three databases, count and exit
+status both: clean restore `0`/`0`; `transactions.amount` altered to `REAL`
+`1`/`1`; nonexistent target `DID NOT RUN`/`1`. Commands recorded in the
+addendum to `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
+
+**Commit / PR.** PR **#70**, branch `ops/phase0-synthetic-rehearsal`; the
+introducing SHA arrives in a later entry, per the PR #67 learning.
+
+**Migration impact.** None. The fixture writes only to a disposable synthetic
+source, which was created and dropped within the measurement.
+
+**Unresolved findings.** **Phase 0 itself remains NOT RUN.** Every result here
+is synthetic. A production rehearsal needs owner authorization, a designated
+operator and an isolated secured target, and a validated procedure is not a
+performed restore.
+
+**Rollback requirement.** None — documentation and a disposable fixture.
+
+**Next recommended action.** Owner review and merge of #70, then authorization
+of the production rehearsal.
