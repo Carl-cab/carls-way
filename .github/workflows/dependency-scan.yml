@@ -1,0 +1,209 @@
+name: Scheduled dependency scan
+
+# WHY THIS EXISTS, separately from the `dependency audit` job in ci.yml.
+#
+# ci.yml runs on `pull_request` and `push`. It therefore audits a tree only
+# when the tree changes — and advisories are published against code that is not
+# changing. Twice in five days an advisory set reached `master` *after* its last
+# green run and was found only because an unrelated PR happened to re-run the
+# audit:
+#
+#   - follow-redirects (credential headers on the Plaid path), PR #66
+#   - next 16.3.8: two unauthenticated RCEs and a DoS, PR #69 / 1bc81df
+#
+# In both cases `master` sat vulnerable behind a green CI badge. **Nothing
+# watched an unchanged tree.** This workflow is that watch.
+#
+# It does not replace Dependabot alerts, which remain the durable backstop and
+# do not depend on this endpoint at scan time. It covers the case where alerts
+# are off, unnoticed, or not yet confirmed enabled — which was true of this
+# repository for the whole period above.
+
+on:
+  schedule:
+    # 07:17 UTC daily. Not on the hour: scheduled workflows queue heavily at
+    # :00 and GitHub drops or delays them under load, so an odd minute is more
+    # likely to actually run.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    # So the scan can be demanded during an incident without waiting a day.
+
+# Least privilege, stated explicitly rather than inherited. The scan reads the
+# tree and reports; it needs nothing else.
+#
+# `issues: write` is the alerting channel and the reason this is not simply a
+# cron-triggered copy of the CI job: a scheduled run has no pull request to
+# turn red in front of anyone, so a failure nobody is looking at is not an
+# alert. An issue is.
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dependency-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: scheduled dependency scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: master
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      - name: Install (lockfile exactly as deployed)
+        run: pnpm install --frozen-lockfile
+
+      # The same two-tier shape as ci.yml, and the same refusal to conflate
+      # "found nothing" with "could not look". Audit pnpm-lock.yaml directly:
+      # generating a package-lock.json resolves a fresh compatible tree rather
+      # than the exact dependencies Vercel deploys, which can mask a vulnerable
+      # locked transitive package.
+      - name: pnpm audit — production tree
+        id: audit
+        run: |
+          set -uo pipefail
+          if [ ! -f pnpm-lock.yaml ]; then
+            echo "::error::No pnpm-lock.yaml to audit. Broken scan setup, not a registry outage."
+            echo "outcome=broken" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if timeout 90 pnpm audit --prod --json > audit.json 2> audit.err; then
+              echo "Audit clean."
+              echo "outcome=clean" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if jq -e '.metadata.vulnerabilities' audit.json > /dev/null 2>&1; then
+              high=$(jq '.metadata.vulnerabilities.high // 0' audit.json)
+              crit=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
+              echo "Audit ran: ${crit} critical, ${high} high."
+              if [ "$high" -gt 0 ] || [ "$crit" -gt 0 ]; then
+                pnpm audit --prod --audit-level=high || true
+                {
+                  echo "outcome=findings"
+                  echo "critical=${crit}"
+                  echo "high=${high}"
+                } >> "$GITHUB_OUTPUT"
+                echo "::error::Production dependency audit found ${crit} critical and ${high} high advisories on master."
+                exit 1
+              fi
+              echo "No high or critical advisories."
+              echo "outcome=clean" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: advisory service did not answer."
+            sed -n '1,5p' audit.err || true
+            if [ "$attempt" -lt 3 ]; then sleep 20; fi
+          done
+          # DELIBERATE ASYMMETRY WITH ci.yml.
+          #
+          # In ci.yml an unreachable advisory service warns and passes, because
+          # failing every PR on a registry outage trains people to ignore a red
+          # gate — and a PR has other gates.
+          #
+          # Here it FAILS. A scheduled scan that passes when it could not look
+          # reports a clean bill of health it does not have, which is exactly
+          # the "nothing watched an unchanged tree" failure this workflow was
+          # written to end. Red means the scan did not happen; it blocks nobody.
+          echo "outcome=unavailable" >> "$GITHUB_OUTPUT"
+          echo "::error::Dependency scan could NOT RUN — the advisory service did not answer after three attempts. This is not a clean result."
+          exit 1
+
+      # Advisory only, and never the reason the job fails. This is where a
+      # dev-chain finding surfaces, including the braces advisory whose
+      # vulnerable range is every published version and which reaches the tree
+      # only through eslint-config-next. Read it; do not ignore it because it
+      # cannot fail the job.
+      - name: pnpm audit — full tree including devDependencies (advisory)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if timeout 90 pnpm audit --json > audit-all.json 2> audit-all.err; then
+            echo "Full-tree audit clean, devDependencies included."
+            exit 0
+          fi
+          if jq -e '.metadata.vulnerabilities' audit-all.json > /dev/null 2>&1; then
+            jq -r '.metadata.vulnerabilities | "dev+prod totals: \(.critical // 0) critical, \(.high // 0) high, \(.moderate // 0) moderate, \(.low // 0) low"' audit-all.json
+            pnpm audit --audit-level=moderate || true
+          else
+            echo "::warning::Full-tree audit could not reach the advisory service."
+          fi
+
+      - name: Keep the audit output as evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-scan-${{ github.run_id }}
+          path: |
+            audit.json
+            audit.err
+            audit-all.json
+            audit-all.err
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Alerting. A failed cron run that nobody opens is not an alert, so file
+      # (or update) an issue. Deduplicated by a fixed title so a week of
+      # failures is one thread rather than seven issues.
+      - name: Open or update the alert issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTCOME: ${{ steps.audit.outputs.outcome }}
+          CRITICAL: ${{ steps.audit.outputs.critical }}
+          HIGH: ${{ steps.audit.outputs.high }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          TITLE='Scheduled dependency scan needs attention'
+
+          case "${OUTCOME:-unknown}" in
+            findings)
+              BODY=$(printf '%s\n' \
+                "The scheduled scan of \`master\` found **${CRITICAL:-?} critical** and **${HIGH:-?} high** advisories in the production dependency tree." \
+                "" \
+                "This is a real finding, not a tooling failure. The tree did not have to change for this to appear — an advisory was published against code already on \`master\`, which is why this workflow exists." \
+                "" \
+                "Run: ${RUN_URL}" \
+                "" \
+                "Next: reproduce with \`pnpm audit --prod\`, then bump or override the affected package on a branch and open a PR. Do not close this issue without a merged fix or a recorded decision explaining why the advisory does not apply." )
+              ;;
+            unavailable)
+              BODY=$(printf '%s\n' \
+                "The scheduled scan **could not run**: the advisory service did not answer after three attempts." \
+                "" \
+                "**This is not a clean result.** It means the tree is unscanned for this cycle, and it is reported as a failure deliberately — a scheduled scan that passed here would be claiming a clean bill of health it does not have." \
+                "" \
+                "Run: ${RUN_URL}" \
+                "" \
+                "Next: re-run the workflow. If it keeps failing, check Dependabot alerts, which do not depend on this endpoint." )
+              ;;
+            *)
+              BODY=$(printf '%s\n' \
+                "The scheduled dependency scan failed before producing an audit result (outcome: \`${OUTCOME:-unknown}\`)." \
+                "" \
+                "Treat this as an unscanned cycle, not a clean one." \
+                "" \
+                "Run: ${RUN_URL}" )
+              ;;
+          esac
+
+          EXISTING=$(gh issue list --state open --search "\"$TITLE\" in:title" \
+            --json number --jq '.[0].number' 2>/dev/null || true)
+
+          if [ -n "${EXISTING:-}" ] && [ "${EXISTING}" != "null" ]; then
+            gh issue comment "$EXISTING" --body "$BODY" \
+              && echo "Commented on existing issue #${EXISTING}."
+          else
+            gh issue create --title "$TITLE" --body "$BODY" \
+              && echo "Opened a new alert issue."
+          fi

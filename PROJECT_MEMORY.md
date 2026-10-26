@@ -1632,3 +1632,82 @@ owner decision, `clientIdentifier()` still prefers an unvalidated `x-real-ip`.
 backend health in a bounded window.
 
 **Next recommended action.** Owner: branch protection, then #67.
+
+---
+
+## 2026-10-26 — a scheduled dependency scan, because nothing watched an unchanged tree
+
+**Purpose and scope.** The owner's finalization directive asked to evaluate a
+scheduled dependency scan "so newly disclosed vulnerabilities can be detected
+even without new commits", using a dedicated security workflow with safe
+permissions and alerting. Added as
+`.github/workflows/dependency-scan.yml` on branch
+`ci/scheduled-dependency-scan`, cut from `master` at `a08c82f`.
+
+**The gap it closes, with its evidence.** `ci.yml` audits on `pull_request` and
+`push`, so it examines a tree only when the tree changes — while advisories are
+published against code that is *not* changing. Twice in five days this
+repository was hit by exactly that:
+
+| Advisory set | Reached `master` | Found by |
+|---|---|---|
+| `follow-redirects`, credential headers on the Plaid path | before PR #66 | an unrelated PR re-running the audit |
+| `next@16.3.8`: two unauthenticated RCEs + a DoS | before PR #69 (`1bc81df`) | an unrelated PR re-running the audit |
+
+In both cases `master` sat vulnerable behind a green CI badge. This is the
+watch.
+
+**Design, and the one place it deliberately differs from `ci.yml`.** It reuses
+the existing two-tier audit shape — production tree blocking, full tree
+advisory — and the existing refusal to conflate "found nothing" with "could not
+look". The difference is what happens when the advisory service is unreachable:
+
+- In `ci.yml`, that **warns and passes.** Failing every PR on a registry outage
+  trains people to ignore a red gate, and a PR has other gates.
+- Here it **fails.** A scheduled scan that passes when it could not look is
+  reporting a clean bill of health it does not have — which is the very failure
+  this workflow exists to end. Red means "the scan did not happen", and it
+  blocks nobody.
+
+**Alerting.** `permissions: contents: read, issues: write` — nothing else, and
+stated rather than inherited. `issues: write` is the point: a scheduled run has
+no pull request to turn red in front of anyone, so a failed cron job nobody
+opens is not an alert. On failure it opens, or comments on, a single
+deduplicated issue, with different text for a real finding versus an unscanned
+cycle, and says explicitly that the second is not a clean result. The run's
+audit JSON is kept as a 30-day artifact so a later reader has the evidence and
+not just a verdict.
+
+Cron is `17 7 * * *`, not on the hour: scheduled workflows queue heavily at
+`:00` and GitHub delays or drops them under load. `workflow_dispatch` is
+included so the scan can be demanded during an incident.
+
+**Financial or security behaviour affected.** No application code. It adds
+detection; it suppresses nothing. The blocking tier is unchanged — high and
+above on the production tree.
+
+**Tests run and results.** YAML parses; triggers are `schedule` and
+`workflow_dispatch`; permissions are `contents: read` + `issues: write`. All
+four of its action references are SHA-pinned, and
+`lib/__tests__/workflow-action-pinning.test.ts` passes (16 cases) with the new
+file in scope — verified by enumerating what the guard sees: `ci.yml` 8,
+`codeql.yml` 4, `dependency-scan.yml` 4, total 16, none unpinned.
+
+**What is NOT claimed.** The workflow has never fired on its schedule — it
+cannot until it is on `master`. Its behaviour on a real advisory and on a real
+registry outage is therefore **unexercised**; the logic is inherited from a job
+that has done both, but that is reasoning, not evidence. And this does **not**
+confirm Dependabot alerts are enabled: that remains BLOCKED, unreadable from
+this environment (HTTP 403 on both `dependabot/alerts` and
+`vulnerability-alerts`), and the two are complementary rather than substitutes.
+
+**Commit / PR.** Branch `ci/scheduled-dependency-scan`, cut from `a08c82f`. A
+**new PR outside the five the owner conditionally authorized**, so it is not
+covered by that authorization and needs its own decision.
+
+**Migration impact.** None. **Rollback requirement.** None — deleting the file
+removes the watch and restores the previous gap.
+
+**Next recommended action.** Owner: review and merge separately, then confirm
+the first scheduled run appears under Actions. Also enable Dependabot alerts,
+which this does not replace.
