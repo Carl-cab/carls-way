@@ -951,8 +951,18 @@ where false completion gets manufactured:
   movement are where they were. Both live flags remain off and neither was
   touched. Sprint 1 was security and recovery foundations.
 
-**Financial or security behaviour affected.** None. Documentation and readiness
-data only.
+**Financial or security behaviour affected.** The status records themselves are
+documentation only. But this branch is **not** documentation-only: it carries
+the `next` 16.3.8 → 16.4.3 bump, ported here so a status branch cannot
+reintroduce a version with two unauthenticated RCE advisories
+(GHSA-673q-mjm6-r5xr among them) and a DoS, all patched in `>=16.4.1`.
+Merging this branch therefore clears the advisory on `master` as a side effect
+— which is also why the readiness action no longer names PR #69 as the only
+route. It does not clear the **running deployment**, which carries whatever
+the last build produced.
+
+(An earlier version of this line read "None. Documentation and readiness data
+only," which was wrong about the branch's own diff.)
 
 **Tests run and results.** Full suite on this branch **57 files / 832 tests
 passing** (documentation-only on top of `master`), typecheck clean, lint
