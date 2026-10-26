@@ -4,6 +4,18 @@
 **Audience:** The account owner + engineering. Many steps are owner-only and external.
 **Golden rule:** Do not enable a live flag until every prerequisite above it in this document is complete. Live flags default OFF and must be set deliberately.
 
+**Verified against:** `master` at `1bc81df`, on 2026-10-26, by reading the tree
+— not by exercising any rail. This line exists because the value of a go/no-go
+procedure is entirely in its currency: §4.1 read "NOT YET BUILT" for an
+endpoint that had been built and merged, and an operator who finds one stale
+blocker has no way to tell which of the others are stale too. **Re-anchor this
+line whenever the document is revised, and treat an unanchored copy as
+unverified.**
+
+A box checked here means *verified in the tree or by a recorded run*, named in
+the item. It never means "exercised against a live rail" — nothing in this
+repository has been.
+
 ---
 
 ## 0. Reality Check — Read First
@@ -77,27 +89,56 @@ real funds must back every balance.
 
 ## 4. Remaining Code Work (🟡 ENGINEERING) — BLOCKING for live transfers
 
-### 4.1 Execute endpoint (NOT YET BUILT)
+### 4.1 Execute endpoint (🟢 BUILT — verified in code, never run against a live rail)
 
 The live provider lifecycle is: `createIntent → review → confirm (ready) → **executeTransfer** (processing) → webhook → settled`.
 
-Today there is **no** `POST /api/transfers/[id]/execute` route. Without it a live
-transfer stops at `ready` and never submits to Plaid/Stripe.
+**This section said "NOT YET BUILT" until 2026-10-26, which was wrong.**
+`app/api/transfers/[id]/execute/route.ts` exists on `master` at `1bc81df`.
+Corrected because a go/no-go document is only usable if every unchecked box is
+genuinely unchecked — one stale blocker teaches an operator to discount the
+rest.
 
-- [ ] Build `POST /api/transfers/[id]/execute` that:
-  - loads the intent, verifies ownership and `status = 'ready'`,
-  - reselects the provider via `getTransferProvider(region, toExecutionMode(execution_mode))`,
-  - calls `provider.executeTransfer(intentId, userId)` (sandbox providers throw by design — good),
-  - returns the resulting `processing` status.
-- [ ] Gate it so it is only reachable for `execution_mode = 'live'` intents.
-- [ ] Add an idempotency guard so a double-submit cannot create two ACH/ACSS transfers.
+- [x] `POST /api/transfers/[id]/execute` exists and loads the intent, verifies
+      ownership and `status = 'ready'`, reselects the provider through the
+      factory, calls `provider.executeTransfer()` (sandbox providers throw by
+      design) and records `processing`.
+- [x] Gated to `execution_mode = 'live'`. It also refuses when the factory
+      returns a *sandbox* provider, **before** claiming the intent, so a
+      disabled rail cannot strand an intent in `submitting`.
+- [x] Idempotency guard present: a stable key derived from the intent id is
+      persisted *before* the provider call, and the claim runs inside a
+      transaction with `SELECT ... FOR UPDATE`. It is the key, not the lock,
+      that guarantees a single debit.
+- [x] Rate limited per user id (`money:transfer-execute`) — the claim stops one
+      intent being submitted twice but not how many intents one account pushes
+      at a rail.
+- [ ] **Still required before live:** exercise this endpoint end to end in the
+      Plaid/Stripe **sandbox** with a live-shaped intent. Code review is not
+      execution, and no transfer has ever been submitted to a rail.
 
-### 4.2 Webhook settlement path (VERIFY)
+### 4.2 Webhook settlement path (🟡 PARTIAL — handlers verified present, settlement never exercised on a rail)
 
-- [ ] Confirm `app/api/webhooks/plaid` handles `TRANSFER.STATUS_UPDATE` and drives the
-      SettlementOrchestrator/Executor to move `processing → settled/failed/returned`.
-- [ ] Confirm `app/api/webhooks/stripe` handles ACSS PaymentIntent/Payout events similarly.
-- [ ] Confirm the SettlementExecutor updates balances **only** on settlement (never in the provider).
+Verified by reading `master` at `1bc81df`, not by running a rail:
+
+- [x] `app/api/webhooks/plaid/route.ts` exists and handles
+      `TRANSFER_EVENTS_UPDATE` (the event Plaid actually sends; this section
+      previously named `TRANSFER.STATUS_UPDATE`), with
+      `lib/settlement/plaid-event-adapter.ts` mapping Plaid transfer statuses
+      onto settlement events and `plaid_transfer_event_cursors` persisting the
+      sync position.
+- [x] `app/api/webhooks/stripe/route.ts` exists and handles
+      `payment_intent.succeeded`, `charge.succeeded|failed|updated` and
+      `payout.created|paid|failed|canceled`.
+- [x] **Balance mutation boundary holds.** `PlaidTransferProvider.ts` and
+      `CanadianEFTProvider.ts` contain **zero** references to `balance_cad` or
+      `balance_usd` — measured, not assumed. Balances are written only by
+      `lib/settlement/SettlementExecutor.ts` and
+      `lib/settlement/apply-settlement.ts`.
+- [ ] **Still required before live:** a webhook-driven
+      `processing → settled/failed/returned` transition observed in a provider
+      sandbox, and a dead-letter replay drill. Both are listed under
+      operational proof and neither has been run.
 
 ### 4.3 Stripe SDK version pin (🟢 DONE)
 
@@ -142,10 +183,19 @@ Set these in the Vercel project (Production scope). **Add the two live flags LAS
 
 ---
 
-## 6. Database Migration (🟡 ENGINEERING)
+## 6. Database Migration (🟡 PARTIAL — the convergent reconciler has been run; one gated migration has not)
 
-- [ ] Deploy the code first (Vercel auto-deploys on push to `master`).
-- [ ] Call `POST /api/migrate` once, authenticated, to apply any `ALTER TABLE` changes
+**`POST /api/migrate` has already been run against production** (recorded in
+`CLAUDE.md` → Current Priorities). What remains here is not the reconciler but
+the authorization-gated migration below, plus re-running the reconciler after
+any *future* schema change. The step list is therefore a per-deploy procedure,
+not an outstanding blocker:
+
+- [ ] **Outstanding and separate:** apply the early-webhook correlation index
+      migration through the authorized maintenance procedure in
+      `sql/README.md`. It is deliberately **not** part of `/api/migrate`.
+- [ ] **Per deploy, repeat:** deploy the code first (Vercel auto-deploys on push to `master`).
+- [ ] **Per deploy, repeat:** call `POST /api/migrate` once, authenticated, to apply any `ALTER TABLE` changes
       (`curl -X POST -b <auth-cookie> https://<host>/api/migrate`). It is POST,
       not GET: a state-changing GET was reachable by cross-site request
       forgery. GET now answers 405 with a pointer.

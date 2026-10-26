@@ -1253,3 +1253,83 @@ RCEs. Do not roll it back; fix forward if `16.4.3` causes a problem.
 **Next recommended action.** Owner: confirm the production rebuild, then
 confirm Dependabot alerts, then branch protection so a failing `dependency
 audit` can block a merge.
+
+---
+
+## 2026-10-26 — documentation structure audited against the tree, two gaps closed (PR #72)
+
+**Purpose and scope.** The owner specified a seven-item documentation
+structure and asked that it be implemented. Audited against `master` at
+`1bc81df` rather than from memory.
+
+**What already existed — all seven.** `CLAUDE.md` (619 lines),
+`CURRENT_STATUS.md` (338), `PROJECT_MEMORY.md` (971),
+`PRODUCTION_READINESS_BACKLOG.md` (708), `GO_LIVE_RUNBOOK.md` (205),
+`docs/decisions/` (6 records), `docs/audits/` (1 report). Also
+`docs/runbooks/` (3), which the owner's list does not name but which carries
+the executable procedures. The backlog does carry per-task **Owner** and
+**Acceptance Criteria** (76 matching lines), which its stated purpose
+requires.
+
+**Gap 1: the go/no-go runbook was not in the governance contract.**
+`CLAUDE.md` opened its Documentation Governance section with "Four files carry
+different kinds of truth" and named four files plus two directories.
+`GO_LIVE_RUNBOOK.md` appeared **nowhere** in `CLAUDE.md`, and `docs/runbooks/`
+only incidentally, in one line about baseline adoption. So the file a session
+would need before any live-money decision had no stated rule for keeping it
+current and no instruction to consult it. The table now carries all five files
+and all three directories, each with its rule, and states the backlog's
+owner/acceptance-criteria requirement explicitly.
+
+**Gap 2: the runbook had drifted, in the direction that destroys its value.**
+Measured against `master`:
+
+| Runbook claim | Reality on `1bc81df` |
+|---|---|
+| §4.1 "Execute endpoint (**NOT YET BUILT**)" | `app/api/transfers/[id]/execute/route.ts` exists, live-gated, with a persisted idempotency key, `SELECT ... FOR UPDATE` claim and `money:transfer-execute` rate limiting |
+| §4.2 "Confirm `webhooks/plaid` handles `TRANSFER.STATUS_UPDATE`" | Handler exists and handles `TRANSFER_EVENTS_UPDATE` — the event Plaid actually sends; the runbook named an event that does not arrive |
+| §4.2 "Confirm the Executor updates balances, never the provider" | Verified: both live providers contain **zero** references to `balance_cad`/`balance_usd`; balances are written only in `SettlementExecutor.ts` and `apply-settlement.ts` |
+| §6 `POST /api/migrate` outstanding | Already run against production |
+
+**Why this mattered more than a tidy-up.** A go/no-go procedure's whole value
+is that an unchecked box is genuinely unchecked. One stale blocker gives an
+operator no way to tell which of the others are stale, so the document stops
+being a gate. Corrected items are now checked **with their evidence named**,
+and the sections that genuinely remain — sandbox end-to-end execution, a
+webhook-driven settlement transition, the dead-letter replay drill, the
+authorization-gated correlation-index migration — are left unchecked and
+restated as what they are.
+
+**What was deliberately NOT marked done.** Nothing was promoted on the
+strength of code reading alone where the item asks for execution. §4.1 keeps an
+open item for exercising the endpoint in a provider sandbox; §4.2 keeps one for
+an observed settlement transition. The runbook now states that a checked box
+means "verified in the tree or by a recorded run", **never** "exercised against
+a live rail", because nothing in this repository has been.
+
+**Verification anchor added.** The runbook now carries the commit and date it
+was verified against, with an instruction to re-anchor on revision and to treat
+an unanchored copy as unverified — the same rule `CURRENT_STATUS.md` already
+has, and for the same reason recorded there: a stale date on current content
+invites trust.
+
+**Financial or security behaviour affected.** None. No code changed. The
+corrections *reduce* the chance of a live flag being enabled against a
+misleading checklist.
+
+**Tests run and results.** Documentation only; full suite re-run to confirm no
+collateral change.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`, carried there rather
+than on a sixth branch because every open branch appends to this file and a new
+one would add another merge conflict to resolve. SHA named in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None — reverting restores
+a runbook that understates what is built.
+
+**Unresolved findings.** `docs/audits/` holds one report on `master`; the Phase
+0 synthetic rehearsal audit is still unmerged on #70. And the runbook's
+remaining 🔴 owner-only sections (legal, FBO/funding, provider approvals) are
+unverifiable from here by construction.
+
+**Next recommended action.** Owner review and merge of #72.

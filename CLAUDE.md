@@ -289,18 +289,28 @@ the route is still yours to catch by hand.
 
 ## Documentation Governance
 
-Four files carry different kinds of truth, and conflating them is how a session
-ends up acting on a stale claim:
+Five files and three directories carry different kinds of truth, and conflating
+them is how a session ends up acting on a stale claim:
 
-| File | Holds | Rule |
+| Path | Holds | Rule |
 |---|---|---|
-| `CLAUDE.md` | Engineering instruction | Must match the tree. Correct it in place when the code moves |
-| `CURRENT_STATUS.md` | Verified current state | Carries the commit it was verified against |
-| `PROJECT_MEMORY.md` | Chronological record | Append-only. Correct an old entry by appending, never by editing history |
-| `PRODUCTION_READINESS_BACKLOG.md` | Prioritized backlog | Re-mark an item only when a change verifies it, naming the evidence |
+| `CLAUDE.md` | Engineering instruction, safety rules, architecture, current priorities | Must match the tree. Correct it in place when the code moves |
+| `CURRENT_STATUS.md` | Verified state of the application and remaining blockers | Carries the commit it was verified against |
+| `PROJECT_MEMORY.md` | Chronological progress, decisions, merges, lessons learned | Append-only. Correct an old entry by appending, never by editing history |
+| `PRODUCTION_READINESS_BACKLOG.md` | Prioritized tasks, each with an **owner** and **acceptance criteria** | Re-mark an item only when a change verifies it, naming the evidence |
+| `GO_LIVE_RUNBOOK.md` | The current operational go/no-go procedure | Carries the commit and date it was verified against. **Every unchecked box must be genuinely unchecked**, and a checked box names its evidence. Re-anchor on every revision |
+| `docs/decisions/NNNN-<slug>.md` | Architectural decision records | One decision per file, numbered. Supersede by adding a new record, not by rewriting one |
+| `docs/audits/<date>-<topic>.md` | Dated, command-level audit evidence with commit SHAs and test results | **Immutable.** A later finding goes in a new audit or an explicitly marked addendum, never over the original |
+| `docs/runbooks/<topic>.md` | Executable operational procedures (backup/restore rehearsal, migration baseline adoption, Vercel access) | A procedure is only as good as its last execution: say whether it has been run, against what, and with which negative cases |
 
-Plus `docs/audits/<date>-<topic>.md` for dated, command-level audit evidence and
-`docs/decisions/NNNN-<slug>.md` for architectural decisions.
+**Why `GO_LIVE_RUNBOOK.md` is in this contract and not merely in the tree.** It
+drifted: §4.1 read "Execute endpoint (NOT YET BUILT)" while
+`app/api/transfers/[id]/execute/route.ts` was built, merged and gated, and §6
+listed `POST /api/migrate` as outstanding after it had been run against
+production. The cost is specific — an operator who finds one stale blocker in a
+go/no-go list cannot tell which of the remaining ones are stale, so the whole
+document stops being a gate and becomes a suggestion. Corrected 2026-10-26
+against `1bc81df`.
 
 A material change appends a `PROJECT_MEMORY.md` entry naming: purpose and scope;
 financial or security behaviour affected; tests run and their results; commit
