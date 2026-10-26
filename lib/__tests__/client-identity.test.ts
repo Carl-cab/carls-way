@@ -96,6 +96,13 @@ describe('validation: arbitrary header content cannot become a rate-limit key', 
     ['a bare colon', ':'],
     ['colons only', ':::'],
     ['too many groups', '1:2:3:4:5:6:7:8:9'],
+    // A zone suffix is meaningful only on a scoped IPv6 address (RFC 4007).
+    // Accepting one on IPv4 let a single address mint unlimited distinct
+    // rate-limit keys — see the cardinality case below, which is the reason
+    // this matters rather than a syntax quibble.
+    ['an IPv4 address with a zone suffix', '203.0.113.9%junk'],
+    ['an IPv4 address with a short zone', '1.2.3.4%a'],
+    ['a zone with no address', '%eth0'],
   ])('rejects %s in x-real-ip and does not key on it', (_label, value) => {
     const id = clientIdentity(req({ 'x-real-ip': value }));
     expect(id.id).not.toBe(value);
@@ -114,6 +121,33 @@ describe('validation: arbitrary header content cannot become a rate-limit key', 
 
   it('accepts IPv6, including a zone suffix', () => {
     expect(clientIdentity(req({ 'x-real-ip': '2001:db8::1' })).id).toBe('2001:db8::1');
+    expect(clientIdentity(req({ 'x-real-ip': 'fe80::1%eth0' })).id).toBe('fe80::1%eth0');
+  });
+
+  it('cannot be used to mint unlimited keys from one IPv4 address', () => {
+    // The reason the zone rule matters. If `1.2.3.4%a` and `1.2.3.4%b` both
+    // validated, one caller could rotate the suffix to get a fresh rate-limit
+    // bucket per request — defeating every client-keyed limit and growing
+    // counter cardinality without bound, which is precisely what validating
+    // the header was introduced to prevent.
+    const ids = ['a', 'b', 'c', 'd'].map(
+      (z) => clientIdentity(req({ 'x-real-ip': `203.0.113.9%${z}` })).id,
+    );
+    expect(new Set(ids)).toEqual(new Set(['unknown-client']));
+  });
+
+  it('a malformed preferred header must not outrank a valid x-real-ip', () => {
+    // The reviewer's framing of the same defect: an IPv4-with-zone in the
+    // preferred header used to win the precedence order.
+    expect(
+      clientIdentity(
+        req({ 'x-vercel-forwarded-for': '203.0.113.9%junk', 'x-real-ip': '198.51.100.7' }),
+      ),
+    ).toEqual({ id: '198.51.100.7', source: 'x-real-ip' });
+  });
+
+  it('still accepts a genuine scoped IPv6 address with its zone', () => {
+    // The fix must not break the legitimate case it was written for.
     expect(clientIdentity(req({ 'x-real-ip': 'fe80::1%eth0' })).id).toBe('fe80::1%eth0');
   });
 

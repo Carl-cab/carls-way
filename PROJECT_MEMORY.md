@@ -1832,8 +1832,12 @@ bucket still fails **open**, and these tests exist so that a future change to
 either mechanism cannot alter that silently.
 
 **Tests run and results.** 7 new cases; the five rate-limit and identity files
-together 69 passing before the addition. Full suite result recorded in the
-following entry with the merge SHA.
+together 69 passing before the addition. Full suite **61 files / 901 tests
+passing**, typecheck clean, lint 0 errors / 28 warnings. (This read "recorded
+in the following entry with the merge SHA" — a deferral to an entry that was
+never written, which is the same dangling-promise shape already recorded twice
+on #68 and #70. An entry cannot contain its own introducing SHA; it can always
+contain its own test result, so there was nothing to defer.)
 
 **Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`, base
 updated to `a08c82f` (post-#67). SHA in a later entry.
@@ -1844,5 +1848,64 @@ updated to `a08c82f` (post-#67). SHA in a later entry.
 the two-request production comparison with an equality check. And the
 fail-open/fail-closed decision for the three money buckets, which is an owner
 judgement and is deliberately **not** implemented.
+
+**Next recommended action.** Owner review and merge of #71.
+
+---
+
+## 2026-10-26 — a zone suffix on IPv4 reopened the hole the validator exists to close (PR #71)
+
+**The defect, found by review and worse than reported.** `looksLikeIp()` split
+a value on `%`, validated the zone characters, then accepted the prefix when
+`isIP(prefix) !== 0`. A zone suffix is meaningful only on a **scoped IPv6**
+address (RFC 4007), so this accepted IPv4-with-zone.
+
+The reviewer's framing was that a malformed preferred header could outrank a
+valid `x-real-ip`. True, and measured. But the consequence is larger:
+
+```
+"203.0.113.9%junk"  accepted=true   isIP(prefix)=4
+"203.0.113.9%a"     accepted=true   isIP(prefix)=4
+"203.0.113.9%b"     accepted=true   isIP(prefix)=4
+distinct accepted keys from one address, 8 suffixes tried: 8
+```
+
+**One IPv4 address could mint unlimited distinct rate-limit keys** by rotating
+the suffix — defeating every client-keyed limit and growing counter
+cardinality without bound. Those two things are, verbatim, what this
+validator's own doc comment says it was introduced to prevent. The fix reopened
+its own purpose.
+
+**Fix.** The zone branch now requires `isIP(prefix) === 6`. Four cases added:
+IPv4-with-zone rejected (two forms), a zone with no address rejected, the
+key-minting case asserting four rotated suffixes all collapse to
+`unknown-client`, the precedence case from the review, and one asserting a
+genuine `fe80::1%eth0` still resolves — so the fix cannot be "achieved" by
+breaking the legitimate case. Mutation-checked: restoring `!== 0` fails 4.
+
+**The pattern, now at three.** Every defect in this one function has been a
+hand-rolled judgement about what "looks like an address" means: a bare `':'`
+accepted, the IPv4-mapped form rejected, a zone on IPv4 accepted. `isIP`
+decides correctly in all three. The durable lesson is written into the function
+itself: delegate the decision, and keep the function to splitting the zone off.
+
+**Financial or security behaviour affected.** Rate-limit key derivation. Before
+this fix, `auth:login`, `auth:register`, `auth:password-reset` and
+`schema:bootstrap` — every client-keyed bucket — were evadable by suffix
+rotation. The money buckets were **not** affected: they key on the
+authenticated user id, which is the asymmetry the interaction tests pin.
+
+**Tests run and results.** Full suite **61 files / 907 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings.
+
+**Commit / PR.** PR **#71**, branch `sec/client-identity-provenance`. SHA named
+in a later entry, written in the same session as this one.
+
+**Migration impact.** None. **Rollback requirement.** Reverting restores a
+client-keyed rate-limit evasion; fix forward.
+
+**Unresolved findings.** The header-trust question is untouched by this: valid
+syntax still is not proof of a trusted proxy, and the two-request production
+comparison with an equality check remains outstanding.
 
 **Next recommended action.** Owner review and merge of #71.

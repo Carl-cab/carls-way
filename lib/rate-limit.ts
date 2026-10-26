@@ -530,9 +530,25 @@ function looksLikeIp(value: string): boolean {
   if (value.length === 0 || value.length > 45) return false;
   const pct = value.indexOf('%');
   if (pct === -1) return isIP(value) !== 0;
+
+  // A zone suffix is only meaningful on a scoped IPv6 address (RFC 4007), so
+  // the prefix must be IPv6 — `=== 6`, not `!== 0`.
+  //
+  // Accepting a zone on IPv4 reopened the exact hole this validator exists to
+  // close. Measured: `203.0.113.9%a`, `%b`, `%c` … were each accepted as a
+  // *distinct* key, so one address could mint unlimited rate-limit keys and
+  // evade any client-keyed limit while blowing up counter cardinality — the
+  // two things validation was introduced to prevent. It also let a malformed
+  // preferred header outrank a valid `x-real-ip`.
+  //
+  // That is the third defect of one kind in this function: a bare `':'`
+  // accepted, the IPv4-mapped form rejected, and now a zone on IPv4 accepted.
+  // Each was a hand-rolled judgement about what "looks like an address" means.
+  // The lesson is in the comment above — delegate the decision to `isIP` and
+  // keep this function to splitting the zone off, nothing more.
   const zone = value.slice(pct + 1);
   if (!/^[0-9a-zA-Z._-]+$/.test(zone)) return false;
-  return isIP(value.slice(0, pct)) !== 0;
+  return isIP(value.slice(0, pct)) === 6;
 }
 
 /**
