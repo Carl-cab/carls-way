@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { checkVelocityLimit, recordVelocity } from '@/lib/auth';
 import { createLedgerPair } from '@/lib/ledger';
 import {
   type MinorUnits,
@@ -135,7 +136,12 @@ export function divideEvenly(totalAmount: MinorUnits, count: number): MinorUnits
 }
 
 export class SplitPaymentError extends Error {
-  readonly code: 'NOT_PARTICIPANT' | 'ALREADY_PAID' | 'SPLIT_CLOSED' | 'INSUFFICIENT_BALANCE';
+  readonly code:
+    | 'NOT_PARTICIPANT'
+    | 'ALREADY_PAID'
+    | 'SPLIT_CLOSED'
+    | 'INSUFFICIENT_BALANCE'
+    | 'VELOCITY_EXCEEDED';
   constructor(code: SplitPaymentError['code'], message: string) {
     super(message);
     this.name = 'SplitPaymentError';
@@ -168,7 +174,7 @@ export async function paySplitPortion(
 }> {
   const sql = getSql();
 
-  return (await sql.begin(async (tx) => {
+  const result = (await sql.begin(async (tx) => {
     const participantRows = await tx`
       SELECT sp.id, sp.amount_owed, sp.status, s.creator_id, s.currency, s.status AS split_status,
              s.description
@@ -202,6 +208,39 @@ export async function paySplitPortion(
     const amount = parsePositiveMoney(participant.amount_owed, participant.currency);
     const amountDecimal = toNarrowDatabaseDecimal(amount);
     const isUsd = participant.currency === 'USD';
+
+    // Durable volume control. Until 2026-10-26 this path had none: it moved
+    // money calling neither checkVelocityLimit() nor recordVelocity(), so
+    // `money:split-pay` was guarded only by the Redis rate limit, and its
+    // volume never entered `velocity_checks` to consume any other path's
+    // budget either. Decision 0007 assumed velocity_checks covered all three
+    // money buckets; this is what makes that true.
+    //
+    // The gate lives HERE and not in the route, deliberately, unlike the other
+    // money paths which check before opening their transaction. Two reasons.
+    // The amount is not supplied by the caller — it is read from
+    // `split_participants` under `FOR UPDATE OF sp` above — so checking it
+    // here means the amount checked is exactly the amount about to move, with
+    // no second read and no window between them. And putting the control next
+    // to the movement means a future caller of paySplitPortion() inherits it;
+    // the control living in routes is precisely why this path was missed.
+    //
+    // checkVelocityLimit() runs on its own connection (getSql()), not `tx`. It
+    // reads `users` and `velocity_checks`, neither of which this transaction
+    // locks, so it cannot deadlock against the `sp` lock held here.
+    //
+    // It is deliberately NOT wrapped in try/catch: decision 0007 requires the
+    // money path to FAIL CLOSED when velocity cannot be evaluated. A throw
+    // here aborts the transaction before any balance is touched. Wrapping this
+    // to "be resilient" would silently convert a required fail-closed into
+    // fail-open.
+    const velocity = await checkVelocityLimit(payerId, amount, participant.currency);
+    if (!velocity.allowed) {
+      throw new SplitPaymentError(
+        'VELOCITY_EXCEEDED',
+        velocity.reason ?? 'Transfer limit exceeded.',
+      );
+    }
 
     // Balance guard lives in the UPDATE itself: two simultaneous debits cannot
     // both pass a separate check-then-write.
@@ -286,12 +325,45 @@ export async function paySplitPortion(
       splitStatus = 'settled';
     }
 
-    return { transactionId, amountPaid: minorUnitsToMajorNumber(amount), splitStatus, remainingParticipants };
+    return {
+      transactionId,
+      amountPaid: minorUnitsToMajorNumber(amount),
+      splitStatus,
+      remainingParticipants,
+      // Carried out for recordVelocity() below. Returned rather than captured
+      // in a mutable outer variable so that "recorded only if the transaction
+      // committed" is a property of control flow: if the block throws, these
+      // never exist and the call below is never reached. A captured flag would
+      // also have worked at runtime, but TypeScript cannot see an assignment
+      // made inside this callback and narrows the variable to `null`, so the
+      // flag version does not type-check without a cast that would hide the
+      // very thing worth being sure of.
+      velocityAmount: amount,
+      velocityCurrency: participant.currency,
+    };
   })) as unknown as {
     transactionId: number;
     amountPaid: number;
     splitStatus: SplitStatus;
     remainingParticipants: number;
+    velocityAmount: MinorUnits;
+    velocityCurrency: string;
+  };
+
+  // Recorded AFTER the transaction commits, matching the other money paths —
+  // `app/api/transactions/route.ts` and `transactions/[id]/route.ts` both
+  // record once their `sql.begin` block has returned. The ordering matters in
+  // one direction: recordVelocity() runs on its own connection, so calling it
+  // inside the transaction would commit a velocity row independently of the
+  // payment, and a later rollback would charge the payer budget for money that
+  // never moved.
+  await recordVelocity(payerId, result.velocityAmount, result.velocityCurrency);
+
+  return {
+    transactionId: result.transactionId,
+    amountPaid: result.amountPaid,
+    splitStatus: result.splitStatus,
+    remainingParticipants: result.remainingParticipants,
   };
 }
 

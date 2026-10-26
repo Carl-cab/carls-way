@@ -76,6 +76,10 @@ export async function POST(
         err.code === 'NOT_PARTICIPANT' ? 403
         : err.code === 'ALREADY_PAID' ? 409
         : err.code === 'SPLIT_CLOSED' ? 409
+        // 429 matches what the other money paths return when the velocity
+        // ceiling is hit (`transactions` and `transfers/intent` both do), so a
+        // client sees one status for one meaning across every money path.
+        : err.code === 'VELOCITY_EXCEEDED' ? 429
         : 400;
       return NextResponse.json({ error: err.message, code: err.code }, { status });
     }

@@ -32,11 +32,26 @@ unavailable → refuse" branch and **no test pins it**, so a future refactor tha
 wrapped the call to "be resilient" would silently convert this to fail-open.
 That is the shape of defect this record has already produced four times.
 
-## Correction — the durable guard does not cover `money:split-pay`
+## Correction — the durable guard did not cover `money:split-pay`. **Now it does.**
+
+> **RESOLVED by option (A), owner-authorized 2026-10-26.** `paySplitPortion()`
+> now calls `checkVelocityLimit()` before any balance moves and
+> `recordVelocity()` after the transaction commits, so the premise this record
+> rests on is true for all three buckets. The gate lives in
+> `paySplitPortion()` rather than the route, deliberately: the amount is read
+> from `split_participants` under `FOR UPDATE`, so the amount checked is
+> exactly the amount about to move, and any future caller inherits the control
+> — the control living only in routes is why this path was missed. A
+> `VELOCITY_EXCEEDED` error maps to **429**, matching every other money path.
+> Pinned by `lib/__tests__/split-pay-velocity.test.ts` (6 cases) and
+> **mutation-checked three ways**: swallowing the velocity error fails only the
+> fail-closed case; removing the gate fails four cases; removing the record
+> fails one. The text below is kept because the measurement is the reason the
+> fix exists.
 
 This record says `velocity_checks` "is the control that actually caps how much
 a user can move during an outage", for all three buckets. **Measured at
-`403acf1`, that is false for `money:split-pay`.**
+`403acf1`, that was false for `money:split-pay`.**
 
 `lib/splits.ts` contains **zero** velocity references. `paySplitPortion()`
 debits the payer and credits the split creator directly, calling neither
@@ -63,14 +78,26 @@ belong to, once (`ALREADY_PAID`). Moving volume this way therefore requires
 creating many splits, which is a separate endpoint with its own limit. This is
 a gap in the decision's stated safety net, not an open drain.
 
-**It does not flip the decision**, because the asymmetry that decides it never
+**It did not flip the decision**, because the asymmetry that decides it never
 depended on `velocity_checks` — a certain total payments outage still beats a
-loosened limit for attackers. It does mean one of two things should happen, and
-that is an owner call: either add a velocity check and record to the split-pay
-path so the premise becomes true, or amend this record to state that
-`money:split-pay`'s only volume control is the rate limit itself. **Neither is
-implemented**, because adding a velocity gate to a money path changes a
-financial control.
+loosened limit for attackers. The owner chose **option (A)**: add the velocity
+check and record so the premise becomes true, rather than amending this record
+to accept the gap. Implemented as described in the box above.
+
+**Two things the fix changes in behaviour, stated because they are not purely
+additive.** A split portion now consumes the payer's velocity budget, so a
+payer near their ceiling on other paths can be refused a split payment they
+would previously have been allowed — that is the intended effect of closing the
+gap, not a side effect. And split-pay can now return **429** where it never
+could before. Limits apply at `new_user` or `verified_user` tiers depending on
+`kyc_status`; `checkVelocityLimit()` does **not** gate on KYC itself, so no
+user is newly locked out of splits for being unverified — they are held to the
+lower ceiling, as on every other money path.
+
+**Still unimplemented, and worth naming separately:** nothing records velocity
+for `money:transfer-execute` at execute time (it is checked at intent and
+recorded at confirm), which `CLAUDE.md` already notes as a known future item.
+That is a different gap from this one and is untouched here.
 
 ## Vercel concurrency ceiling — established, and still not an instance count
 

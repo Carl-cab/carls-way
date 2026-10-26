@@ -3169,3 +3169,104 @@ whichever is chosen, pin the velocity-unavailable path with a test, since it is
 now a stated requirement of an accepted decision and nothing enforces it.
 
 **Commit / PR.** Branch `docs/sprint1-owner-confirmations`.
+
+---
+
+## 2026-10-26 — split-pay brought under the durable volume control (option A)
+
+**Purpose and scope.** Close the gap found while checking the accepted decision
+0007 against the code: `money:split-pay` moved real balances with no velocity
+gate and no velocity recording. Owner chose **option (A)** — add the control so
+the decision's premise becomes true — over (B), amending the record to accept
+the gap. This is a **change to a financial control**, authorized explicitly.
+
+**What was wrong.** `lib/splits.ts` contained zero velocity references.
+`paySplitPortion()` debited the payer and credited the split creator calling
+neither `checkVelocityLimit()` nor `recordVelocity()`. Two distinct halves:
+the path was **ungated** (no ceiling but the Redis rate limit), and it was
+**unrecorded** (its volume never entered `velocity_checks`, so it consumed no
+budget on any other money path either).
+
+**The fix, and why the gate sits where it does.** The check is inside
+`paySplitPortion()`, before the debit, not in the route — which deviates from
+the other money paths, where the route checks before opening its transaction.
+Two reasons. The amount is not supplied by the caller: it is read from
+`split_participants` under `FOR UPDATE OF sp`, so checking it there means the
+amount checked is exactly the amount about to move, with no second read and no
+window between. And the control then sits next to the movement, so a future
+caller of `paySplitPortion()` inherits it. **That second reason is the actual
+lesson of this defect:** velocity was enforced in *routes*, so a path whose
+money movement lived in a library function was simply missed. `CLAUDE.md` now
+carries that as a rule rather than as an incident.
+
+`recordVelocity()` runs after the transaction commits, matching the other
+paths. The values are carried out through the closure's return rather than a
+captured outer variable — the first attempt used a mutable flag and TypeScript
+correctly rejected it, since it cannot see an assignment made inside the
+callback and narrows the variable to `null`. Returning them makes "recorded
+only if committed" a property of control flow instead of a flag invariant,
+which is strictly better: if the block throws, the values do not exist and the
+call is unreachable.
+
+**The velocity call is deliberately not wrapped in `try/catch`.** Decision 0007
+requires this path to fail closed when velocity cannot be evaluated, and a
+throw aborting the transaction before any balance is touched is what implements
+that. A comment says so at the call site, because "add a try/catch to be
+resilient" is exactly the well-intentioned change that would invert it.
+
+**Tests run and their results.** New file
+`lib/__tests__/split-pay-velocity.test.ts`, 6 cases, against a real PostgreSQL
+instance. **Mutation-checked three ways, and the results are specific:**
+
+| Mutation | Cases failed |
+|---|---|
+| Wrap the velocity call in `try/catch` and swallow (fail-open) | **1** — only the fail-closed case |
+| Remove the gate entirely (the original defect) | **4** |
+| Remove `recordVelocity()` | **1** — only the recording case |
+
+Each half of the original gap is independently pinned, and the fail-closed
+property is pinned by exactly the test that claims to pin it. That mattered
+more than the count: the fail-closed requirement had held only incidentally,
+so a refactor could have inverted it with every other test still green.
+
+Also corrected: `splits.test.ts` now clears `velocity_checks` in `cleanup()`.
+That path writes those rows now, and left behind they accumulate against
+`daily_max_count` — 25 for a verified user, and all four split fixtures are
+verified — so a later run would have failed on a ceiling rather than on
+anything it asserts. That failure would have read as a regression in splitting
+and would not have been one.
+
+Two of my own test bugs, recorded because both were the same kind of mistake:
+`setBalance(…, '0')` went through `parsePositiveMoney`, which rejects zero; and
+one test called `paySplitPortion()` twice while `mockResolvedValueOnce` covered
+only the first call, so the second ran against the real allowed limit and
+legitimately paid the portion. Both looked like product failures and were not.
+
+**Financial or security behaviour affected.** Yes, and not purely additive. A
+split portion now consumes the payer's velocity budget, so a payer near their
+ceiling on other paths can be refused a split payment previously allowed —
+that is the intended effect of closing the gap. Split-pay can now return
+**429**, which it never could. No user is newly locked out for being
+unverified: `checkVelocityLimit()` does not gate on KYC, it only selects the
+`new_user` vs `verified_user` tier.
+
+**Migration impact.** None; `velocity_checks` already exists in all three
+schema sources.
+
+**Rollback requirement.** Reverting restores the gap, not a defect — the path
+would move money without a durable volume control again, and decision 0007's
+premise would be false again. If it must be reverted, amend 0007 to option (B)
+in the same change rather than leaving the record asserting a control that is
+not there.
+
+**Unresolved findings.** `money:transfer-execute` is checked at intent and
+recorded at confirm, never at execute. That is a different gap from this one,
+already noted in `CLAUDE.md`, and untouched here — stated so this entry is not
+read as having closed it.
+
+**Next recommended action.** Nothing owner-side on split-pay. The remaining
+0007 follow-ups are the three observability asks: scrape
+`rateLimitBackendHealth()`, alert on sustained degradation with a named owner,
+and move the three money counters to PostgreSQL.
+
+**Commit / PR.** Branch `docs/sprint1-owner-confirmations`.

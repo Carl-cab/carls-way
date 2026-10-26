@@ -77,6 +77,8 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
+| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `checkVelocityLimit()` / `recordVelocity()`. The velocity call must stay unwrapped — see the fail-closed requirement in decision 0007 |
+| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control: records velocity, refuses over the ceiling with `VELOCITY_EXCEEDED` → 429, and **fails closed when velocity cannot be evaluated**. Mutation-checked three ways |
 | `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
 ---
@@ -394,6 +396,13 @@ made only in `lib/providers/TransferProviderFactory.ts`.
 - Both sandbox providers are execution_mode='sandbox' — no real bank/external API calls
 - `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
 - Velocity is checked at intent creation but only recorded at confirm (future: at execute)
+- **Every balance-moving path must go through `checkVelocityLimit()` before
+  the move and `recordVelocity()` after it.** `money:split-pay` did neither
+  until 2026-10-26 — it moved money with no durable volume control, and its
+  volume was invisible to every other path's budget. The lesson is where the
+  control lives: velocity was enforced in *routes*, so a path whose money
+  movement sat in a library function (`paySplitPortion()`) was simply missed.
+  Put the gate next to the movement, so a new caller inherits it
 - Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
@@ -570,17 +579,22 @@ arbitrary end user.
   **no explicit branch and no test pinning it**. Wrapping that call to "be
   resilient" would silently make it fail-open.
 
-  **One premise of that decision is false for one bucket.** `lib/splits.ts`
-  contains **zero** velocity references: `paySplitPortion()` debits the payer
-  and credits the creator calling neither `checkVelocityLimit()` nor
-  `recordVelocity()`. So `money:split-pay` has **no durable volume control
-  behind the rate limit**, and its volume never enters `velocity_checks` to
-  consume any other path's budget either. Bounded in practice by the
-  conditional debit (`WHERE balance_cad >= …`) and by a participant being able
-  to pay only their own portion once — so it is a gap in the stated safety net,
-  not an open drain. Resolving it is an owner call: add the velocity
-  check/record to split-pay, or amend 0007 to say the rate limit is that
-  bucket's only volume control. **Neither is implemented.**
+  **One premise of that decision was false for one bucket, and is now fixed.**
+  `lib/splits.ts` contained **zero** velocity references: `paySplitPortion()`
+  debited the payer and credited the creator calling neither
+  `checkVelocityLimit()` nor `recordVelocity()`, so `money:split-pay` had no
+  durable volume control behind the rate limit and its volume never entered
+  `velocity_checks` to consume any other path's budget. **Resolved
+  2026-10-26 (owner-authorized option A):** the gate now lives *inside*
+  `paySplitPortion()`, not in the route — the amount is read from
+  `split_participants` under `FOR UPDATE`, so the amount checked is exactly the
+  amount about to move, and any future caller inherits the control. A
+  `VELOCITY_EXCEEDED` error maps to **429**, as on every other money path.
+  **Do not wrap that `checkVelocityLimit()` call in a `try/catch`** — 0007
+  requires this path to fail closed when velocity cannot be evaluated, and the
+  throw aborting the transaction before any balance moves is what implements
+  it. `lib/__tests__/split-pay-velocity.test.ts` pins all of it and is
+  mutation-checked three ways; swallowing that error fails exactly one case.
 
   When shared rate limiting is lost — Redis unreachable, or
   no usable client header — every bucket currently fails *open*: the request is
@@ -676,7 +690,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `webhook_dead_letters` | Payloads of webhook events that exhausted their retries, for operator review and requeue |
 | `plaid_transfer_event_cursors` | Sync position for `TRANSFER_EVENTS_UPDATE`. Missing means the Plaid Transfer webhook cannot persist its position and answers 500 |
 | `transfer_recovery_flags` | Marks intents needing reconciliation |
-| `splits` / `split_participants` | Split payments and each participant's portion |
+| `splits` / `split_participants` | Split payments and each participant's portion. Paying a portion moves real balances, writes a ledger pair, **and since 2026-10-26 checks and records velocity** |
 | `admin_users` / `admin_roles` / `admin_permissions` / `role_permissions` / `admin_sessions` / `admin_audit_logs` | Admin RBAC. A separate auth context from `users`, not a flag on a customer row |
 
 The authoritative list is whatever `initializeSchema()` builds; `scripts/verify-migrate.sql` checks a live database against it.
