@@ -16,10 +16,29 @@ import { getSql, initializeSchema } from '../db';
 const USER_ID = 9402;
 const sql = getSql();
 
+/**
+ * A per-call counter, not `Date.now()`.
+ *
+ * `provider_reference_id` is covered by the unique index
+ * `idx_transfer_intents_provider_reference`, and two calls with the same
+ * `status` inside one millisecond produced the *same* reference — so the
+ * second insert raised 23505 and the test failed for a reason unrelated to
+ * what it asserts. The "stuck past 24h, not a fresh one" case does exactly
+ * that: two `posted` intents back to back. Measured in CI on
+ * `c703ee0` with `trf_c13_posted_1792977822725`, and reproducible on demand
+ * by freezing the clock.
+ *
+ * A counter cannot collide within a run, and the `Date.now()` prefix keeps
+ * references from separate runs distinct in a reused database.
+ */
+let intentSeq = 0;
+const RUN_TAG = `${Date.now()}_${process.pid}`;
+
 async function createIntent(status: string, updatedAgo: string, amount = '50.00'): Promise<number> {
+  const reference = `trf_c13_${status}_${RUN_TAG}_${++intentSeq}`;
   const rows = await sql`
     INSERT INTO transfer_intents (user_id, type, amount, currency, status, provider_reference_id)
-    VALUES (${USER_ID}, 'add_money', ${amount}, 'CAD', ${status}, ${`trf_c13_${status}_${Date.now()}`})
+    VALUES (${USER_ID}, 'add_money', ${amount}, 'CAD', ${status}, ${reference})
     RETURNING id
   `;
   const id = Number(rows[0].id);

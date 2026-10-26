@@ -77,6 +77,7 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
+| `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
 ---
 
@@ -197,6 +198,24 @@ pnpm install
 pnpm dev
 ```
 
+**Every GitHub Action is pinned to a commit SHA, never a tag.** `uses:
+owner/action@v4` resolves a *mutable* pointer: the action's owner, or anyone
+who compromises that repository, can repoint `v4` at new code and it runs on
+the next job here with no diff and no review in this repo. That is arbitrary
+code execution inside CI holding the job token — and in the secret-scan job it
+would sit alongside a downloaded binary reading the whole git history, while
+CodeQL's job holds `security-events: write`. Pin the 40-hex SHA and keep a
+trailing `# vN` so the version is still legible:
+
+```yaml
+uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+```
+
+Take the SHA from a run log line `Download action repository 'owner/action@vN'
+(SHA:…)` — that is the commit CI actually resolved, which is better provenance
+than a tag looked up separately. `lib/__tests__/workflow-action-pinning.test.ts`
+enforces this; without it an unpinned action passes every other check.
+
 **Package manager: pnpm, and only pnpm.** `pnpm-lock.yaml` is the single
 lockfile; `package-lock.json` was removed because carrying both meant CI
 validated one while Vercel built from the other, and deploys broke silently
@@ -228,10 +247,12 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **58 files /
-844 tests** as of this writing, and the suite is expected to stay fully green.
-(This line read "57 files / 821 tests" while the suite was actually at 832 —
-the count drifts whenever someone updates the code and not this sentence.)
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **59 files /
+869 tests** as of this writing — measured on the merged tree after PR #68
+landed, not carried over from either side of the merge. Both branches had
+written a different number here (844 and 836) and the merge conflicted on
+exactly this sentence; resolving it by measuring is the only way the number
+means anything. The suite is expected to stay fully green.
 That count was stale at "51 files / 735 tests" for several changes; it is a
 number worth keeping current precisely because it is the thing a reader checks
 a run against.
