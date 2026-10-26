@@ -228,13 +228,92 @@ assurance.
 If any row reports `FAIL`, confirm whether the same discrepancy exists in
 production before concluding the restore caused it.
 
-### 4. Run the application's own test suite against the restore
+> **Step order is load-bearing, not stylistic.** §2 (schema check) and §3
+> (financial reconciliation) are read-only and must run **first**, on the
+> preserved restore, because they are the evidence that the backup is faithful.
+> §4 runs elsewhere entirely (below). The Phase 4 privilege probe that follows
+> creates a role and applies grants — a catalogue change on the restore
+> target's cluster. It does not alter table data, so it cannot invalidate §2 or
+> §3, but it is still a mutation and belongs after them, never before.
+
+### 4. Run the application's own test suite — against a SECOND, disposable copy
+
+> **Never point the test suite at `$RESTORE_TARGET_URL`.** The preserved
+> restore is the evidence that the backup is faithful, and §2 and §3 are
+> read-only precisely so that evidence survives them. The suite is **not**
+> read-only, so running it here destroys the thing you restored in order to
+> examine. An earlier version of this runbook said
+> `DATABASE_URL="$RESTORE_TARGET_URL" pnpm test`. That instruction was wrong
+> and is why this warning exists.
+
+**What the suite does to whatever database it is pointed at** — counted on this
+tree, not assumed:
+
+| Behaviour | Files |
+|---|---|
+| Run DDL against `DATABASE_URL` (mostly `initializeSchema()`) | 23 |
+| `DELETE` from `users` / `transactions` / `ledger_entries` / `transfer_intents` via the shared connection | 22 |
+
+Its fixtures also **insert** rows and key them on ids in the **9001–9807**
+range and on fixed fixture emails. On a production-derived copy those
+predicates are not guaranteed to be fictional: if a real customer holds `id =
+9402`, `DELETE FROM users WHERE id = ${USER_ID}` removes that customer's row —
+and the §3 reconciliation you already ran no longer describes anything.
+
+Two claims worth *not* making, having checked them: the two unconditional
+deletes in the suite are both harmless. `bootstrap-auth-deadlock.test.ts` runs
+`DELETE FROM users` against its own scratch database, and the
+`DELETE FROM users WHERE 1=1` in `repository-condition-injection.test.ts` is a
+**string payload** in an injection test that asserts the payload does *not*
+execute. The hazard is the 22 targeted deletes plus the DDL, not a table wipe.
+
+So make a second copy and use that:
 
 ```bash
-DATABASE_URL="$RESTORE_TARGET_URL" pnpm test
+# A separate database, restored from the SAME dump — not a clone of the
+# verified restore, so §2/§3 evidence is never in the path.
+export TEST_COPY_DB="manna_restore_testcopy_$(date -u +%Y%m%d%H%M)"
+createdb --maintenance-db "$RESTORE_TARGET_MAINTENANCE_URL" "$TEST_COPY_DB"
+pg_restore --no-owner --no-privileges --clean --if-exists \
+  --dbname "${RESTORE_TARGET_BASE_URL}/${TEST_COPY_DB}" "$DUMP_FILE"
+export TEST_COPY_URL="${RESTORE_TARGET_BASE_URL}/${TEST_COPY_DB}"
 ```
 
-That confirms the application's SQL matches the restored schema.
+**Sanitize it before running anything.** It holds real customer data, and the
+suite will log, mutate and delete rows in it. At minimum neutralise the
+directly identifying columns and the Plaid tokens, and do it *in* the copy:
+
+```bash
+psql -v ON_ERROR_STOP=1 "$TEST_COPY_URL" <<'SQL'
+BEGIN;
+UPDATE users SET
+  email         = 'sanitized+' || id || '@invalid.test',
+  name          = 'Sanitized User ' || id,
+  username      = 'sanitized_' || id,
+  password_hash = 'x';
+UPDATE bank_accounts SET plaid_access_token_enc = NULL;
+-- Balances and ledger rows are deliberately NOT altered: the point of this
+-- copy is that the application's SQL meets production-shaped money data.
+COMMIT;
+SQL
+
+DATABASE_URL="$TEST_COPY_URL" pnpm test
+```
+
+That confirms the application's SQL matches the restored schema, against
+production-shaped data, without touching the preserved restore.
+
+**Destroy the test copy as soon as the run finishes** — it is sanitized, not
+anonymous, and ids and amounts still correlate:
+
+```bash
+dropdb --maintenance-db "$RESTORE_TARGET_MAINTENANCE_URL" "$TEST_COPY_DB"
+```
+
+**If a second copy cannot be provisioned, skip this step and record it as not
+run.** Running it against the preserved restore to "get the check done" trades
+the only evidence you have for a weaker signal, and the schema check in §2
+already answers most of what this step adds.
 
 **It does not enumerate grants, and an earlier version of this runbook claimed
 it did.** `pg_restore --no-owner` makes the *restoring* role the owner of every

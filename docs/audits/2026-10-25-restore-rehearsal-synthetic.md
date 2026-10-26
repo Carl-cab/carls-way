@@ -256,3 +256,50 @@ The fault-injection step is the `ALTER` above; it is the negative case for the
 schema check and nothing else. The synthetic source is disposable and was
 dropped. **Phase 0 remains NOT RUN** — this exercises the procedure, not a
 production backup.
+
+---
+
+## Addendum, 2026-10-26 — the procedure this audit exercised has since been corrected
+
+This report is immutable, so the original record stands. But a reader must not
+take its step 4 as the current procedure.
+
+**What this run did.** Step 4 was
+`DATABASE_URL="$PG/rehearsal_tgt?sslmode=disable" pnpm test` — the application
+suite pointed at the restore target itself. In *this* rehearsal that was safe:
+the target held **synthetic** rows created by
+`scripts/restore-rehearsal-synthetic.sql`, it was disposable, and it was
+dropped at teardown. No evidence was at risk because there was no production
+data and nothing downstream depended on the target surviving.
+
+**Why the runbook no longer says that.** Against a restore of a *real* backup
+the same instruction is unsafe, and the owner's finalization directive requires
+the preserved restore to stay read-only for verification and reconciliation.
+Measured on this tree, the suite is not read-only:
+
+| Behaviour | Files |
+|---|---|
+| DDL against `DATABASE_URL` (mostly `initializeSchema()`) | 23 |
+| `DELETE` from `users` / `transactions` / `ledger_entries` / `transfer_intents` via the shared connection | 22 |
+
+Its fixtures key on user ids **9001–9807** and fixed emails, which on a
+production-derived copy are not guaranteed to be fictional — a real customer
+holding one of those ids would be deleted, and the reconciliation already run
+would no longer describe anything.
+
+**Two claims checked and NOT made.** The suite's two unconditional deletes are
+harmless: `bootstrap-auth-deadlock.test.ts` runs `DELETE FROM users` against
+its own scratch database, and the `DELETE FROM users WHERE 1=1` in
+`repository-condition-injection.test.ts` is a string payload in an injection
+test asserting the payload does *not* execute. The hazard is the 22 targeted
+deletes plus the DDL — not a table wipe. Recording the narrower, true version.
+
+**Current procedure.** `docs/runbooks/backup-restore-rehearsal.md` §4 now
+restores a **second disposable copy from the same dump**, sanitizes the
+directly identifying columns and the Plaid tokens in that copy, runs the suite
+there, and drops it — leaving `$RESTORE_TARGET_URL` untouched. If a second copy
+cannot be provisioned, the step is skipped and recorded as not run rather than
+aimed at the preserved restore.
+
+**Phase 0 remains NOT RUN.** Nothing in this addendum changes that: no
+owner-authorized production-backup restore has been performed or verified.

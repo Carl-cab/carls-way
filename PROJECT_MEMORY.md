@@ -1259,3 +1259,86 @@ restore of an old backup could be.
 **Rollback requirement.** None.
 
 **Next recommended action.** Owner review and merge of #70.
+
+---
+
+## 2026-10-26 — the restore runbook told the operator to destroy its own evidence (PR #70)
+
+**Found by** reviewing the actual runbook against the owner's finalization
+directive, which requires the preserved restore to stay read-only for
+verification and financial reconciliation and any database-modifying
+application tests to run on a separate disposable, sanitized copy.
+
+**The defect.** §4 read
+`DATABASE_URL="$RESTORE_TARGET_URL" pnpm test` — the application suite pointed
+at the **same single restore** that §2 (schema check) and §3 (financial
+reconciliation) had just examined read-only. Those two steps are read-only
+*precisely* so the evidence survives them; §4 then mutated it. The runbook even
+noted in passing that "32 of the 55 test files perform DDL", but only while
+arguing about grants, and never drew the conclusion that this makes §4 unsafe.
+
+**Measured on this tree rather than assumed:**
+
+| Behaviour | Files |
+|---|---|
+| DDL against `DATABASE_URL` (mostly `initializeSchema()`) | 23 |
+| `DELETE` from `users` / `transactions` / `ledger_entries` / `transfer_intents` via the shared connection | 22 |
+
+Fixtures key on user ids **9001–9807** and fixed emails. On a
+production-derived copy those predicates are not guaranteed fictional: a real
+customer holding `id = 9402` is deleted by
+`DELETE FROM users WHERE id = ${USER_ID}`, after which the §3 reconciliation
+describes nothing.
+
+**Two alarming claims I checked and did NOT make.** The suite contains two
+unconditional deletes, and both are harmless:
+`bootstrap-auth-deadlock.test.ts` runs `DELETE FROM users` against its own
+scratch database, and the `DELETE FROM users WHERE 1=1` in
+`repository-condition-injection.test.ts` is a **string payload** in an
+injection test that asserts the payload does *not* execute. "The suite would
+wipe the users table" would have been false. The true hazard is narrower — 22
+targeted deletes plus DDL — and the narrower version is what is recorded.
+
+**The fix.** §4 now provisions a **second disposable database restored from the
+same dump** (not a clone of the verified restore, so the evidence is never in
+the path), sanitizes the directly identifying columns and the Plaid tokens *in
+that copy*, runs the suite there, and drops it. Balances and ledger rows are
+deliberately left intact, because the point of the step is that the
+application's SQL meets production-*shaped* money data. If a second copy cannot
+be provisioned the step is **skipped and recorded as not run**, rather than
+aimed at the preserved restore to get a check ticked.
+
+**Step order made a requirement.** §2 and §3 run first, on the preserved
+restore. The Phase 4 privilege probe that follows creates a role and applies
+grants — a catalogue change, not a data change, so it cannot invalidate §2 or
+§3, but it is still a mutation and belongs after them. Previously this ordering
+was true by accident of section numbering.
+
+**The synthetic audit was corrected by addendum, not edited.**
+`docs/audits/2026-10-25-restore-rehearsal-synthetic.md` records the old step 4
+as actually executed. In that run it was safe — synthetic rows, disposable
+target, dropped at teardown — and the addendum says so while pointing at the
+current procedure, because audits are immutable.
+
+**Financial or security behaviour affected.** No application code. The change
+prevents an operator following a documented procedure from destroying the only
+copy of restored financial data they had just reconciled.
+
+**Tests run and results.** Documentation only; full suite **57 files / 832
+tests passing** on this branch's base before rebasing onto the post-#67/#71
+master.
+
+**Commit / PR.** PR **#70**, branch `ops/phase0-synthetic-rehearsal`; SHA in a
+later entry.
+
+**Migration impact.** None.
+
+**Unresolved findings.** **Phase 0 remains NOT RUN** and the readiness row
+still says so. No owner-authorized production-backup restore has been performed
+or verified, and nothing here should be read as moving that.
+
+**Rollback requirement.** None — reverting restores a procedure that tells the
+operator to overwrite their own evidence.
+
+**Next recommended action.** Owner review and merge of #70, then authorization
+of the real Phase 0 rehearsal with a designated operator.
