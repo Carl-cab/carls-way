@@ -1224,3 +1224,67 @@ genuinely cannot name, and nothing further is promised for it.
 **Migration impact.** None. **Rollback requirement.** None.
 
 **Next recommended action.** Owner review and merge of #68.
+
+---
+
+## 2026-10-26 — a latent time-dependent flake in the recovery suite (found via PR #68)
+
+**How it surfaced.** CI failed on `c703ee0`, a commit that touched only
+`PROJECT_MEMORY.md`. `install · typecheck · lint · test · build` reported **1
+failed | 847 passed**:
+`transfer-recovery-c1.test.ts > findStuckTransfers > flags a posted intent
+stuck past 24h for manual review, not a fresh one`, with
+`duplicate key value violates unique constraint
+idx_transfer_intents_provider_reference`,
+`Key (provider_reference_id)=(trf_c13_posted_1792977822725)`.
+
+**The defect, which is on `master` and not in PR #68.** The test helper built
+`provider_reference_id` as `trf_c13_${status}_${Date.now()}`. That column is
+covered by a unique index, and the failing case inserts **two `posted`
+intents back to back** — one aged 25 hours, one aged 1 hour. Two calls with
+the same status inside one millisecond therefore produce the *same* reference
+and the second insert raises 23505. Nothing about the assertion is wrong; the
+fixture collides with itself, and whether it does depends on how fast the
+runner is.
+
+**Measured, not inferred.** Against a real database, the two inserts the test
+makes:
+
+| Reference scheme | First insert | Second insert |
+|---|---|---|
+| `trf_c13_posted_<ms>` (old) | ok | **rejected, 23505** |
+| `trf_c13_posted_<ms>_<pid>_<n>` (new) | ok | ok |
+
+**Fix.** A per-call counter plus a run tag (`Date.now()` and the pid). The
+counter cannot collide within a run; the run tag keeps references distinct
+across runs in a reused database, which the suite's own guidance warns about.
+
+**Financial or security behaviour affected.** None — test fixture only. But
+worth stating why it mattered: this suite exists because the stuck-transfer
+query, the partial unique index and the `ON CONFLICT` sweep are database
+behaviour a mock cannot verify. A fixture that fails on its own id generation
+produces a red build that says nothing about the invariant under test, and a
+red build nobody can attribute is how a suite stops being believed.
+
+**Tests run and results.** Full suite **58 files / 848 tests passing**,
+typecheck clean, lint 0 errors / 28 warnings. The collision reproduction above
+was run separately against a disposable database.
+
+**Commit / PR.** PR **#68**, branch `ci/pin-actions-to-shas`; SHA named in a
+later entry, and this time the follow-up is written in the same session — see
+the attribution-correction entry immediately above for why that matters.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The fix is carried on #68 because #68's CI is what
+went red and a separate PR would leave it red until that PR merged. It is
+**not** related to action pinning, and it belongs to `master`: every open
+branch shares the defect until one of them merges. Also unexamined: other
+fixtures in the suite that build identifiers from `Date.now()` may have the
+same shape. Not audited here, and not claimed to be clean.
+
+**Rollback requirement.** None — reverting restores a flaky fixture.
+
+**Next recommended action.** Owner review and merge of #68. Afterwards, a sweep
+for other `Date.now()`-derived identifiers in fixtures would be cheap and is
+worth doing once.
