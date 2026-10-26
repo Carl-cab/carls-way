@@ -1,0 +1,305 @@
+# Audit — Phase 0 restore rehearsal, executed against synthetic data
+
+**Date:** 2026-10-25
+**Base:** `master` at `6927ebd`
+**Scope:** decision 0005 Phase 0; `docs/runbooks/backup-restore-rehearsal.md`
+
+## What this is, and what it is not
+
+Every command in the Phase 0 runbook had been written without ever being run,
+because running it needs a production backup and an owner-provisioned target.
+This audit ran the whole procedure against a **synthetic** source database, so
+the commands and — more importantly — the *verification steps* could be proven
+to work.
+
+**This is not a production rehearsal.** No customer data, no production
+credential, no production host. Phase 0 therefore remains **NOT RUN**. What is
+now established is narrower and still worth having: the runbook's procedure
+executes, and each of its checks detects the failure it claims to detect.
+
+A verification step that cannot fail is decoration, so the negative cases below
+are the substance of this audit rather than an appendix to it.
+
+## Environment
+
+Local PostgreSQL 16.15, two throwaway databases per run, destroyed afterwards.
+Source built from `lib/__tests__/helpers/test-schema.sql` plus
+`scripts/restore-rehearsal-synthetic.sql`.
+
+## Commands, in the order run
+
+Recorded in full because an earlier version of this audit was **not
+reproducible from its own inputs**: the source preparation included an ad-hoc
+`INSERT` typed at the command line, present in neither the committed fixture
+nor this document, and without it the reconciliation reports 6/7 rather than
+7/7. The step is now inside
+`scripts/restore-rehearsal-synthetic.sql`, and what follows is the complete
+sequence. `$PG` is a local superuser URL for a throwaway PostgreSQL instance;
+no credential here reaches any real system.
+
+```bash
+# 1. Source preparation — schema fixture, then the synthetic dataset.
+psql "$PG/postgres" -c "CREATE DATABASE rehearsal_src"
+psql "$PG/rehearsal_src" -f lib/__tests__/helpers/test-schema.sql
+psql "$PG/rehearsal_src" -f scripts/restore-rehearsal-synthetic.sql
+psql "$PG/rehearsal_src" -tAc "SELECT count(*) FROM ledger_entries"      # 6
+
+# 2. Dump and restore into a separate target, timed.
+psql "$PG/postgres" -c "CREATE DATABASE rehearsal_tgt"
+pg_dump --format=custom --file=production-backup.dump "$PG/rehearsal_src"
+time pg_restore --no-owner --no-privileges \
+     --dbname "$PG/rehearsal_tgt" production-backup.dump   # exit 0, 0 stderr, 0.20s
+
+# 3. Schema gate (the corrected whitelist form).
+psql -v ON_ERROR_STOP=1 -t -A -F'|' "$PG/rehearsal_tgt" \
+     -f scripts/verify-migrate.sql > verify.out
+awk -F'|' 'NF>=2 && $2 !~ /^OK/ {n++} END {print n+0}' verify.out       # 0
+
+# 4. Counts and invariants.
+psql "$PG/rehearsal_tgt" -tAc "SELECT count(*) FROM users"              # 7
+psql "$PG/rehearsal_tgt" -f scripts/reconciliation-check.sql            # 7/7 PASS
+
+# 5. Fault injection — each in its own fresh restore of the same dump.
+psql "$PG/neg1" -c "ALTER TABLE transactions DROP COLUMN correlation_id"
+#   -> verify-migrate: transactions.correlation_id | MISSING   (gate reports 1)
+psql "$PG/neg2" -c "ALTER TABLE transactions ALTER COLUMN amount TYPE REAL"
+#   -> verify-migrate: transactions.amount | WRONG TYPE — REAL (gate reports 1)
+psql "$PG/neg3" -c "UPDATE ledger_entries SET credit = 20.00
+                    WHERE transaction_id = 99101 AND entry_type='payment_received'"
+#   -> reconciliation: 3 of 7 FAIL
+psql -v ON_ERROR_STOP=1 -t -A -F'|' "$PG/does_not_exist" -f scripts/verify-migrate.sql
+#   -> nonzero exit, gate reports DID NOT RUN rather than 0
+
+# 6. Privilege probe (NOLOGIN role, no grants, then the full set).
+psql "$PG/rehearsal_tgt" -c "CREATE ROLE manna_app_probe NOLOGIN"
+psql "$PG/rehearsal_tgt" -c "GRANT CONNECT ON DATABASE rehearsal_tgt TO manna_app_probe;
+                             GRANT USAGE ON SCHEMA public TO manna_app_probe"
+#   -> 114 unreachable rows (20 tables x 4 privileges + 17 sequences x 2)
+psql "$PG/rehearsal_tgt" -c "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO manna_app_probe;
+                             GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO manna_app_probe"
+#   -> 0 unreachable rows
+
+# 7. Application suite against the restore (destructive to its data — last).
+DATABASE_URL="$PG/rehearsal_tgt?sslmode=disable" pnpm test               # 57 files / 832 tests
+
+# 8. Teardown.
+psql "$PG/postgres" -c "DROP DATABASE IF EXISTS rehearsal_src"   # and tgt, neg1-3
+psql "$PG/postgres" -c "DROP ROLE IF EXISTS manna_app_probe"
+psql "$PG/postgres" -tAc "SELECT count(*) FROM pg_database WHERE datname LIKE 'rehearsal%'"  # 0
+rm -f production-backup.dump
+```
+
+## Positive case
+
+| Step | Command | Result |
+|---|---|---|
+| 1 | `pg_dump --format=custom` then `pg_restore --no-owner --no-privileges` | exit **0**, **0** stderr lines, **0.20 s** |
+| 2 | schema gate, whitelist form (above) | **0** rows failing to begin with `OK` |
+| 3a | row counts, source vs target | identical: `users=7 tx=1 ledger=6 audit=1` |
+| 3b | `psql -f scripts/reconciliation-check.sql` | **7/7 `PASS`** |
+| 4 | `DATABASE_URL=<target> pnpm test` | **57 files / 832 tests passing** on this branch |
+| 5 | drop both databases and the probe role | 0 rehearsal databases, 0 probe roles remain |
+
+The dataset is deliberately the smallest one that satisfies the invariants
+**non-trivially** — an empty database passes all seven checks vacuously. It has
+one completed internal payment (99001 → 99002, 25 CAD) with both ledger legs
+and opening balances, so each wallet column equals that user's own ledger
+entries, per-currency debits equal credits, and the per-payment checks have a
+payment to examine.
+
+**Restore duration is 0.20 s on a trivial dataset and is not a usable input to
+a production RTO.** It measures the restore step alone, at a data volume
+nothing like production's. Recorded for method, not for capacity planning.
+
+## Negative cases — do the checks actually catch a bad restore?
+
+| Injected fault | Step that should catch it | Result |
+|---|---|---|
+| `ALTER TABLE transactions DROP COLUMN correlation_id` | 2 | **caught** — `transactions.correlation_id │ MISSING` |
+| `ALTER TABLE transactions ALTER COLUMN amount TYPE REAL` | 2 | **caught** — `transactions.amount │ WRONG TYPE — REAL`. Missed by the first corrected gate, which counted `MISSING│ABSENT` only |
+| point the gate at a nonexistent database | 2 | **caught** — reports `DID NOT RUN`, not `0` |
+| receiver credited 20.00 against a 25.00 payment (the "unequal legs" case the runbook describes) | 3b | **caught** — 3 of 7 checks `FAIL`: `internal_ledger_currency_debits_equal_credits`, `internal_payment_amounts_match_ledger`, `user_wallets_exactly_match_ledger` |
+| privilege probe with **no** grants applied | 4 (grants) | **114** unreachable rows (20 tables × 4 privileges + 17 sequences × 2) |
+| privilege probe with the full application grant set | 4 (grants) | **0** unreachable rows |
+
+The last two matter together: a probe that returns 0 is only meaningful if it
+can return non-zero, and it does.
+
+### A note on the test count
+
+Step 4 reports **57 files / 832 tests**, which is the suite on *this* branch.
+A draft of this audit said 58 / 836 — a count measured on the companion
+`ci/pin-actions-to-shas` branch, which carries one extra test file. Recording it
+here made a second number in this document unreproducible from this branch,
+the same defect as the missing source-preparation step. Both are corrected; the
+rule applied is that a number belongs to the tree it was measured on.
+
+## Findings
+
+### 1. The runbook told operators to look for the wrong word — corrected here
+
+Step 2's pass criterion read *"Every row must report present. An `ABSENT` row
+means the backup predates a migration"*, and the record table said
+*"`verify-migrate.sql` reported no ABSENT objects"*.
+
+`scripts/verify-migrate.sql` emits **two** words. Sections 1-4 (tables,
+columns, upsert indexes) report `MISSING`; only section 5 (money column types)
+reports `ABSENT`. So a dropped table, column or index is invisible to an
+operator checking for `ABSENT`.
+
+This is not hypothetical: the first negative case above was initially scored as
+*"the check failed to detect a dropped column"* because the measurement grepped
+for `absent` and found none. The script was right and the measurement was
+wrong — and an operator following the runbook literally would make the
+mirror-image error during an incident, concluding a damaged restore was clean.
+
+Corrected to require every row to read `OK`, with the two failure words
+tabulated and a counting command that catches both.
+
+### 2. `users.balance` diverges across the three schema sources
+
+| Source | `users.balance` |
+|---|---|
+| `scripts/verify-migrate.sql:106` | **requires** present |
+| `lib/db.ts:82` (`initializeSchema()`) | **creates** `NUMERIC(14,2) DEFAULT 100.00` |
+| `lib/__tests__/helpers/test-schema.sql` | **absent** |
+
+`lib/__tests__/schema-source-parity.test.ts` compares the migrate route against
+`initializeSchema()` only, so nothing flags the fixture direction.
+
+**Deliberately not "fixed".** The omission may be protective: `CLAUDE.md`
+forbids new code touching the legacy column, and a fixture without it makes any
+such read fail loudly in CI with `42703`. Adding it would remove that signal.
+Recorded as a judgement call for the owner, not changed. The rehearsal adds the
+column to its own source database only, because a restore rehearsal should
+exercise a production-shaped schema.
+
+### 3. Step 4 will fail against a real restore that carries audit history
+
+`audit_logs.user_id INTEGER REFERENCES users(id)` has no `ON DELETE` clause, so
+it restricts. **23 test files run `DELETE FROM users`** with hard-coded ids in
+the 9001-9807 band.
+
+Observed: one synthetic `audit_logs` row referencing user `9501` made
+`stripe-settlement.test.ts` fail with
+`update or delete on table "users" violates foreign key constraint
+"audit_logs_user_id_fkey"` — because that file's `USER_ID` is also `9501`. In
+this audit that was an id collision of the rehearsal's own making, fixed by
+moving the synthetic ids to `99001+`.
+
+**The general hazard is real and is not fixed.** Production user ids increment
+from 1, so once the table passes roughly 9000 users the test suite's fixed ids
+overlap live ones. A restore whose `audit_logs` reference any user in that band
+will fail step 4 with an FK error that reads like *the application is
+incompatible with the backup*, when it is the test harness assuming it may
+delete users it did not create. An operator should expect this and not
+misdiagnose it. No code change proposed here — the options (renumber test ids,
+or `ON DELETE` behaviour on an audit table) both deserve their own review, and
+changing an audit-table FK is not a thing to slip into a rehearsal.
+
+### 4. The test fixture's own seeds do not reconcile — correctly
+
+`splitpayera` and `splitpayerb` are seeded at `balance_cad = 500.00` with no
+ledger entries, so `user_wallets_exactly_match_ledger` reports 2 discrepancies
+against an unmodified fixture-built database. That is right for a
+split-payment test, which has no interest in the ledger, and wrong for anything
+used as a reconciliation source.
+
+Worth knowing because it was found *before* any fault was injected: the check
+caught an inconsistency nobody planted, which is the strongest evidence in this
+audit that step 3b works. It also vindicates the runbook's existing
+instruction — *"If any row reports `FAIL`, confirm whether the same discrepancy
+exists in production before concluding the restore caused it"*.
+
+## Status after this audit
+
+| Item | Status |
+|---|---|
+| Runbook procedure executes as written | **VERIFIED** (synthetic) |
+| Each verification step detects its failure mode | **VERIFIED** (synthetic, negative cases above) |
+| Phase 0 production backup/restore rehearsal | **NOT RUN** — requires owner action |
+| Recovery point / backup availability | **NOT RUN** — no production backup inspected |
+| Production restore duration | **NOT RUN** — 0.20 s here is not transferable |
+| Table ownership and privileges in production | **NOT RUN** — probe exercised on synthetic target only |
+
+---
+
+## Addendum, 2026-10-26 — the gate's exit status
+
+Review of this audit's own command record found that `awk` printed the non-`OK`
+row count and then exited `0` regardless of it. The `||` guard beside it covers
+only `psql` failing, so a wrapper keyed on exit status would have accepted a
+restore reporting `MISSING`, `ABSENT` or `WRONG TYPE`. An operator reading the
+printed number was unaffected, and nothing automated consumes it today — this
+is hardening, not a failure that occurred.
+
+`exit(n != 0)` added. Re-measured on three databases, count and status both:
+
+| Target | Printed | Exit |
+|---|---|---|
+| Clean synthetic restore | `0` | `0` |
+| `transactions.amount` altered to `REAL` | `1` | `1` |
+| Nonexistent database | `DID NOT RUN` | `1` |
+
+Commands, in run order:
+
+```bash
+createdb rehearse_$$
+psql -q -v ON_ERROR_STOP=1 -d rehearse_$$ -f lib/__tests__/helpers/test-schema.sql
+psql -q -v ON_ERROR_STOP=1 -d rehearse_$$ -f scripts/restore-rehearsal-synthetic.sql
+# gate as printed in the runbook, run against each target in turn
+psql -q -d rehearse_$$ -c "ALTER TABLE transactions ALTER COLUMN amount TYPE REAL;"
+dropdb rehearse_$$
+```
+
+The fault-injection step is the `ALTER` above; it is the negative case for the
+schema check and nothing else. The synthetic source is disposable and was
+dropped. **Phase 0 remains NOT RUN** — this exercises the procedure, not a
+production backup.
+
+---
+
+## Addendum, 2026-10-26 — the procedure this audit exercised has since been corrected
+
+This report is immutable, so the original record stands. But a reader must not
+take its step 4 as the current procedure.
+
+**What this run did.** Step 4 was
+`DATABASE_URL="$PG/rehearsal_tgt?sslmode=disable" pnpm test` — the application
+suite pointed at the restore target itself. In *this* rehearsal that was safe:
+the target held **synthetic** rows created by
+`scripts/restore-rehearsal-synthetic.sql`, it was disposable, and it was
+dropped at teardown. No evidence was at risk because there was no production
+data and nothing downstream depended on the target surviving.
+
+**Why the runbook no longer says that.** Against a restore of a *real* backup
+the same instruction is unsafe, and the owner's finalization directive requires
+the preserved restore to stay read-only for verification and reconciliation.
+Measured on this tree, the suite is not read-only:
+
+| Behaviour | Files |
+|---|---|
+| DDL against `DATABASE_URL` (mostly `initializeSchema()`) | 23 |
+| `DELETE` from `users` / `transactions` / `ledger_entries` / `transfer_intents` via the shared connection | 22 |
+
+Its fixtures key on user ids **9001–9807** and fixed emails, which on a
+production-derived copy are not guaranteed to be fictional — a real customer
+holding one of those ids would be deleted, and the reconciliation already run
+would no longer describe anything.
+
+**Two claims checked and NOT made.** The suite's two unconditional deletes are
+harmless: `bootstrap-auth-deadlock.test.ts` runs `DELETE FROM users` against
+its own scratch database, and the `DELETE FROM users WHERE 1=1` in
+`repository-condition-injection.test.ts` is a string payload in an injection
+test asserting the payload does *not* execute. The hazard is the 22 targeted
+deletes plus the DDL — not a table wipe. Recording the narrower, true version.
+
+**Current procedure.** `docs/runbooks/backup-restore-rehearsal.md` §4 now
+restores a **second disposable copy from the same dump**, sanitizes the
+directly identifying columns and the Plaid tokens in that copy, runs the suite
+there, and drops it — leaving `$RESTORE_TARGET_URL` untouched. If a second copy
+cannot be provisioned, the step is skipped and recorded as not run rather than
+aimed at the preserved restore.
+
+**Phase 0 remains NOT RUN.** Nothing in this addendum changes that: no
+owner-authorized production-backup restore has been performed or verified.
