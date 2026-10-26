@@ -2938,3 +2938,59 @@ decision in 0007, with the note that establishing the Vercel concurrency
 ceiling is a prerequisite for ever calling the fail-open risk *bounded*.
 
 **Commit / PR.** PR **#72**, branch `docs/sprint1-status`.
+
+---
+
+## 2026-10-26 — the fix for an overstatement contained the same overstatement
+
+Two findings on the correction commit `0f307b2`, both valid, and the first is
+embarrassing in a useful way.
+
+**I contradicted myself inside one commit.** `GO_LIVE_RUNBOOK.md` §4.1 was
+corrected to say the idempotency key prevents a duplicate submission *only
+while the provider retains the record*. In the same commit,
+`docs/decisions/0007` said the worst case is "not 'money moves twice', which
+the per-intent idempotency key **does prevent**" — flatly, no qualifier. So
+the commit whose entire purpose was withdrawing an unsupportable guarantee
+restated a different unsupportable guarantee one file over. Qualified now in
+both, and in `CLAUDE.md`, which carried the unconditional form too.
+
+**And the correction was wrong about where a retry can happen.** The runbook
+said "`submitting` is deliberately retryable **here**", inside the §4.1 box
+about the execute endpoint. Verified against the code rather than taken on the
+reviewer's word: `app/api/transfers/[id]/execute/route.ts:101` is
+`if (row.status !== 'ready')` → 409 `wrong_status`, so a row already in
+`submitting` can never be re-submitted through that endpoint. The `submitting`
+writes in that route are its *own* claim inside one invocation, not a retry of
+a pre-existing row. `PlaidTransferProvider.executeTransfer()` does accept
+`submitting` to resume (line 279), but the route is its only caller, so **that
+branch is unreachable over HTTP**. Recovery is
+`POST /api/admin/transfers/[id]/reconcile`, and `reconcileTransfer()` requires
+`submitting`.
+
+That distinction is worth more than the wording. "A stranded intent is
+retryable" and "a stranded intent is recoverable by an admin through
+reconciliation" describe different security postures, and the first would tell
+an operator that a client can drive recovery. It cannot.
+
+**The pattern across both review rounds.** Three claims in this PR overstated a
+guarantee: the instance-count bound, the unconditional single-debit key, and
+client-reachable retry. Each was a true statement with its conditions stripped
+off, and each read as *more* reassuring than the code supports — which is the
+direction that matters in a go/no-go document. Writing the qualifier down is
+cheap; discovering its absence while deciding whether to enable a rail is not.
+`CLAUDE.md` now carries the bounded form, so the next reader of the
+authoritative reference does not re-derive the unqualified one.
+
+**Financial or security behaviour affected.** None in code. Three
+documentation overstatements of financial-safety properties removed.
+
+**Tests run and their results.** Documentation only; no source file changed.
+All four required checks were green on `0f307b2` before these edits and re-run
+on the new head. `readiness.json` parses and the report renders, exit 0.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Unchanged: the owner decision in 0007.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`.

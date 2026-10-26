@@ -405,10 +405,23 @@ routes do not change.
 **Live execution safety.** Both live providers persist a stable idempotency
 key derived from the intent id *before* calling the provider, and claim the
 intent inside a transaction with `SELECT ... FOR UPDATE`. The lock serialises
-the claim; it is the idempotency key, not the lock, that guarantees a single
-debit — a caller that finds `status='submitting'` with no reference recorded
-deliberately retries, because that state is indistinguishable from a crash
-between the provider call and the local write.
+the claim; it is the idempotency key, not the lock, that prevents a duplicate
+debit — **for as long as the provider retains that key.** Retention is bounded
+and provider-defined, so a retry arriving after expiry is not covered by the
+key and needs reconciliation. This paragraph said "guarantees a single debit"
+unconditionally until 2026-10-26; the guarantee is real and it is
+time-bounded, and the unqualified form was being quoted elsewhere to justify
+unrelated decisions. The window is deliberately not stated here as a number —
+confirm it against Plaid's and Stripe's current documentation.
+
+`PlaidTransferProvider.executeTransfer()` tolerates `status='submitting'` to
+resume, on the reasoning that a `submitting` row with no reference recorded is
+indistinguishable from a crash between the provider call and the local write.
+**That branch is not reachable over HTTP**, and an earlier version of this note
+implied it was: the provider's only caller is
+`app/api/transfers/[id]/execute/route.ts`, which refuses any status other than
+`ready` with a 409 `wrong_status`. So no client can re-submit a stranded
+intent; recovery is admin-only, below.
 
 Two things make `submitting` recoverable rather than terminal. The transition
 rules in `lib/settlement/settlement-rules.ts` allow `submitting → settled |

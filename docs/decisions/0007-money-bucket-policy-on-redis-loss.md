@@ -98,9 +98,18 @@ could be, the less acceptable it is to leave the counter in Redis at all.
 
 Stated precisely, the worst case under fail-open is "a determined user sends
 more often than the nominal hourly limit for the duration of the outage, still
-bounded by `velocity_checks`" — not "money moves twice", which the per-intent
-idempotency key does prevent, and not "limits vanish", which per-instance
-counting does not cause.
+bounded by `velocity_checks`". It is **not** "limits vanish", which
+per-instance counting does not cause.
+
+Nor is it "money moves twice" — **while the provider's idempotency record is
+still live.** That qualifier matters and an earlier draft of this paragraph
+omitted it, saying the key "does prevent" it, flatly. That contradicted
+`GO_LIVE_RUNBOOK.md` §4.1 *in the same commit*, which correctly notes the
+retention is bounded. A retry arriving after the provider has expired its
+record is not covered by the key and needs reconciliation. The guarantee is
+real and it is time-bounded, and an unconditional version of it should not be
+used to prop up this decision — which is the same failure as the instance-count
+claim above, one paragraph later.
 
 What should change instead:
 

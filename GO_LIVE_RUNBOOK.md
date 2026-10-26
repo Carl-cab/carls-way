@@ -123,16 +123,25 @@ evidence carries to the current anchor rather than needing to be re-read.)
       still holds that idempotency record.** This box previously said the key
       "guarantees a single debit" without qualification, which overstates it:
       provider idempotency records are retained for a bounded period, not
-      forever, and `submitting` is deliberately retryable here (a caller that
-      finds `submitting` with no reference recorded retries, because that state
-      is indistinguishable from a crash between the provider call and the local
-      write). So a retry that lands *after* the provider has expired the record
-      is not protected by it and must go through reconciliation
-      (`POST /api/admin/transfers/[id]/reconcile`) rather than through another
-      execute. The exact retention window is the provider's, is not verified
-      here, and is not a number this document should assert — confirm it
-      against Plaid's and Stripe's current documentation before relying on any
-      specific duration.
+      forever, so a retry arriving after expiry is not protected by the key.
+      The retention window is the provider's, is **not verified here**, and is
+      deliberately not asserted as a number — confirm it against Plaid's and
+      Stripe's current documentation before relying on any duration.
+- [x] **Recovery for a stranded `submitting` intent is admin-only, and does
+      NOT go through this endpoint.** A correction: this box briefly said
+      "`submitting` is deliberately retryable here", which is wrong about
+      *here*. `app/api/transfers/[id]/execute/route.ts` refuses any status
+      other than `ready` (`if (row.status !== 'ready')` → 409 `wrong_status`),
+      so a row already sitting in `submitting` can never be re-submitted
+      through it. The `submitting` writes inside that route are its own claim
+      within a single invocation, not a retry of a pre-existing row.
+      `PlaidTransferProvider.executeTransfer()` *does* tolerate
+      `status === 'submitting'` to resume, but the route is its only caller, so
+      that branch is unreachable over HTTP. Recovery is
+      `POST /api/admin/transfers/[id]/reconcile`, whose `reconcileTransfer()`
+      requires `submitting` and replays the provider authorization — returning
+      the intent to `ready` where no authorization was ever persisted, which is
+      what makes the `ready`-only rule a safety property rather than a trap.
 - [x] Rate limited per user id (`money:transfer-execute`) — the claim stops one
       intent being submitted twice but not how many intents one account pushes
       at a rail.
