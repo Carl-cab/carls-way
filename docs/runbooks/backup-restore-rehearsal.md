@@ -128,7 +128,17 @@ Four details, each of which was wrong in a draft of this command:
   Without them a `psql` that fails before emitting any row feeds empty input to
   the counter, which prints `0` — a failed schema check reported as clean.
 - The pattern is `!~ /^OK/`, a **whitelist**. Anything else counts, including a
-  wording nobody has thought of yet.
+  wording nobody has thought of yet. This makes the second field of every row
+  in `scripts/verify-migrate.sql` a **status**, and the file now holds to that
+  everywhere: the two duplicate-detection queries in its section 4 used to put
+  an id or a currency code there. Nothing could pass accidentally — a user id
+  is numeric and the codes are `CAD` and `USD` — but passing depended on the
+  values rather than on the shape, so both now emit `DUPLICATE`. Measured: a
+  database with two `CAD`→`USD` rows emits
+  `fx_rates duplicate pair|DUPLICATE|CAD|USD|2` and the gate fails. Note that
+  a database built from the schema sources already carries the unique
+  constraint, so reaching that state meant dropping it first, on a disposable
+  database — the query exists for databases from before the constraint.
 - **`exit(n != 0)`** matters for anything that is not a human reading the
   number. The `||` guard above it covers only `psql` failing; `awk` printing
   `3` still exited `0`, so a wrapper keyed on exit status would accept a

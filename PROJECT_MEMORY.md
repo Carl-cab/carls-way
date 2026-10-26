@@ -1143,3 +1143,46 @@ performed restore.
 
 **Next recommended action.** Owner review and merge of #70, then authorization
 of the production rehearsal.
+
+---
+
+## 2026-10-26 — a status field for the duplicate diagnostics (PR #70)
+
+**Purpose and scope.** The rehearsal gate gives the second field of every
+`scripts/verify-migrate.sql` row its whole meaning: it counts any row whose
+`$2` does not begin with `OK`. Section 4's two duplicate-detection queries put
+an id or a currency code there instead of a status.
+
+**Not a live hole, stated plainly.** A user id is numeric and the currency
+codes are `CAD` and `USD`, so neither can begin with `OK` and duplicates were
+counted correctly. What was true is that passing depended on the *values* in
+that column rather than on the file's shape — a property not worth relying on
+in a financial verification step. Both queries now emit `DUPLICATE`.
+
+**Tests run and results.** Measured non-vacuously: on a disposable database
+the fixture's `fx_rates` unique constraint was dropped, two `CAD`→`USD` rows
+inserted, and the gate then emitted
+`fx_rates duplicate pair|DUPLICATE|CAD|USD|2`, counted 3 non-`OK` rows and
+exited non-zero. A first attempt at this negative case was **vacuous** — the
+`INSERT` failed on `provider NOT NULL` and the gate still reported `0`, which
+looked like a pass; worth recording, because a negative case that fails to
+create the fault it is testing is indistinguishable from one that passes.
+Full suite **57 files / 832 tests passing**.
+
+**Financial or security behaviour affected.** None. A verification step's
+output contract.
+
+**Commit / PR.** PR **#70**, branch `ops/phase0-synthetic-rehearsal`; SHA in a
+later entry per the PR #67 learning.
+
+**Migration impact.** None — `verify-migrate.sql` is read-only.
+
+**Unresolved findings.** **Phase 0 remains NOT RUN.** Also noted: on a
+database built from the current schema sources the `fx_rates` duplicate query
+can never return a row, because the unique constraint already exists. It
+exists for databases predating that constraint, which is exactly what a
+restore of an old backup could be.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Owner review and merge of #70.

@@ -78,7 +78,16 @@ WHERE schemaname = 'public' AND tablename = 'fx_rates'
 -- ── 4. What would have blocked those indexes ────────────────────────────────
 -- Both should return zero rows. Any row here is a duplicate that a human must
 -- resolve before the unique index can be created.
+-- The second field is a STATUS in every section of this file, because the
+-- rehearsal gate gives it the whole meaning: it counts any row whose $2 does
+-- not begin with OK. These two queries emitted an id or a currency code
+-- there. Neither can begin with "OK" — a user id is numeric and the codes are
+-- CAD and USD — so duplicates were counted correctly and this was never a
+-- live hole. It is still the one section where passing the gate depended on
+-- the *values* rather than the shape, which is a property worth not relying
+-- on.
 SELECT 'velocity_checks duplicate window' AS problem,
+       'DUPLICATE' AS status,
        user_id, window_type, window_start, currency, COUNT(*)
 FROM velocity_checks
 WHERE transaction_count >= 0
@@ -86,6 +95,7 @@ GROUP BY user_id, window_type, window_start, currency
 HAVING COUNT(*) > 1;
 
 SELECT 'fx_rates duplicate pair' AS problem,
+       'DUPLICATE' AS status,
        from_currency, to_currency, COUNT(*)
 FROM fx_rates
 GROUP BY from_currency, to_currency
