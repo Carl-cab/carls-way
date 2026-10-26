@@ -1333,3 +1333,66 @@ remaining 🔴 owner-only sections (legal, FBO/funding, provider approvals) are
 unverifiable from here by construction.
 
 **Next recommended action.** Owner review and merge of #72.
+
+---
+
+## 2026-10-26 — money-bucket policy recommendation written, nothing implemented (PR #72)
+
+**Purpose and scope.** The owner's finalization directive asked for a concise
+recommendation on fail-open versus fail-closed for the three money buckets when
+Redis is unavailable, including risks to legitimate transfers and to abuse
+prevention, while preserving the emergency schema-repair path. Written as
+`docs/decisions/0007-money-bucket-policy-on-redis-loss.md`, decided against
+`master` at `0b609f4`.
+
+**The question is narrower than it looks.** Read from source: `money:send`
+(20/h), `money:split-pay` (30/h) and `money:transfer-execute` (10/h) all key on
+the **authenticated user id**. Header loss therefore cannot collapse them —
+that failure mode belongs to the client-keyed buckets — so only Redis loss is
+in scope. The interaction tests added on #71 pin this.
+
+**Recommendation: keep all three fail-open, and add a signal rather than a
+refusal.** The asymmetry decides it. Fail-closed converts a Redis outage into a
+**payments outage** for every customer while the database, providers and
+application are healthy. Fail-open raises one user's ceiling to
+`limit × instances` — a low single-digit multiplier on the Hobby plan, not
+caller-controllable — and the rate limit is the outermost of three layers: the
+per-intent idempotency key with `SELECT ... FOR UPDATE` prevents a replay
+double-debiting, and `velocity_checks` applies a separate rolling per-user
+volume limit that does not depend on Redis. Worst case is "sends more often
+than intended during an outage", not "money moves twice".
+
+**The real defect named.** It is not the fail-open choice; it is that the
+degradation is **unobservable**. `rateLimitBackendHealth()` already reports the
+active backend, a cumulative degradation count and the remaining cooldown, and
+nothing scrapes it. The three asks are therefore: scrape it, alert on sustained
+degradation with a named owner, and move these three counters to PostgreSQL —
+which the application cannot run without — removing the dilemma instead of
+choosing a side, alongside decision 0005 Phase 2's counter table.
+
+**Explicitly preserved.** `schema:migrate-operator` and `schema:bootstrap`
+remain fail-open regardless of the decision above; refusing them makes an
+optional variable a hard dependency of the only schema-migration path and of
+the command-line break-glass, which is the Release 1.0 lockout shape.
+
+**Financial or security behaviour affected.** **None — nothing is implemented.**
+No fail-closed path exists and none should until the owner decides, because
+doing it unilaterally would either weaken a financial control or interrupt
+customers.
+
+**Noted in passing, not a defect.** `money:transfer-execute` keys on
+`String(user.userId)` while the other two use `user:${user.userId}`. Keys are
+namespaced per bucket so this cannot collide; recorded because it is cheaper to
+note than to rediscover.
+
+**Tests run and results.** Documentation only. `readiness.json` parses and the
+report renders with no `undefined` cells; the owner action now points at the
+decision record instead of restating the dilemma.
+
+**Commit / PR.** PR **#72**, branch `docs/sprint1-status`; SHA in a later entry.
+
+**Migration impact.** None. **Rollback requirement.** None.
+
+**Next recommended action.** Owner: make the decision recorded in 0007. If the
+answer is "keep fail-open", the follow-up work is the three observability asks,
+not a code change to the limiter.
