@@ -16,10 +16,13 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on the merged tree, on a database created fresh for the run and with
-the CI fixture applied: **62 files / 915 tests** pass, typecheck 0 errors, lint 0
+Measured on the **PR #74 tree, not the `e0f3f0d` baseline this header names**,
+on a database created fresh for the run and with
+the CI fixture applied: **63 files / 922 tests** pass, typecheck 0 errors, lint 0
 errors / 28 warnings. Earlier baselines on this file: 55 / 778 at `4e63bb9`,
-56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`, 57 / 832 at `6927ebd`.
+56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`, 57 / 832 at `6927ebd`,
+and **61 / 907 at `e0f3f0d`** — which is the figure that belongs to this
+header's commit. The 915 above becomes a baseline fact only when #74 merges.
 
 **An earlier header claimed verification against `6d8861c` and "57 files /
 821 tests" while `master` had moved on three times (`1d4d783`, `c2859f6`,

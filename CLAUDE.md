@@ -78,7 +78,9 @@ Client (React 19)
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
 | `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `checkVelocityLimit()` / `recordVelocity()`. Two rules, both learned by getting them wrong: the velocity call must stay **unwrapped** (fail-closed, decision 0007), and both velocity calls must be passed **`tx`** — see the `max: 5` pool note below |
-| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control: records velocity, refuses over the ceiling with `VELOCITY_EXCEEDED` → 429, and **fails closed when velocity cannot be evaluated**. Mutation-checked three ways |
+| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: records velocity, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **rolls the payment back if the velocity write fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked five ways; the pool case *hangs* rather than fails when the `tx` argument is dropped |
+| `lib/__tests__/split-pay-route-status.test.ts` | Pins the route's status contract, which the file above cannot: it calls `paySplitPortion()` directly, so a regression mapping `VELOCITY_EXCEEDED` to 400 instead of **429** would have stayed green. Also pins 403/409/409/400 for the other codes and **500 for a non-`SplitPaymentError`**, so a velocity-evaluation failure is never reported as the caller's fault |
+| `lib/__tests__/provider-event-duplicates.test.ts` | Duplicate-webhook detection. Its `beforeEach` was `TRUNCATE provider_webhook_events` — on a **shared** table, which destroyed other files' rows *and* left its own behind. Now a delete scoped to its own ids. Keep it scoped: the leak was invisible only because another file's unrelated cleanup happened to run in between |
 | `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
 ---
@@ -249,12 +251,13 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **62 files /
-915 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 915 pass. Eight arrived with
-`split-pay-velocity.test.ts` when `money:split-pay` was brought under the
-velocity control, two of them for the pool deadlock that first implementation
-shipped; the count was 61 / 907 on `master` at `e0f3f0d`. Not carried over from either side of a merge: the branches had
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **63 files /
+922 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 922 pass. The baseline on `master` at `e0f3f0d` is
+**61 / 907**, and the difference belongs to PR #74, not to that commit:
+`split-pay-velocity.test.ts` (9) and `split-pay-route-status.test.ts` (6) when
+`money:split-pay` was brought under the velocity control — several of them for
+defects the first implementation shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same

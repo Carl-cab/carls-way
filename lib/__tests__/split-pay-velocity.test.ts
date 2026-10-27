@@ -45,7 +45,7 @@ vi.mock('@/lib/auth', async (importOriginal) => {
   };
 });
 
-const { checkVelocityLimit } = await import('../auth');
+const { checkVelocityLimit, recordVelocity } = await import('../auth');
 const { createSplit, paySplitPortion, SplitPaymentError } = await import('../splits');
 
 // Distinct from the 9101-9104 block used by splits.test.ts so the two files
@@ -114,6 +114,7 @@ async function cleanup() {
 
 beforeEach(async () => {
   vi.mocked(checkVelocityLimit).mockClear();
+  vi.mocked(recordVelocity).mockClear();
   await cleanup();
   await setBalance(CREATOR, '0');
   await setBalance(PAYER, '500');
@@ -258,6 +259,24 @@ describe('split-pay is covered by the durable volume control', () => {
     // Balance moved and budget consumed, in one commit.
     expect(await balance(PAYER)).toBe(488);
     expect(parseDatabaseMoney(String(rows[0].total), 'CAD')).toBe(cad('12.00'));
+  });
+
+  // The atomicity test above passes under BOTH orderings — it only inspects
+  // committed state after a success, which looks identical whether the record
+  // ran inside the transaction or after it. This is the test that actually
+  // distinguishes them: it fails the velocity WRITE and asserts the payment
+  // rolled back. Under the post-commit ordering the money has already moved
+  // when the write fails, so the payer would read 488 instead of 500.
+  it('rolls back the whole payment when the velocity write fails', async () => {
+    const splitId = await newSplit('12.00');
+    vi.mocked(recordVelocity).mockRejectedValueOnce(new Error('velocity write failed'));
+
+    await expect(paySplitPortion(splitId, PAYER)).rejects.toThrow(/velocity write failed/);
+
+    expect(await balance(PAYER)).toBe(500);
+    expect(await balance(CREATOR)).toBe(0);
+    expect(await participantStatus(splitId, PAYER)).toBe('pending');
+    expect(await velocityRowCount(PAYER)).toBe(0);
   });
 
   it('does not record velocity when the payment itself fails', async () => {

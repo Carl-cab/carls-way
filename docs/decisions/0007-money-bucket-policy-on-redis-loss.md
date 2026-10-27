@@ -47,7 +47,7 @@ That is the shape of defect this record has already produced four times.
 >
 > **RESOLVED by option (A), owner-authorized 2026-10-26.** `paySplitPortion()`
 > now calls `checkVelocityLimit()` before any balance moves and
-> `recordVelocity()` after the transaction commits, so the premise this record
+> `recordVelocity()` **inside** the transaction on `tx`, so the premise this record
 > rests on is true for all three buckets. The gate lives in
 > `paySplitPortion()` rather than the route, deliberately: the amount is read
 > from `split_participants` under `FOR UPDATE`, so the amount checked is

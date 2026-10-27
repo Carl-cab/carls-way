@@ -3500,3 +3500,84 @@ construction.
 **Next recommended action.** Owner: A/B/C on the TOCTOU, with the above noted.
 
 **Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
+
+---
+
+## 2026-10-27 — a weak test of my own, and a shared-table TRUNCATE it exposed
+
+Four findings on `bf31890`. Two were my new text contradicting neighbouring
+older text — **the same pattern I wrote an entry about two commits earlier**,
+which says the lesson had not actually been absorbed. Two were labelled
+trivial, and one of those was the most useful of the four.
+
+**My atomicity test did not test atomicity.** It asserted committed state
+*after* a successful payment, which looks identical whether velocity is
+recorded inside the transaction or after it. Nothing failed the velocity
+*write*, so the rollback it claimed to cover was never exercised — while
+`CLAUDE.md` and the readiness row both said the behaviour was pinned. A test
+that cannot fail for the reason it exists is documentation, not verification.
+
+The reviewer predicted the exact failure value. Added
+`rolls back the whole payment when the velocity write fails`, then mutated the
+record back to post-commit: **"expected 488 to be 500"** — 500 minus the 12
+that had already moved, precisely as predicted. Eight other cases passed under
+that mutation, including the atomicity test, which is the whole point.
+
+**The route's 429 was never tested either.** `CLAUDE.md` claimed
+`split-pay-velocity.test.ts` pinned `VELOCITY_EXCEEDED → 429`. It does not: it
+calls `paySplitPortion()` directly and asserts the error *code*, so a
+regression mapping that code to 400 would have stayed green. New
+`split-pay-route-status.test.ts` drives the real handler and pins 429, the four
+other codes, and **500 for a non-`SplitPaymentError`** — because a
+velocity-evaluation failure arrives that way, and reporting it as 400 would
+tell a caller to fix a request when the fault is ours.
+
+**Then the suite went red in a file I had not touched.** Three failures in
+`external-settlement-replay.test.ts`. Worth recording how it was resolved,
+because guessing would have been faster and wrong:
+
+1. It passed **alone** on a fresh database (7/7).
+2. I had changed neither that file nor `lib/external-settlement-reconciliation.ts`.
+3. The **base branch** `403acf1` ran clean in a worktree — 61 files / 907
+   tests — so "pre-existing, not mine" was *false* and I could not stand down.
+4. The failing database still existed, so I read it instead of theorising:
+   one leftover row, `stripe / evt_dupe_3`.
+
+That named the culprit. `provider-event-duplicates.test.ts` ran
+`TRUNCATE provider_webhook_events` in `beforeEach` — **two isolation faults in
+one statement** on a suite that shares a database: it destroyed rows belonging
+to other files, and it left its own behind. `external-settlement-replay`
+counts stripe events in scope, saw two instead of one, and failed three
+assertions.
+
+**Why `master` is green with the same bug.** `stripe-settlement.test.ts`
+deletes `provider_event_id LIKE 'evt_%'` for its own purposes and happened to
+run in between. One file's unrelated cleanup masking another file's leak — a
+coincidence that holds only until the file order changes, and adding two test
+files changed it. My PR did not create the defect; it removed the thing hiding
+it, which is the more useful outcome.
+
+Fixed at the source with a delete scoped to the three ids that file creates,
+plus an `afterAll`. Not by skipping anything, and not by broadening another
+file's cleanup to keep the coincidence working.
+
+**Tests run and their results.** **63 files / 922 tests**, all passing on a
+fresh fixtured database. Typecheck 0 errors; lint 0 errors / 28 warnings. The
+pair that failed now passes in the order that failed. Five mutations hold on
+the split-pay file.
+
+**Financial or security behaviour affected.** None by the test changes. The
+documentation now claims only what the tests actually pin, which is the
+behaviour change that matters here.
+
+**Migration impact.** None. **Rollback requirement.** None for this commit;
+reverting the scoped cleanup restores a shared-table `TRUNCATE`.
+
+**Unresolved findings.** The TOCTOU, still the owner's decision. Also now
+written down: the other three money paths record after commit, so their
+500-after-success window is open, and none of them has a test pinning the
+fail-closed requirement.
+
+**Next recommended action.** Owner: A/B/C on the TOCTOU.
+
+**Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
