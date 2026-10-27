@@ -1,7 +1,140 @@
 # 0007 — Fail-open or fail-closed for the money buckets when Redis is unavailable
 
-**Status:** Proposed. **Awaiting an owner decision — not implemented either way.**
+**Status:** **ACCEPTED** by the owner on 2026-10-26. Runtime policy accepted;
+implementation follow-ups remain open, and **one premise of the reasoning below
+turned out to be false for one of the three buckets — see "Correction" directly
+after the decision.**
 **Date:** 2026-10-26
+**Decision owner:** Manna owner / Approver
+
+## Decision (accepted)
+
+All three money-path buckets **stay fail-open** when Redis is unavailable. The
+limiter continues to use its per-instance in-process counters rather than
+refusing every money operation.
+
+The decision applies **only to Redis loss**. It does not disable rate limiting,
+bypass the database velocity check, authorize a provider call, or change the
+ledger's atomicity, reconciliation or idempotency requirements.
+
+**And it adds a fail-closed requirement in the other direction:** if
+`velocity_checks` cannot be evaluated atomically — the database is unavailable,
+or the check errors — the money path **must fail closed**. Redis loss alone is
+not a payments outage; loss of the remaining durable volume control is a
+payments-safety failure and must refuse the operation.
+
+**Implementation status of that requirement, measured at `403acf1`:** satisfied
+in effect on the paths that have a velocity check, but **only incidentally**.
+`checkVelocityLimit()` contains no `try/catch`, and none of its three callers
+wraps it, so a database error propagates to each route's outer handler and
+returns 500 before any balance is mutated. There is no explicit "velocity
+unavailable → refuse" branch and **no test pins it**, so a future refactor that
+wrapped the call to "be resilient" would silently convert this to fail-open.
+That is the shape of defect this record has already produced four times.
+
+## Correction — the durable guard did not cover `money:split-pay`. **Now it does.**
+
+> **Two defects were found in this implementation during review of PR #74 and
+> fixed there; both are recorded in `PROJECT_MEMORY.md`.** The velocity calls
+> now receive the caller's transaction (`tx`). Without it they fell back to
+> `getSql()` and asked the 5-connection pool for a second connection while the
+> payment transaction held one — five concurrent portion payments deadlocked
+> the pool and stalled every query on the instance. And `recordVelocity()` now
+> runs *inside* the transaction, so consumption commits with the payment;
+> after-commit it could return 500 for a payment that had already succeeded,
+> leaving the budget unconsumed. Both are pinned by tests, and reverting the
+> `tx` argument makes the concurrency case hang rather than fail an assertion.
+>
+> **RESOLVED by option (A), owner-authorized 2026-10-26.** `paySplitPortion()`
+> now calls `checkVelocityLimit()` before any balance moves and
+> `recordVelocity()` **inside** the transaction on `tx`, so the premise this record
+> rests on is true for all three buckets. The gate lives in
+> `paySplitPortion()` rather than the route, deliberately: the amount is read
+> from `split_participants` under `FOR UPDATE`, so the amount checked is
+> exactly the amount about to move, and any future caller inherits the control
+> — the control living only in routes is why this path was missed. A
+> `VELOCITY_EXCEEDED` error maps to **429**, matching every other money path.
+> Pinned by `lib/__tests__/split-pay-velocity.test.ts` (6 cases) and
+> **mutation-checked three ways**: swallowing the velocity error fails only the
+> fail-closed case; removing the gate fails four cases; removing the record
+> fails one. The text below is kept because the measurement is the reason the
+> fix exists.
+
+This record says `velocity_checks` "is the control that actually caps how much
+a user can move during an outage", for all three buckets. **Measured at
+`403acf1`, that was false for `money:split-pay`.**
+
+`lib/splits.ts` contains **zero** velocity references. `paySplitPortion()`
+debits the payer and credits the split creator directly, calling neither
+`checkVelocityLimit()` nor `recordVelocity()`. Since `checkVelocityLimit()`
+sums from `velocity_checks`, and split-pay never writes that table, split-pay
+volume is also invisible to every *other* path's velocity budget — it is
+outside the control in both directions.
+
+| Money path | `checkVelocityLimit` | `recordVelocity` |
+|---|---|---|
+| `money:send` (`app/api/transactions/route.ts`) | yes | yes |
+| accept request (`app/api/transactions/[id]/route.ts`) | yes | yes |
+| `money:transfer-execute` (checked at `transfers/intent`) | yes | at confirm |
+| **`money:split-pay` (`lib/splits.ts`)** | **none** | **none** |
+
+So for `money:split-pay` the Redis-backed limit is the **only** volume control,
+and on Redis loss it degrades to `30/hour × processes` with nothing durable
+behind it.
+
+**Stated at its real size, not inflated.** Two structural bounds remain: the
+debit is conditional (`WHERE balance_cad >= …`), so a payer cannot exceed their
+balance; and a participant can pay only *their own portion* of a split they
+belong to, once (`ALREADY_PAID`). Moving volume this way therefore requires
+creating many splits, which is a separate endpoint with its own limit. This is
+a gap in the decision's stated safety net, not an open drain.
+
+**It did not flip the decision**, because the asymmetry that decides it never
+depended on `velocity_checks` — a certain total payments outage still beats a
+loosened limit for attackers. The owner chose **option (A)**: add the velocity
+check and record so the premise becomes true, rather than amending this record
+to accept the gap. Implemented as described in the box above.
+
+**Two things the fix changes in behaviour, stated because they are not purely
+additive.** A split portion now consumes the payer's velocity budget, so a
+payer near their ceiling on other paths can be refused a split payment they
+would previously have been allowed — that is the intended effect of closing the
+gap, not a side effect. And split-pay can now return **429** where it never
+could before. Limits apply at `new_user` or `verified_user` tiers depending on
+`kyc_status`; `checkVelocityLimit()` does **not** gate on KYC itself, so no
+user is newly locked out of splits for being unverified — they are held to the
+lower ceiling, as on every other money path.
+
+**Still unimplemented, and worth naming separately:** nothing records velocity
+for `money:transfer-execute` at execute time (it is checked at intent and
+recorded at confirm), which `CLAUDE.md` already notes as a known future item.
+That is a different gap from this one and is untouched here.
+
+## Vercel concurrency ceiling — established, and still not an instance count
+
+Owner evidence, 2026-10-26: the team hosting Manna is on the **Pro** plan
+(`cocopiuf-laa-projects1`, project `carlos_cab74`), with **Fluid Compute
+enabled**. Vercel documents a maximum automatic concurrency of **30,000
+concurrent function executions** for Hobby and Pro, and a burst limit of
+**1,000 concurrent executions per 10 seconds per region**, exceeding which
+yields `503 FUNCTION_THROTTLED`.
+
+That establishes a platform **execution** ceiling. It does **not** establish a
+count of isolated processes: Fluid Compute lets multiple invocations share one
+instance and optimises existing resources before scaling, so the in-process
+counter multiplier cannot be derived from it. Therefore:
+
+- "The multiplier is formally unbounded" is **withdrawn at the Vercel execution
+  layer** — there is now a documented ceiling above it.
+- **No exact multiplier may be claimed.** Do not write "30,000" and do not
+  write "a small number". The process allocation for this deployment is
+  unmeasured, which is precisely the gap the original withdrawn claim papered
+  over.
+
+Note this also corrects a second error in the withdrawn sentence: it said
+"Vercel's **Hobby** plan". The team is on **Pro**. The plan was wrong as well
+as the inference.
+
 **Reviewed against:** `master` at `0b609f4` — the field read "Decided against",
 which contradicted the status line one row above it: nothing has been decided.
 `lib/rate-limit.ts` is byte-identical between `0b609f4` and `e0f3f0d` (the

@@ -77,6 +77,10 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
+| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `checkVelocityLimit()` / `recordVelocity()`. Two rules, both learned by getting them wrong: the velocity call must stay **unwrapped** (fail-closed, decision 0007), and both velocity calls must be passed **`tx`** — see the `max: 5` pool note below |
+| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: records velocity, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **rolls the payment back if the velocity write fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked five ways; the pool case *hangs* rather than fails when the `tx` argument is dropped |
+| `lib/__tests__/split-pay-route-status.test.ts` | Pins the route's status contract, which the file above cannot: it calls `paySplitPortion()` directly, so a regression mapping `VELOCITY_EXCEEDED` to 400 instead of **429** would have stayed green. Also pins 403/409/409/400 for the other codes and **500 for a non-`SplitPaymentError`**, so a velocity-evaluation failure is never reported as the caller's fault |
+| `lib/__tests__/provider-event-duplicates.test.ts` | Duplicate-webhook detection. Its `beforeEach` was `TRUNCATE provider_webhook_events` — on a **shared** table, which destroyed other files' rows *and* left its own behind. Now a delete scoped to its own ids. Keep it scoped: the leak was invisible only because another file's unrelated cleanup happened to run in between |
 | `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
 ---
@@ -247,10 +251,13 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **61 files /
-907 tests** — measured on `master` at `e0f3f0d`, the tip after Sprint 1's five
-PRs, on a database created fresh for the run with the CI fixture applied; all
-907 pass. Not carried over from either side of a merge: the branches had
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **63 files /
+922 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 922 pass. The baseline on `master` at `e0f3f0d` is
+**61 / 907**, and the difference belongs to PR #74, not to that commit:
+`split-pay-velocity.test.ts` (9) and `split-pay-route-status.test.ts` (6) when
+`money:split-pay` was brought under the velocity control — several of them for
+defects the first implementation shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same
@@ -394,6 +401,34 @@ made only in `lib/providers/TransferProviderFactory.ts`.
 - Both sandbox providers are execution_mode='sandbox' — no real bank/external API calls
 - `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
 - Velocity is checked at intent creation but only recorded at confirm (future: at execute)
+- **Every balance-moving path must go through `checkVelocityLimit()` before
+  the move and `recordVelocity()` after it.** `money:split-pay` did neither
+  until 2026-10-26 — it moved money with no durable volume control, and its
+  volume was invisible to every other path's budget. The lesson is where the
+  control lives: velocity was enforced in *routes*, so a path whose money
+  movement sat in a library function (`paySplitPortion()`) was simply missed.
+  Put the gate next to the movement, so a new caller inherits it
+- **A velocity call made from inside `sql.begin` MUST be passed the
+  transaction (`tx`).** `lib/db.ts` sets **`max: 5`**. A caller holding a pool
+  connection inside a transaction that lets `checkVelocityLimit()` or
+  `recordVelocity()` fall back to `getSql()` is asking the same 5-connection
+  pool for a second connection while holding one; five such requests in flight
+  hold all five and each waits for a sixth, so none finishes and releases.
+  **The pool deadlocks and every query on that instance stalls**, not only the
+  money path. `paySplitPortion()` shipped that shape for one commit on this
+  branch; reverting the `tx` argument makes
+  `split-pay-velocity.test.ts`'s concurrency case hang rather than fail an
+  assertion, which is what the bug does to a request. Both functions take an
+  optional `executor` (`VelocityExecutor`, the same `postgres.ISql` shape as
+  `LedgerExecutor`), so passing `tx` is always available.
+  Passing `tx` to `recordVelocity()` also makes consumption commit **with** the
+  payment: a rollback consumes no budget, and a commit cannot leave the money
+  moved with the budget unconsumed. The post-commit form had its own failure
+  mode — its writes ran after the money moved, so a failure returned 500 for a
+  payment that had succeeded, with no recovery path. The other three money
+  paths still record after commit; they avoid the pool deadlock only because
+  they check *before* opening their transaction, and the 500-after-success
+  window is still open on them
 - Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
@@ -560,8 +595,44 @@ arbitrary end user.
   PostgreSQL — which this endpoint always has, since it cannot run without
   `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
   the migration that it limits, so it belongs with Phase 2.
-- **Fail-closed by risk class is an open owner decision, with a
-  recommendation.** When shared rate limiting is lost — Redis unreachable, or
+- **Fail-closed by risk class — DECIDED 2026-10-26 for the money buckets,
+  still open for the rest.** The owner **accepted** keeping all three money
+  buckets **fail-open** on Redis loss (`docs/decisions/0007`, status Accepted),
+  with a fail-closed requirement in the other direction: **if `velocity_checks`
+  cannot be evaluated atomically, the money path must refuse.** That holds in
+  effect today only *incidentally* — `checkVelocityLimit()` has no `try/catch`
+  and no caller wraps it, so a DB error 500s before any balance moves — with
+  **no explicit branch**. Wrapping that call to "be resilient" would silently
+  make it fail-open.
+
+  **Coverage of that requirement, per path, as of 2026-10-26.** Only
+  `money:split-pay` has a test pinning it:
+  `lib/__tests__/split-pay-velocity.test.ts` asserts that a velocity-evaluation
+  error moves no money and leaves the portion owed, and swallowing the error
+  fails exactly that one case. `money:send`, request-accept and
+  `money:transfer-execute` (checked at intent) still rely on the same
+  incidental propagation **with nothing pinning it**, so a `try/catch` added
+  around any of those three calls would invert the requirement silently. Those
+  three are the open side of this item.
+
+  **One premise of that decision was false for one bucket, and is now fixed.**
+  `lib/splits.ts` contained **zero** velocity references: `paySplitPortion()`
+  debited the payer and credited the creator calling neither
+  `checkVelocityLimit()` nor `recordVelocity()`, so `money:split-pay` had no
+  durable volume control behind the rate limit and its volume never entered
+  `velocity_checks` to consume any other path's budget. **Resolved
+  2026-10-26 (owner-authorized option A):** the gate now lives *inside*
+  `paySplitPortion()`, not in the route — the amount is read from
+  `split_participants` under `FOR UPDATE`, so the amount checked is exactly the
+  amount about to move, and any future caller inherits the control. A
+  `VELOCITY_EXCEEDED` error maps to **429**, as on every other money path.
+  **Do not wrap that `checkVelocityLimit()` call in a `try/catch`** — 0007
+  requires this path to fail closed when velocity cannot be evaluated, and the
+  throw aborting the transaction before any balance moves is what implements
+  it. `lib/__tests__/split-pay-velocity.test.ts` pins all of it and is
+  mutation-checked three ways; swallowing that error fails exactly one case.
+
+  When shared rate limiting is lost — Redis unreachable, or
   no usable client header — every bucket currently fails *open*: the request is
   served under a weaker or collapsed limit. Whether that is right depends on
   the bucket, and the two failure modes are not symmetrical:
@@ -575,13 +646,22 @@ arbitrary end user.
   | `schema:migrate-operator` | admin id | `6 × instances` | unaffected | leave fail-open — see the Release 1.0 lockout note above |
   | `schema:bootstrap` | client | `N × instances` | **global** — any anonymous caller can exhaust the break-glass for everyone | leave fail-open; refusing recreates the lockout this path exists to break |
 
-  The money buckets are the only genuine dilemma, and it is a business
-  judgement, not an engineering one: silently losing shared velocity protection
-  versus refusing legitimate payments during a Redis outage. **Not implemented
-  either way** — doing so unilaterally would either weaken a financial control
-  or interrupt customers. The buckets keyed on an authenticated user id are
-  unaffected by header loss, which narrows the question to Redis availability
-  alone.
+  The money buckets were the only genuine dilemma, and it was a business
+  judgement rather than an engineering one: silently losing shared velocity
+  protection versus refusing legitimate payments during a Redis outage.
+  **DECIDED — the owner accepted fail-open for all three on 2026-10-26**, so
+  the "Recommended" column above is now the policy, not a proposal. This
+  paragraph read "**Not implemented either way**" until then, two paragraphs
+  below the line recording the acceptance, which is exactly the drift this
+  file's governance rule exists to stop.
+
+  What remains open is **observability, not policy**: nothing scrapes
+  `rateLimitBackendHealth()`, so a silent demotion to per-instance counting is
+  still indistinguishable from normal operation; sustained degradation has no
+  alert and no named owner; and moving the three money counters to PostgreSQL
+  would remove the dilemma rather than settle it. The buckets keyed on an
+  authenticated user id are unaffected by header loss, which narrowed the
+  question to Redis availability alone.
 
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
@@ -655,7 +735,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `webhook_dead_letters` | Payloads of webhook events that exhausted their retries, for operator review and requeue |
 | `plaid_transfer_event_cursors` | Sync position for `TRANSFER_EVENTS_UPDATE`. Missing means the Plaid Transfer webhook cannot persist its position and answers 500 |
 | `transfer_recovery_flags` | Marks intents needing reconciliation |
-| `splits` / `split_participants` | Split payments and each participant's portion |
+| `splits` / `split_participants` | Split payments and each participant's portion. Paying a portion moves real balances, writes a ledger pair, **and since 2026-10-26 checks and records velocity** |
 | `admin_users` / `admin_roles` / `admin_permissions` / `role_permissions` / `admin_sessions` / `admin_audit_logs` | Admin RBAC. A separate auth context from `users`, not a flag on a customer row |
 
 The authoritative list is whatever `initializeSchema()` builds; `scripts/verify-migrate.sql` checks a live database against it.
@@ -687,7 +767,17 @@ which a balance-rewriting migration gets applied twice.
 
 ## Deployment Notes
 
-**Platform:** Vercel (Hobby plan). Serverless functions for API routes, Edge Middleware for `proxy.ts`.
+**Platform:** Vercel, **Pro** plan — team `cocopiuf-laa-projects1`, project
+`carlos_cab74`, with **Fluid Compute enabled**. Serverless functions for API
+routes, Edge Middleware for `proxy.ts`. This line read "Hobby plan" until
+2026-10-26, which was wrong and had been reasoned from: a withdrawn claim in
+`docs/decisions/0007` argued the rate-limit fallback multiplier was small
+"on Vercel's Hobby plan". The plan was wrong *and* the inference was invalid.
+Documented concurrency is **30,000 concurrent function executions** (Hobby and
+Pro alike), with a burst limit of 1,000 per 10 seconds per region. That is an
+**execution** ceiling and **not** an instance count — Fluid Compute lets
+invocations share an instance — so it must not be used to derive the
+in-process counter multiplier.
 
 **Auto-deploy:** Every push to `master` triggers a Vercel build and deployment automatically.
 

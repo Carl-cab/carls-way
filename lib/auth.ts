@@ -167,15 +167,31 @@ export async function resetFailedLogins(userId: number): Promise<void> {
 }
 
 // ─── Velocity check ──────────────────────────────────────────────────────────
+/**
+ * A caller's transaction, when the velocity read or write must run on the
+ * connection the caller already holds. Same shape and purpose as
+ * `LedgerExecutor` in lib/ledger.ts.
+ *
+ * This is not a convenience. `lib/db.ts` configures `max: 5`, so a caller that
+ * holds a pool connection inside `sql.begin` and then lets this module call
+ * `getSql()` is asking the same 5-connection pool for a second connection
+ * while holding one. Five such callers in flight hold all five connections and
+ * every one of them waits for a sixth, so none can finish and release — the
+ * pool deadlocks and stalls every other query on that instance, not only the
+ * money path. `paySplitPortion()` had exactly that shape for one commit.
+ */
+export type VelocityExecutor = postgres.ISql;
+
 export async function checkVelocityLimit(
   userId: number,
   amount: MinorUnits,
-  currency: string
+  currency: string,
+  executor?: VelocityExecutor
 ): Promise<{ allowed: boolean; reason?: string }> {
   if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Velocity amount must be positive integer minor units.');
   // Validates currency without ever interpreting cents as major units.
   parsePositiveMoney(toDatabaseDecimal(amount), currency);
-  const sql = getSql();
+  const sql = executor ?? getSql();
   const userRows = await sql`SELECT kyc_status FROM users WHERE id = ${userId}`;
   const kycStatus = userRows[0]?.kyc_status as string;
   const limits = kycStatus === 'verified'
@@ -222,10 +238,19 @@ export async function checkVelocityLimit(
   return { allowed: true };
 }
 
-export async function recordVelocity(userId: number, amount: MinorUnits, currency: string): Promise<void> {
+export async function recordVelocity(
+  userId: number,
+  amount: MinorUnits,
+  currency: string,
+  executor?: VelocityExecutor
+): Promise<void> {
   if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Velocity amount must be positive integer minor units.');
   parsePositiveMoney(toDatabaseDecimal(amount), currency);
-  const sql = getSql();
+  // Passing the caller's transaction makes the record commit WITH the payment:
+  // a rollback leaves no consumed budget, and a successful commit cannot leave
+  // the payment recorded but the budget unconsumed. Without it the two land
+  // separately and a failure here reports 500 for a payment that succeeded.
+  const sql = executor ?? getSql();
   const amountDecimal = toDatabaseDecimal(amount);
   const now = new Date();
   const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
