@@ -31,9 +31,12 @@ Sprint 1: this header read `6927ebd` / 832 after five merges had moved
 
 ## ⚠ Two things on this list are worse than "unverified"
 
-(Item 1 was partly resolved on 2026-10-26: `master` is fixed, the running
-deployment is not yet confirmed. Item 2 is unchanged and is now the
-first-order gap.)
+(Both are now resolved, and this parenthetical is kept rather than deleted so
+the sequence stays legible. Item 1: `master` was fixed on 2026-10-26 and the
+running deployment was **confirmed** later the same day — see below. Item 2:
+Dependabot is **enabled**, owner-reported 2026-10-26. What is still unverified
+is listed under "What is NOT verified" further down, which has been narrowed
+accordingly.)
 
 **1. `master` CARRIED two unauthenticated remote-code-execution advisories.**
 `next@16.3.8` is inside the vulnerable range of three advisories — two
@@ -71,18 +74,28 @@ worth keeping:** the GitHub deployments API answers "what SHA is deployed to
 Production" without any Vercel access, and that was treated as unanswerable for
 the whole of Sprint 1.
 
-**2. Nothing watches an unchanged tree.** Both that advisory set and the
-`follow-redirects` one five days earlier reached `master` *after* its last
-green CI run, and both were found only because an unrelated PR happened to
-re-run the audit. Dependabot alerts are named in `ci.yml` as the durable
-backstop but have never been confirmed enabled.
+**2. Nothing watched an unchanged tree. Dependabot is now enabled.** Both that
+advisory set and the `follow-redirects` one five days earlier reached `master`
+*after* its last green CI run, and both were found only because an unrelated PR
+happened to re-run the audit — CI cannot detect an advisory disclosed against a
+tree that has not changed. The durable backstop `ci.yml` names is now on:
+owner-reported 2026-10-26, with Dependabot alerts, security updates, grouped
+security updates and malware alerts all enabled. This line read "have never
+been confirmed enabled". **One thing is still not claimed:** the alert *list*
+has not been read from this environment — both `/dependabot/alerts` and
+`/vulnerability-alerts` answer `403` to this session, which is a token-scope
+limit that enabling alerts does not change, so the 403 is not evidence either
+way about whether any advisory is currently open.
 
 **What is NOT verified, stated here because the rest of this file reads as
-confirmation:** nothing about the deployment. `api.vercel.com` and the
-production host both return `403 CONNECT` from this environment's egress proxy
-— re-confirmed 2026-10-26 — so the production SHA, whether `REDIS_URL` or
-`CRON_SECRET` is set, whether the cron fires, and deployment health are all
-unverified rather than passing.
+confirmation.** This paragraph said "nothing about the deployment", which is no
+longer true: **the production SHA IS confirmed** (`403acf1`, from the GitHub
+deployments API plus owner-supplied Vercel detail — see above). `api.vercel.com`
+and the production host still return `403 CONNECT` from this environment's
+egress proxy, re-confirmed 2026-10-27, so what remains unverified is narrower
+and specific: whether `REDIS_URL` and `CRON_SECRET` are actually set, whether
+the cron fires, deployment health, and the Redis backend's live behaviour. The
+deployed commit is no longer on that list.
 
 **Branch protection has since moved to VERIFIED, and this file previously said
 the opposite.** It read "`master` is also still `protected: false` with no

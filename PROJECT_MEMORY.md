@@ -3168,7 +3168,7 @@ exception propagation.
 whichever is chosen, pin the velocity-unavailable path with a test, since it is
 now a stated requirement of an accepted decision and nothing enforces it.
 
-**Commit / PR.** Branch `docs/sprint1-owner-confirmations`.
+**Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
 
 ---
 
@@ -3269,4 +3269,99 @@ read as having closed it.
 `rateLimitBackendHealth()`, alert on sustained degradation with a named owner,
 and move the three money counters to PostgreSQL.
 
-**Commit / PR.** Branch `docs/sprint1-owner-confirmations`.
+**Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
+
+---
+
+## 2026-10-27 — PR #74 review: a real TOCTOU, and five stale claims my own PR created
+
+**Purpose and scope.** Record the six findings from the review of PR #74. Five
+were documentation staleness that the PR itself introduced and are fixed. The
+sixth is a genuine security finding, verified, **pre-existing**, and left open
+for an owner decision because fixing it changes a financial control on paths
+#74 was not authorized to touch.
+
+**The Major finding is correct: velocity admission is not serialized per
+payer.** CWE-367. Traced and confirmed against the code rather than accepted on
+the reviewer's word:
+
+- `checkVelocityLimit()` reads `velocity_checks` on its own connection
+  (`getSql()`), never the caller's transaction.
+- `recordVelocity()` runs only **after** the transaction commits — on every
+  path.
+- **No money path holds a per-payer lock across that window.** `money:send`
+  (`transactions/route.ts:111`) and request-accept
+  (`transactions/[id]/route.ts:109`) both check *before* opening `sql.begin`;
+  `transfers/intent` the same; split-pay locks only the
+  `split_participants` row (`FOR UPDATE OF sp`), which is a different row per
+  split.
+
+So two concurrent payments by one payer near the ceiling can both read the same
+total, both pass admission, and both complete above it.
+
+**It is not a regression from #74, and saying so is not a defence.** The same
+race exists on `money:send` and request-accept, which predate this PR by a long
+way. #74 gave `money:split-pay` the same control the other paths already had —
+race included. The comparison that matters is still the right one: before #74
+that path had **no** durable control at all, so closing the gap was an
+improvement even though it inherited the design's weakness. What would have
+been wrong is letting `VERIFIED` on that row imply the ceiling is race-proof,
+so the row now says explicitly that it is not.
+
+**Why it is not fixed here.** Serializing admission needs a shared per-payer
+transactional control across **all four** money paths — an advisory lock or
+`SELECT … FOR UPDATE` on the payer's `users` row, taken before the check and
+held through the money movement. That is an architectural change to the
+velocity system, on paths this PR was authorized only to bring split-pay into
+line with. The reviewer labels it a heavy lift and agrees. Recorded as an owner
+action with three options; my recommendation is (B), moving the counters to
+PostgreSQL and making admission one atomic conditional write, because it fixes
+this race and decision 0007's observability asks in the same change.
+
+**Exposure, stated at its real size.** Balance sufficiency bounds every case —
+the debit is conditional (`WHERE balance_cad >= …`), so a payer cannot go
+negative however many requests race. On split-pay a participant can pay only
+their own portion, once. So the race loosens a *rate* ceiling; it cannot
+overdraw an account.
+
+**The five Minor findings were all my own PR's doing, and all of one kind.**
+Adding current statements left neighbouring statements stale:
+
+1. `CLAUDE.md` still called the money-bucket policy "**Not implemented either
+   way**" two paragraphs below the line recording the owner's acceptance.
+2. `CLAUDE.md` and `readiness.json` still said "no test pinning it" for the
+   fail-closed requirement, which `split-pay-velocity.test.ts` now pins — for
+   that path. The fix states coverage **per path**, since `money:send`,
+   request-accept and `money:transfer-execute` still have nothing pinning it.
+3. `CURRENT_STATUS.md` still said the production SHA was unverified, and that
+   Dependabot "have never been confirmed enabled" — both contradicted by text
+   added higher in the same file.
+4. `readiness.json`'s `verifiedAgainstCommit` said rows describe `master`,
+   while the 913-test count and the VERIFIED split-pay row are #74's and not
+   on `master` yet. Now split into baseline versus not-yet-on-master.
+5. Two `PROJECT_MEMORY` entries recorded only the branch; both now name PR #74.
+
+That is the same **boundary-claim** failure as the four before it, in a new
+shape: not a false fact, but a true fact left standing after it stopped being
+true next to a newer one. The governance rule exists for exactly this, and five
+instances in one PR says the rule needs applying to *neighbouring* text on
+every edit, not only to the lines being changed.
+
+**Financial or security behaviour affected.** No code changed in this round;
+documentation only. One security weakness is now documented where it was
+previously unstated.
+
+**Tests run and their results.** No source file changed, so the 62 files / 913
+tests result stands; `readiness.json` parses and the report renders, exit 0.
+
+**Migration impact.** None. **Rollback requirement.** None for this round.
+
+**Unresolved findings.** The TOCTOU, open pending the owner's choice of (A)
+per-payer lock on all four paths, (B) PostgreSQL counters with atomic
+admission, or (C) accept and record that ceilings are approximate under
+concurrency. The review thread stays open until then.
+
+**Next recommended action.** Owner: pick A, B or C. Engineering: whichever is
+chosen applies to all four money paths, not just split-pay.
+
+**Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.

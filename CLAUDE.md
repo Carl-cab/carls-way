@@ -577,8 +577,18 @@ arbitrary end user.
   cannot be evaluated atomically, the money path must refuse.** That holds in
   effect today only *incidentally* — `checkVelocityLimit()` has no `try/catch`
   and no caller wraps it, so a DB error 500s before any balance moves — with
-  **no explicit branch and no test pinning it**. Wrapping that call to "be
-  resilient" would silently make it fail-open.
+  **no explicit branch**. Wrapping that call to "be resilient" would silently
+  make it fail-open.
+
+  **Coverage of that requirement, per path, as of 2026-10-26.** Only
+  `money:split-pay` has a test pinning it:
+  `lib/__tests__/split-pay-velocity.test.ts` asserts that a velocity-evaluation
+  error moves no money and leaves the portion owed, and swallowing the error
+  fails exactly that one case. `money:send`, request-accept and
+  `money:transfer-execute` (checked at intent) still rely on the same
+  incidental propagation **with nothing pinning it**, so a `try/catch` added
+  around any of those three calls would invert the requirement silently. Those
+  three are the open side of this item.
 
   **One premise of that decision was false for one bucket, and is now fixed.**
   `lib/splits.ts` contained **zero** velocity references: `paySplitPortion()`
@@ -611,13 +621,22 @@ arbitrary end user.
   | `schema:migrate-operator` | admin id | `6 × instances` | unaffected | leave fail-open — see the Release 1.0 lockout note above |
   | `schema:bootstrap` | client | `N × instances` | **global** — any anonymous caller can exhaust the break-glass for everyone | leave fail-open; refusing recreates the lockout this path exists to break |
 
-  The money buckets are the only genuine dilemma, and it is a business
-  judgement, not an engineering one: silently losing shared velocity protection
-  versus refusing legitimate payments during a Redis outage. **Not implemented
-  either way** — doing so unilaterally would either weaken a financial control
-  or interrupt customers. The buckets keyed on an authenticated user id are
-  unaffected by header loss, which narrows the question to Redis availability
-  alone.
+  The money buckets were the only genuine dilemma, and it was a business
+  judgement rather than an engineering one: silently losing shared velocity
+  protection versus refusing legitimate payments during a Redis outage.
+  **DECIDED — the owner accepted fail-open for all three on 2026-10-26**, so
+  the "Recommended" column above is now the policy, not a proposal. This
+  paragraph read "**Not implemented either way**" until then, two paragraphs
+  below the line recording the acceptance, which is exactly the drift this
+  file's governance rule exists to stop.
+
+  What remains open is **observability, not policy**: nothing scrapes
+  `rateLimitBackendHealth()`, so a silent demotion to per-instance counting is
+  still indistinguishable from normal operation; sustained degradation has no
+  alert and no named owner; and moving the three money counters to PostgreSQL
+  would remove the dilemma rather than settle it. The buckets keyed on an
+  authenticated user id are unaffected by header loss, which narrowed the
+  question to Redis availability alone.
 
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
