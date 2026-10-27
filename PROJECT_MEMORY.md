@@ -3365,3 +3365,56 @@ concurrency. The review thread stays open until then.
 chosen applies to all four money paths, not just split-pay.
 
 **Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
+
+---
+
+## 2026-10-27 — the reviewer found a boundary error in my proposed remedy
+
+A short addendum to the entry above, because the mistake is the same class as
+the five it describes and it would be dishonest to leave the record reading as
+though my options were sound.
+
+**What I proposed.** Option (A) for the TOCTOU: "an advisory lock or
+`SELECT … FOR UPDATE` on the payer's `users` row, taken before the check and
+held through the money movement."
+
+**Why that does not work, as the reviewer correctly pointed out.** The lock
+releases at commit; `recordVelocity()` runs *after* commit. So a second payment
+can acquire the lock in the gap between the first payment's commit and its
+record, read the pre-payment total, and pass. The lock serialises the *window*
+but the consumed capacity is not visible inside it. A lock whose protected
+invariant is published after the lock is dropped protects nothing.
+
+**And the escape is not free.** Making capacity visible before release means
+recording *inside* the transaction — which reintroduces exactly the
+over-counting this code deliberately avoids: `recordVelocity()` runs on its own
+connection, so an in-transaction record commits independently and a later
+rollback leaves the payer charged budget for money that never moved. That is
+documented at the call site in `lib/splits.ts` and was a deliberate choice.
+
+So option (A) is not a smaller version of (B); it is incomplete. Only an atomic
+reservation — admission and consumption as one conditional write, released on
+rollback and idempotent under retry — closes the race without the gap. The
+recommendation was already (B); the reasoning for it is now correct rather than
+incidentally right.
+
+**The pattern, sixth instance, and the sharpest one yet.** The previous five
+were claims about code. This was a claim about a *fix* — I described a remedy
+without tracing its own boundary, in the same message where I was careful to
+size the vulnerability honestly. Being rigorous about a problem does not
+transfer to being rigorous about its solution; the proposal needs the same
+adversarial read as the finding.
+
+**Also recorded: acceptance criteria, from the reviewer.** Whichever option is
+chosen, test concurrent payments by one payer **across different splits** and
+**across different money paths**, asserting the combined admitted amount does
+not exceed the remaining budget; and prove a reservation is neither lost on
+rollback nor double-counted on retry. Those are the right tests and I had not
+specified them.
+
+**Declined:** the reviewer offered to open a follow-up GitHub issue. The owner
+action is already recorded in `readiness.json` with these criteria, and opening
+issues on the owner's repository is not an action to take because a bot
+suggested it. The decision and its tracking stay with the owner.
+
+**Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
