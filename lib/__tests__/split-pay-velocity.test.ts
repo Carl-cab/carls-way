@@ -142,11 +142,25 @@ describe('split-pay is covered by the durable volume control', () => {
     expect(parseDatabaseMoney(String(rows[0].total), 'CAD')).toBe(cad('40.00'));
   });
 
-  it('checks velocity before moving money, not after', async () => {
+  it('checks velocity before moving money, and ON THE TRANSACTION', async () => {
     const splitId = await newSplit('15.00');
     await paySplitPortion(splitId, PAYER);
 
-    expect(vi.mocked(checkVelocityLimit)).toHaveBeenCalledWith(PAYER, cad('15.00'), 'CAD');
+    // The fourth argument is the executor, and asserting it is present is the
+    // call-site half of the pool-deadlock fix: without it checkVelocityLimit()
+    // falls back to getSql() and asks the 5-connection pool for a second
+    // connection while `sql.begin` still holds one. The concurrency test below
+    // covers the behaviour; this covers the wiring, so a refactor that drops
+    // the argument fails here with a clear reason rather than as a timeout.
+    expect(vi.mocked(checkVelocityLimit)).toHaveBeenCalledWith(
+      PAYER,
+      cad('15.00'),
+      'CAD',
+      expect.anything(),
+    );
+    const executor = vi.mocked(checkVelocityLimit).mock.calls[0][3];
+    expect(executor).toBeDefined();
+    expect(typeof executor).toBe('function');
   });
 
   it('refuses a portion over the ceiling and moves no money', async () => {
@@ -199,6 +213,51 @@ describe('split-pay is covered by the durable volume control', () => {
 
     // And nothing was recorded for a payment that never happened.
     expect(await velocityRowCount(PAYER)).toBe(0);
+  });
+
+  // Regression test for a pool deadlock this file's own feature introduced.
+  // `lib/db.ts` sets `max: 5`. When the velocity read ran on its own
+  // connection via getSql() while `sql.begin` held one, five concurrent
+  // portion payments held all five connections and each waited for a sixth,
+  // so none could finish and release — the pool deadlocked and every query on
+  // the instance stalled, not just this path. Six concurrent payments is one
+  // past that ceiling. Under the defect this test does not fail an assertion,
+  // it HANGS until the vitest timeout, which is exactly what the bug does to a
+  // request.
+  it('does not exhaust the connection pool under concurrent payments', async () => {
+    const splitIds = [];
+    for (let i = 0; i < 6; i += 1) splitIds.push(await newSplit('5.00'));
+
+    const results = await Promise.all(splitIds.map((id) => paySplitPortion(id, PAYER)));
+
+    expect(results).toHaveLength(6);
+    // 500 - (6 x 5)
+    expect(await balance(PAYER)).toBe(470);
+    expect(await balance(CREATOR)).toBe(30);
+    // Every payment consumed budget, so none of the six was silently skipped.
+    expect(await velocityRowCount(PAYER)).toBeGreaterThan(0);
+    const rows = await sql`
+      SELECT COALESCE(SUM(total_amount), 0) AS total FROM velocity_checks
+      WHERE user_id = ${PAYER} AND window_type = 'hourly' AND currency = 'CAD'
+    `;
+    expect(parseDatabaseMoney(String(rows[0].total), 'CAD')).toBe(cad('30.00'));
+  });
+
+  it('records velocity atomically with the payment, not after it', async () => {
+    // The record runs on the transaction, so it commits with the money or not
+    // at all. Previously it ran after commit on its own connection, which left
+    // two failure modes: a failure there returned 500 for a payment that had
+    // already succeeded, and the payer's budget stayed unconsumed.
+    const splitId = await newSplit('12.00');
+    await paySplitPortion(splitId, PAYER);
+
+    const rows = await sql`
+      SELECT COALESCE(SUM(total_amount), 0) AS total FROM velocity_checks
+      WHERE user_id = ${PAYER} AND window_type = 'hourly' AND currency = 'CAD'
+    `;
+    // Balance moved and budget consumed, in one commit.
+    expect(await balance(PAYER)).toBe(488);
+    expect(parseDatabaseMoney(String(rows[0].total), 'CAD')).toBe(cad('12.00'));
   });
 
   it('does not record velocity when the payment itself fails', async () => {

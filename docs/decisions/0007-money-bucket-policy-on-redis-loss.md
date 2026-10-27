@@ -34,6 +34,17 @@ That is the shape of defect this record has already produced four times.
 
 ## Correction — the durable guard did not cover `money:split-pay`. **Now it does.**
 
+> **Two defects were found in this implementation during review of PR #74 and
+> fixed there; both are recorded in `PROJECT_MEMORY.md`.** The velocity calls
+> now receive the caller's transaction (`tx`). Without it they fell back to
+> `getSql()` and asked the 5-connection pool for a second connection while the
+> payment transaction held one — five concurrent portion payments deadlocked
+> the pool and stalled every query on the instance. And `recordVelocity()` now
+> runs *inside* the transaction, so consumption commits with the payment;
+> after-commit it could return 500 for a payment that had already succeeded,
+> leaving the budget unconsumed. Both are pinned by tests, and reverting the
+> `tx` argument makes the concurrency case hang rather than fail an assertion.
+>
 > **RESOLVED by option (A), owner-authorized 2026-10-26.** `paySplitPortion()`
 > now calls `checkVelocityLimit()` before any balance moves and
 > `recordVelocity()` after the transaction commits, so the premise this record

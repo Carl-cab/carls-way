@@ -3270,6 +3270,9 @@ read as having closed it.
 and move the three money counters to PostgreSQL.
 
 **Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
+Implementation commit: **`6211dfb`** (the velocity gate and its test). Two
+defects in that commit were found in review and fixed later on the same branch
+— see the 2026-10-27 entry on the pool deadlock.
 
 ---
 
@@ -3416,5 +3419,84 @@ specified them.
 action is already recorded in `readiness.json` with these criteria, and opening
 issues on the owner's repository is not an action to take because a bot
 suggested it. The decision and its tracking stay with the owner.
+
+**Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
+
+---
+
+## 2026-10-27 — my fix shipped a pool deadlock, and the review caught it
+
+Two **Major** findings on PR #74, both about code `6211dfb` introduced, both
+fixed on the same branch. The first is the most serious defect anything in this
+sprint produced, and it was mine.
+
+**The pool deadlock.** `paySplitPortion()` opened `sql.begin`, holding one
+connection, and then let `checkVelocityLimit()` call `getSql()` for a second.
+`lib/db.ts` sets **`max: 5`**. So five concurrent portion payments hold all
+five connections inside transactions and each waits for a sixth; none can
+finish, none releases, and the pool is deadlocked. The blast radius is not the
+split path — it is **every query on that instance**, because they share the
+pool.
+
+**Demonstrated, not reasoned about.** Reverting the `tx` argument makes the new
+concurrency case **time out at 5000ms** instead of failing an assertion, and
+the deadlock then cascades into 10s hook timeouts on the three tests after it.
+That is precisely what the bug does to a request, and it is why the test asserts
+behaviour under six concurrent payments rather than inspecting a connection
+count.
+
+**It came directly from the design argument I made and defended.** I moved the
+velocity gate *inside* the transaction, over the convention used by the other
+three money paths, and gave two good reasons: the amount checked is then
+exactly the amount read under `FOR UPDATE`, and a future caller inherits the
+control. Both still hold. What I never considered is that the other paths check
+*before* `sql.begin` and therefore never hold a connection while asking for
+one — their convention was load-bearing for a reason I had not identified, and
+I departed from it having only checked the reasons I could see. "I have two
+good arguments for this" is not the same as "I have found every consequence of
+this."
+
+**The second finding, and why it improved the design.** `recordVelocity()` ran
+after the transaction committed. Its writes were uncaught and ran after the
+money had moved, so a failure returned **500 for a payment that had in fact
+succeeded**, with no retry path and the payer's budget unconsumed. It now runs
+on `tx` inside the transaction. That also **dissolves the objection I had
+documented** against doing so: I argued an in-transaction record would commit
+independently and a rollback would charge budget for money that never moved —
+true only while it used its own connection. On `tx` it is the same
+transaction, so a rollback consumes nothing and a commit cannot separate the
+two. My comment defending the after-commit ordering was reasoning correctly
+from a premise I had not noticed was changeable.
+
+**Both velocity functions now take an optional `executor`** (`VelocityExecutor`,
+the same `postgres.ISql` shape as `LedgerExecutor`), so the fix is additive and
+the other three callers are untouched.
+
+**Not fixed, and stated so it is not mistaken for fixed:** the other three
+money paths still record after commit, so the 500-after-success window remains
+open on `money:send`, request-accept and `money:transfer-execute`. They are not
+exposed to the deadlock, because they check before opening their transaction.
+Pre-existing, outside this PR's authorization, and now written down.
+
+**Tests run and their results.** `split-pay-velocity.test.ts` grew to 8 cases;
+with `splits.test.ts`, 30 of 30 pass. Mutation: reverting `tx` on the check
+fails the wiring assertion and hangs the concurrency case; the earlier three
+mutations still hold. Full suite result in the following commit message.
+
+**Financial or security behaviour affected.** Yes, and in the safe direction: a
+payment's budget consumption is now atomic with the payment, and a
+denial-of-service reachable by five concurrent split payments is removed.
+
+**Migration impact.** None. **Rollback requirement.** Reverting this commit
+reintroduces the pool deadlock; revert `6211dfb` as well, or not at all.
+
+**Unresolved findings.** The TOCTOU remains open for the owner — and the
+reviewer's earlier qualification now reads differently: with consumption
+committing inside the transaction, a per-payer lock held across it *would* make
+capacity visible before release, so option (A) becomes viable where it was not
+before. (B) is still the better change, but (A) is no longer broken by
+construction.
+
+**Next recommended action.** Owner: A/B/C on the TOCTOU, with the above noted.
 
 **Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.

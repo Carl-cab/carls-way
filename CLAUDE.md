@@ -77,7 +77,7 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
-| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `checkVelocityLimit()` / `recordVelocity()`. The velocity call must stay unwrapped — see the fail-closed requirement in decision 0007 |
+| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `checkVelocityLimit()` / `recordVelocity()`. Two rules, both learned by getting them wrong: the velocity call must stay **unwrapped** (fail-closed, decision 0007), and both velocity calls must be passed **`tx`** — see the `max: 5` pool note below |
 | `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control: records velocity, refuses over the ceiling with `VELOCITY_EXCEEDED` → 429, and **fails closed when velocity cannot be evaluated**. Mutation-checked three ways |
 | `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
@@ -250,10 +250,11 @@ reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
 **Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **62 files /
-913 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 913 pass. The last six arrived with
+915 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 915 pass. Eight arrived with
 `split-pay-velocity.test.ts` when `money:split-pay` was brought under the
-velocity control; the count was 61 / 907 on `master` at `e0f3f0d`. Not carried over from either side of a merge: the branches had
+velocity control, two of them for the pool deadlock that first implementation
+shipped; the count was 61 / 907 on `master` at `e0f3f0d`. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same
@@ -404,6 +405,27 @@ made only in `lib/providers/TransferProviderFactory.ts`.
   control lives: velocity was enforced in *routes*, so a path whose money
   movement sat in a library function (`paySplitPortion()`) was simply missed.
   Put the gate next to the movement, so a new caller inherits it
+- **A velocity call made from inside `sql.begin` MUST be passed the
+  transaction (`tx`).** `lib/db.ts` sets **`max: 5`**. A caller holding a pool
+  connection inside a transaction that lets `checkVelocityLimit()` or
+  `recordVelocity()` fall back to `getSql()` is asking the same 5-connection
+  pool for a second connection while holding one; five such requests in flight
+  hold all five and each waits for a sixth, so none finishes and releases.
+  **The pool deadlocks and every query on that instance stalls**, not only the
+  money path. `paySplitPortion()` shipped that shape for one commit on this
+  branch; reverting the `tx` argument makes
+  `split-pay-velocity.test.ts`'s concurrency case hang rather than fail an
+  assertion, which is what the bug does to a request. Both functions take an
+  optional `executor` (`VelocityExecutor`, the same `postgres.ISql` shape as
+  `LedgerExecutor`), so passing `tx` is always available.
+  Passing `tx` to `recordVelocity()` also makes consumption commit **with** the
+  payment: a rollback consumes no budget, and a commit cannot leave the money
+  moved with the budget unconsumed. The post-commit form had its own failure
+  mode — its writes ran after the money moved, so a failure returned 500 for a
+  payment that had succeeded, with no recovery path. The other three money
+  paths still record after commit; they avoid the pool deadlock only because
+  they check *before* opening their transaction, and the 500-after-success
+  window is still open on them
 - Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language

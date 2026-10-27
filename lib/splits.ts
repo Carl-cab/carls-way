@@ -225,16 +225,23 @@ export async function paySplitPortion(
     // to the movement means a future caller of paySplitPortion() inherits it;
     // the control living in routes is precisely why this path was missed.
     //
-    // checkVelocityLimit() runs on its own connection (getSql()), not `tx`. It
-    // reads `users` and `velocity_checks`, neither of which this transaction
-    // locks, so it cannot deadlock against the `sp` lock held here.
+    // `tx` is passed deliberately, and an earlier commit got this wrong by
+    // letting checkVelocityLimit() call getSql() for its own connection. That
+    // reasoned only about row locks — the velocity reads touch `users` and
+    // `velocity_checks`, which this transaction does not lock, so no lock
+    // conflict exists — and missed the pool entirely. `lib/db.ts` sets
+    // `max: 5`, so five concurrent portion payments hold all five connections
+    // inside `sql.begin` and then each wait for a sixth for the velocity read.
+    // None can finish and release. The pool deadlocks and stalls every query
+    // on the instance, not just this path. Running the read on `tx` uses the
+    // connection already held, so the second acquisition never happens.
     //
     // It is deliberately NOT wrapped in try/catch: decision 0007 requires the
     // money path to FAIL CLOSED when velocity cannot be evaluated. A throw
     // here aborts the transaction before any balance is touched. Wrapping this
     // to "be resilient" would silently convert a required fail-closed into
     // fail-open.
-    const velocity = await checkVelocityLimit(payerId, amount, participant.currency);
+    const velocity = await checkVelocityLimit(payerId, amount, participant.currency, tx);
     if (!velocity.allowed) {
       throw new SplitPaymentError(
         'VELOCITY_EXCEEDED',
@@ -325,46 +332,31 @@ export async function paySplitPortion(
       splitStatus = 'settled';
     }
 
-    return {
-      transactionId,
-      amountPaid: minorUnitsToMajorNumber(amount),
-      splitStatus,
-      remainingParticipants,
-      // Carried out for recordVelocity() below. Returned rather than captured
-      // in a mutable outer variable so that "recorded only if the transaction
-      // committed" is a property of control flow: if the block throws, these
-      // never exist and the call below is never reached. A captured flag would
-      // also have worked at runtime, but TypeScript cannot see an assignment
-      // made inside this callback and narrows the variable to `null`, so the
-      // flag version does not type-check without a cast that would hide the
-      // very thing worth being sure of.
-      velocityAmount: amount,
-      velocityCurrency: participant.currency,
-    };
+    // Recorded INSIDE the transaction, on `tx`, so consumption commits with
+    // the payment it belongs to. An earlier commit recorded after
+    // `sql.begin` returned, matching the other money paths, and justified it
+    // on the grounds that an in-transaction record would commit
+    // independently and a rollback would charge budget for money that never
+    // moved. That reasoning held only while recordVelocity() used its own
+    // connection. On `tx` it is part of the same transaction: a rollback
+    // leaves no consumed budget, and a commit cannot leave the payment
+    // written with the budget unconsumed.
+    //
+    // The post-commit version also had a failure mode of its own. Its three
+    // writes were uncaught and ran after the money had already moved, so a
+    // failure there returned 500 for a payment that had in fact succeeded,
+    // with no retry or recovery path and the payer's budget unconsumed.
+    await recordVelocity(payerId, amount, participant.currency, tx);
+
+    return { transactionId, amountPaid: minorUnitsToMajorNumber(amount), splitStatus, remainingParticipants };
   })) as unknown as {
     transactionId: number;
     amountPaid: number;
     splitStatus: SplitStatus;
     remainingParticipants: number;
-    velocityAmount: MinorUnits;
-    velocityCurrency: string;
   };
 
-  // Recorded AFTER the transaction commits, matching the other money paths —
-  // `app/api/transactions/route.ts` and `transactions/[id]/route.ts` both
-  // record once their `sql.begin` block has returned. The ordering matters in
-  // one direction: recordVelocity() runs on its own connection, so calling it
-  // inside the transaction would commit a velocity row independently of the
-  // payment, and a later rollback would charge the payer budget for money that
-  // never moved.
-  await recordVelocity(payerId, result.velocityAmount, result.velocityCurrency);
-
-  return {
-    transactionId: result.transactionId,
-    amountPaid: result.amountPaid,
-    splitStatus: result.splitStatus,
-    remainingParticipants: result.remainingParticipants,
-  };
+  return result;
 }
 
 export interface SplitWithParticipants extends SplitRecord {
