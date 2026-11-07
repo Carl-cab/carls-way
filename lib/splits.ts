@@ -1,5 +1,5 @@
 import { getSql } from '@/lib/db';
-import { checkVelocityLimit, recordVelocity } from '@/lib/auth';
+import { admitVelocity } from '@/lib/auth';
 import { createLedgerPair } from '@/lib/ledger';
 import {
   type MinorUnits,
@@ -140,8 +140,13 @@ export class SplitPaymentError extends Error {
     | 'NOT_PARTICIPANT'
     | 'ALREADY_PAID'
     | 'SPLIT_CLOSED'
-    | 'INSUFFICIENT_BALANCE'
-    | 'VELOCITY_EXCEEDED';
+    | 'INSUFFICIENT_BALANCE';
+  // There is no 'VELOCITY_EXCEEDED' member. A velocity refusal travels as
+  // `VelocityLimitError` from lib/auth.ts, which every money path's route maps
+  // to 429 — one error type for one condition across all of them, rather than
+  // each path re-encoding it. Translating it here would need a catch around
+  // the admission call, which decision 0007 forbids on this path.
+
   constructor(code: SplitPaymentError['code'], message: string) {
     super(message);
     this.name = 'SplitPaymentError';
@@ -210,7 +215,7 @@ export async function paySplitPortion(
     const isUsd = participant.currency === 'USD';
 
     // Durable volume control. Until 2026-10-26 this path had none: it moved
-    // money calling neither checkVelocityLimit() nor recordVelocity(), so
+    // money calling no velocity function at all, so
     // `money:split-pay` was guarded only by the Redis rate limit, and its
     // volume never entered `velocity_checks` to consume any other path's
     // budget either. Decision 0007 assumed velocity_checks covered all three
@@ -225,8 +230,19 @@ export async function paySplitPortion(
     // to the movement means a future caller of paySplitPortion() inherits it;
     // the control living in routes is precisely why this path was missed.
     //
+    // Admission is ONE atomic operation, not a check now and a record later.
+    // The first implementation here checked with checkVelocityLimit() and
+    // recorded with recordVelocity() after the move, which is the shape every
+    // money path had: two statements on two snapshots with nothing holding the
+    // payer's rows between them, so two concurrent portion payments by one
+    // payer both read the pre-payment total and both were admitted. The
+    // ceiling bounded a request, not an account. admitVelocity() claims first
+    // and verifies after, under row locks it holds to commit — see its
+    // doc comment. A refusal throws, which rolls the claim back with the
+    // payment.
+    //
     // `tx` is passed deliberately, and an earlier commit got this wrong by
-    // letting checkVelocityLimit() call getSql() for its own connection. That
+    // letting the velocity read call getSql() for its own connection. That
     // reasoned only about row locks — the velocity reads touch `users` and
     // `velocity_checks`, which this transaction does not lock, so no lock
     // conflict exists — and missed the pool entirely. `lib/db.ts` sets
@@ -240,14 +256,10 @@ export async function paySplitPortion(
     // money path to FAIL CLOSED when velocity cannot be evaluated. A throw
     // here aborts the transaction before any balance is touched. Wrapping this
     // to "be resilient" would silently convert a required fail-closed into
-    // fail-open.
-    const velocity = await checkVelocityLimit(payerId, amount, participant.currency, tx);
-    if (!velocity.allowed) {
-      throw new SplitPaymentError(
-        'VELOCITY_EXCEEDED',
-        velocity.reason ?? 'Transfer limit exceeded.',
-      );
-    }
+    // fail-open — and would also catch VelocityLimitError, turning a refusal
+    // into an admission. The route maps that error to 429; it does not travel
+    // as a SplitPaymentError, so no catch is needed here to translate it.
+    await admitVelocity(payerId, amount, participant.currency, tx);
 
     // Balance guard lives in the UPDATE itself: two simultaneous debits cannot
     // both pass a separate check-then-write.
@@ -332,22 +344,16 @@ export async function paySplitPortion(
       splitStatus = 'settled';
     }
 
-    // Recorded INSIDE the transaction, on `tx`, so consumption commits with
-    // the payment it belongs to. An earlier commit recorded after
-    // `sql.begin` returned, matching the other money paths, and justified it
-    // on the grounds that an in-transaction record would commit
-    // independently and a rollback would charge budget for money that never
-    // moved. That reasoning held only while recordVelocity() used its own
-    // connection. On `tx` it is part of the same transaction: a rollback
-    // leaves no consumed budget, and a commit cannot leave the payment
-    // written with the budget unconsumed.
-    //
-    // The post-commit version also had a failure mode of its own. Its three
-    // writes were uncaught and ran after the money had already moved, so a
-    // failure there returned 500 for a payment that had in fact succeeded,
-    // with no retry or recovery path and the payer's budget unconsumed.
-    await recordVelocity(payerId, amount, participant.currency, tx);
-
+    // No velocity write here. Consumption happened at admission, above, on
+    // `tx` — so it commits with the payment it belongs to: a rollback leaves
+    // no consumed budget, and a commit cannot leave the payment written with
+    // the budget unconsumed. Two earlier versions of this path wrote here
+    // instead. The first wrote after `sql.begin` returned, matching the other
+    // money paths, which meant three uncaught writes running after the money
+    // had already moved — a failure there returned 500 for a payment that had
+    // succeeded, with no recovery path and the payer's budget unconsumed. The
+    // second moved the write onto `tx`, which fixed that but still left the
+    // claim after the decision, so the race remained.
     return { transactionId, amountPaid: minorUnitsToMajorNumber(amount), splitStatus, remainingParticipants };
   })) as unknown as {
     transactionId: number;

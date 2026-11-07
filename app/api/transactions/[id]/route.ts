@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
-import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog } from '@/lib/auth';
+import { getAuthUser, admitVelocity, VelocityLimitError, auditLog } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
@@ -105,11 +105,9 @@ export async function PATCH(
     }
     const amountDecimal = toDatabaseDecimal(amountMinor);
 
-    // Velocity check (accepting a request is an outbound payment for the payer)
-    const velocityCheck = await checkVelocityLimit(user.userId, amountMinor, payerCurrency);
-    if (!velocityCheck.allowed) {
-      return NextResponse.json({ error: velocityCheck.reason }, { status: 429 });
-    }
+    // Accepting a request is an outbound payment for the payer, so it is
+    // admitted against their velocity budget — inside the money transaction
+    // below rather than here; see that call site.
 
     // Build FX quote if cross-border
     let receiverAmountMinor = amountMinor;
@@ -132,6 +130,13 @@ export async function PATCH(
     // the money movement; it is not a best-effort audit side effect.
     try {
       await sql.begin(async (tx) => {
+        // Atomic velocity admission, inside the money transaction and on `tx`.
+        // Previously a checkVelocityLimit() above and a recordVelocity() after
+        // the commit, which admitted two concurrent accepts by one payer on
+        // the same pre-payment total. `tx` is required to avoid both the race
+        // and the `max: 5` pool deadlock; no try/catch, per decision 0007.
+        await admitVelocity(user.userId, amountMinor, payerCurrency, tx);
+
         const debited = payerCurrency === 'USD'
           ? await tx`UPDATE users SET balance_usd = balance_usd - ${amountDecimal}
                      WHERE id = ${user.userId} AND balance_usd >= ${amountDecimal} RETURNING id`
@@ -194,10 +199,14 @@ export async function PATCH(
       if (txErr instanceof Error && txErr.message === 'ALREADY_PROCESSED') {
         return NextResponse.json({ error: 'Request already processed' }, { status: 409 });
       }
+      // The admission rolled back with the transaction: no budget consumed,
+      // no money moved, the request still pending.
+      if (txErr instanceof VelocityLimitError) {
+        return NextResponse.json({ error: txErr.message }, { status: 429 });
+      }
       throw txErr;
     }
 
-    await recordVelocity(user.userId, amountMinor, payerCurrency);
     await auditLog(user.userId, 'request_accepted', {
       receiverId: transaction.receiver_id,
       amount: minorUnitsToMajorNumber(amountMinor),
