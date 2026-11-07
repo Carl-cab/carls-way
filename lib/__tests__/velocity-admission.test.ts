@@ -63,30 +63,83 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('admitVelocity is an atomic admission, not a check and a later write', () => {
-  it('REFUSES ONE of two concurrent admissions that fit singly but not together', async () => {
-    // 400 + 400 = 800 against a 500 hourly ceiling. Either one alone is
-    // admissible; together they are not. Under check-then-record BOTH read
-    // 0 consumed, both were admitted, and the payer moved 800 through a
-    // control that says 500.
+  it('SERIALIZES admissions for one payer: the second cannot decide while the first holds', async () => {
+    // This is the test the file exists for, and it is written as a blocking
+    // assertion rather than a race on purpose.
+    //
+    // The obvious version — fire two concurrent admissions that fit singly
+    // but not together and assert exactly one succeeds — was written first
+    // and does NOT detect the defect. Mutation-checked: reversing
+    // admitVelocity() to read-then-write (the old check-then-record shape)
+    // leaves it green, because whether the two transactions actually
+    // interleave is up to the event loop and the driver, and in practice the
+    // first finished before the second read. A concurrency test that passes
+    // under the bug is worse than no test: it certifies the thing it cannot
+    // see.
+    //
+    // What distinguishes the two designs deterministically is the LOCK.
+    // Write-first takes a row lock PostgreSQL holds to commit, so a second
+    // admission for the same payer is blocked at its first statement and
+    // cannot reach a decision until the first transaction settles.
+    // Read-first takes no lock, so the second sails past and decides on a
+    // stale total. Holding the first transaction open and observing that the
+    // second has not settled is therefore a direct observation of the
+    // property, with no reliance on scheduling.
     const amount = cad('400.00');
     expect(amount * 2).toBeGreaterThan(LIMITS.hourly_max_amount * 100);
     expect(amount).toBeLessThanOrEqual(LIMITS.hourly_max_amount * 100);
 
-    const outcomes = await Promise.allSettled([
-      admitVelocity(PAYER, amount, 'CAD'),
-      admitVelocity(PAYER, amount, 'CAD'),
-    ]);
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
 
-    const admitted = outcomes.filter((o) => o.status === 'fulfilled');
-    const refused = outcomes.filter((o) => o.status === 'rejected');
-    expect(admitted).toHaveLength(1);
-    expect(refused).toHaveLength(1);
-    expect((refused[0] as PromiseRejectedResult).reason).toBeInstanceOf(VelocityLimitError);
+    const first = sql.begin(async (tx) => {
+      await admitVelocity(PAYER, amount, 'CAD', tx as never);
+      await holdFirst; // keep the transaction, and its row locks, open
+    });
 
-    // And the refused one consumed nothing: the ledger of budget shows one
-    // payment, not two. This is the assertion that fails loudest under the
-    // old ordering — it reads 800.
+    // Let the first transaction take its locks.
+    await new Promise((r) => setTimeout(r, 200));
+
+    let secondSettled = false;
+    const second = admitVelocity(PAYER, amount, 'CAD')
+      .then(() => { secondSettled = true; return 'admitted' as const; })
+      .catch((err: unknown) => {
+        secondSettled = true;
+        if (err instanceof VelocityLimitError) return 'refused' as const;
+        throw err;
+      });
+
+    await new Promise((r) => setTimeout(r, 400));
+    // Under read-then-write this is `true` by now, and 'admitted'.
+    expect(secondSettled, 'second admission decided while the first held the rows').toBe(false);
+
+    releaseFirst();
+    await first;
+
+    // Now it resumes, increments on top of a settled 400, and is refused.
+    await expect(second).resolves.toBe('refused');
     expect(await consumed('hourly')).toBe(amount);
+  });
+
+  it('keeps the aggregate within budget under several concurrent admissions', async () => {
+    // Best-effort companion to the test above: whether these six interleave
+    // is up to the scheduler, so a pass proves less than it looks. It is kept
+    // because the invariant it asserts cannot be satisfied by accident —
+    // consumed budget must equal the admitted count times the amount, and
+    // must not exceed the ceiling, however the six happen to be ordered.
+    const amount = cad('100.00');
+    const ceiling = LIMITS.hourly_max_amount * 100; // 500.00 -> 5 fit, 6 do not
+
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: 6 }, () => admitVelocity(PAYER, amount, 'CAD')),
+    );
+    const admitted = outcomes.filter((o) => o.status === 'fulfilled').length;
+
+    for (const o of outcomes) {
+      if (o.status === 'rejected') expect(o.reason).toBeInstanceOf(VelocityLimitError);
+    }
+    expect(await consumed('hourly')).toBe(admitted * amount);
+    expect(await consumed('hourly')).toBeLessThanOrEqual(ceiling);
   });
 
   it('admits while the payer is within budget', async () => {

@@ -3581,3 +3581,109 @@ fail-closed requirement.
 **Next recommended action.** Owner: A/B/C on the TOCTOU.
 
 **Commit / PR.** PR **#74**, branch `docs/sprint1-owner-confirmations`.
+
+---
+
+## 2026-11-07 — Atomic velocity admission: the TOCTOU, closed (option B)
+
+**Purpose and scope.** The owner chose **option (B)** from the three recorded
+against the TOCTOU raised in review of PR #74: make velocity admission a
+single atomic operation in PostgreSQL rather than a check and a later write.
+Implemented on all three balance-moving paths. Recorded as
+`docs/decisions/0008-atomic-velocity-admission.md`, status Accepted.
+
+**Financial or security behaviour affected.** This changes a financial
+control on every path that moves a balance, so it is stated plainly.
+
+Before: `checkVelocityLimit()` read the rolling window totals, money moved,
+`recordVelocity()` added the payment afterwards. Two statements, two
+snapshots, nothing holding the payer's `velocity_checks` rows in between. Two
+concurrent payments by one payer each read the pre-payment total, each
+concluded there was headroom, and both completed — the ceiling bounded a
+request rather than the account it exists to bound (CWE-367). Pre-existing and
+system-wide; PR #74 inherited it along with the control it added.
+
+After: `admitVelocity()` upserts the three window rows (taking row locks
+PostgreSQL holds to commit), re-reads the totals including its own claim, and
+throws `VelocityLimitError` if the payer is over — which rolls the claim back.
+A concurrent admission blocks on the held row and resumes only once this one
+settles, so the total is published by the same commit that releases the lock.
+`money:send`, request-accept and `money:split-pay` all call it inside their
+money transaction, passing `tx`.
+
+Two consequences beyond the race. The post-commit velocity write is gone, and
+with it the window where a failure in those writes returned 500 for a payment
+that had already succeeded — open on `money:send` and request-accept until
+now. And refusal travels as a thrown error rather than a returned flag,
+deliberately: the claim is already written when the decision is made, so only
+a rollback releases it, and a throw makes "a refused payment consumes no
+budget" a property of control flow instead of a convention each caller must
+remember.
+
+Behaviour change a user could notice: a payer who fires concurrent payments
+while near their ceiling now has those attempts serialized against each other
+and may be refused one that previously went through. That is the intended
+effect. Distinct payers are unaffected — they take disjoint rows.
+
+**Why not option (A).** (A) — a per-payer lock held across the check and the
+movement — was my own first proposal and was wrong as stated: the lock
+released at commit while `recordVelocity()` published the new total
+afterwards, so the next payment still read a stale value. A lock whose
+protected invariant is published after the lock is dropped protects nothing.
+It became viable only once consumption moved inside the transaction, at which
+point it is more machinery than (B) for the same guarantee.
+
+**Scope held, not widened.** `checkVelocityLimit()` survives as an explicitly
+non-binding preview with one permitted caller, `POST /api/transfers/intent`,
+which moves no money. The transfer rail itself consumes no budget anywhere —
+that route's comment claiming velocity was "recorded at confirm" was simply
+false; no confirm or execute route has ever written it, while sandbox confirm
+does move the platform balance. That is an absent control rather than a racy
+one, it is a financial-behaviour decision (intent, confirm or execute), and it
+is recorded as an open gap in `CLAUDE.md` rather than fixed here.
+
+**Tests run and their results.** **65 files / 932 tests**, all passing on a
+database created fresh for the run with the CI fixture applied. Typecheck 0
+errors; lint 0 errors / 28 pre-existing warnings. Three mutations applied to
+the real source and the suite re-run: reversing `admitVelocity()` to
+read-then-write is caught by 2 cases; dropping the own-transaction wrapper by
+4; dropping the `tx` argument in `lib/splits.ts` by 5, including the static
+caller guard and the pool-deadlock timeout at 5s.
+
+**A negative result worth keeping.** The obvious concurrency test — fire two
+admissions that fit singly but not together, assert exactly one succeeds — was
+written first and **passed under the read-then-write mutation**. Whether the
+two transactions interleave is up to the event loop and the driver, and in
+practice the first finished before the second read. It would have shipped as a
+test that certifies what it cannot see. Replaced with an assertion on the
+**lock**: hold one admission's transaction open and require the second to be
+unable to reach a decision. Deterministic, and it fails on the mutation. The
+weaker N-way version is kept alongside it, labelled best-effort, because the
+invariant it asserts cannot be satisfied by accident.
+
+A second false positive, caught by running it: the static caller guard flagged
+`app/api/migrate/route.ts`, which names `recordVelocity()` inside an
+operator-facing error string. The guard now strips quoted strings as well as
+comments — but not template literals, which carry SQL and could hide a real
+call.
+
+**Migration impact.** None. No schema change; `velocity_checks` and its
+partial unique index are unchanged. One test fixture user added (9121) to
+`lib/__tests__/helpers/test-schema.sql`, which is CI-only.
+
+**Rollback requirement.** Revert the commit. There is no data migration to
+undo and no persisted state in a new shape; reverting restores the
+check-then-record sequence and the race with it.
+
+**Unresolved findings.** The transfer rail's absent velocity control, above.
+0007's observability asks are untouched: nothing scrapes
+`rateLimitBackendHealth()`, sustained Redis degradation has no alert and no
+named owner, and the Redis-backed rate-limit buckets still degrade silently to
+per-instance counting. Moving *those* counters to PostgreSQL would be a second
+change; only the velocity counters are addressed here.
+
+**Next recommended action.** Owner: review and merge PR #74, then this work,
+which is stacked on it.
+
+**Commit / PR.** Branch `claude/cool-cerf-ErxD3`, stacked on PR #74's head
+`04bb94e`. No PR opened — not requested.

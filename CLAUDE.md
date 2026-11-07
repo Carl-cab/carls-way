@@ -77,8 +77,10 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
-| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `checkVelocityLimit()` / `recordVelocity()`. Two rules, both learned by getting them wrong: the velocity call must stay **unwrapped** (fail-closed, decision 0007), and both velocity calls must be passed **`tx`** — see the `max: 5` pool note below |
-| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: records velocity, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **rolls the payment back if the velocity write fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked five ways; the pool case *hangs* rather than fails when the `tx` argument is dropped |
+| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `admitVelocity()`. Two rules, both learned by getting them wrong: the admission call must stay **unwrapped** (fail-closed, decision 0007 — and a `catch` would also swallow `VelocityLimitError`, turning a refusal into an admission), and it must be passed **`tx`** — see the `max: 5` pool note below |
+| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: consumes budget, admits on the transaction, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **releases the claim when a later step of the payment fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked; the pool case *hangs* rather than fails when the `tx` argument is dropped |
+| `lib/__tests__/velocity-admission.test.ts` | Pins `admitVelocity()` itself. Its central case asserts the **lock**, not a race: it holds one admission's transaction open and requires the second to be unable to reach a decision. The obvious version — two concurrent admissions, assert one wins — was written first and **passed under the read-then-write mutation**, because whether they interleave is up to the scheduler. Do not replace it with that |
+| `lib/__tests__/velocity-admission-callers.test.ts` | Static guard, in the manner of the workflow-pinning test: no money path may call `checkVelocityLimit()` (one allowlisted preview call site) or `recordVelocity()`, and every `admitVelocity()` call must pass an executor. It strips comments **and quoted strings** before grepping — `app/api/migrate/route.ts` names `recordVelocity()` in an operator error message |
 | `lib/__tests__/split-pay-route-status.test.ts` | Pins the route's status contract, which the file above cannot: it calls `paySplitPortion()` directly, so a regression mapping `VELOCITY_EXCEEDED` to 400 instead of **429** would have stayed green. Also pins 403/409/409/400 for the other codes and **500 for a non-`SplitPaymentError`**, so a velocity-evaluation failure is never reported as the caller's fault |
 | `lib/__tests__/provider-event-duplicates.test.ts` | Duplicate-webhook detection. Its `beforeEach` was `TRUNCATE provider_webhook_events` — on a **shared** table, which destroyed other files' rows *and* left its own behind. Now a delete scoped to its own ids. Keep it scoped: the leak was invisible only because another file's unrelated cleanup happened to run in between |
 | `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
@@ -251,13 +253,16 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **63 files /
-922 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 922 pass. The baseline on `master` at `e0f3f0d` is
-**61 / 907**, and the difference belongs to PR #74, not to that commit:
-`split-pay-velocity.test.ts` (9) and `split-pay-route-status.test.ts` (6) when
-`money:split-pay` was brought under the velocity control — several of them for
-defects the first implementation shipped. Not carried over from either side of a merge: the branches had
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **65 files /
+932 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 932 pass. The baseline on `master` at `403acf1` is
+**61 / 907**, and the difference belongs to two unmerged branches, not to that
+commit: PR #74 adds `split-pay-velocity.test.ts` (9) and
+`split-pay-route-status.test.ts` (6) when `money:split-pay` was brought under
+the velocity control; stacked on it, the decision 0008 work adds
+`velocity-admission.test.ts` (8) and `velocity-admission-callers.test.ts` (3)
+and rewrites the first of those two. Several of all of these exist for defects
+the first implementations shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same
@@ -400,14 +405,34 @@ made only in `lib/providers/TransferProviderFactory.ts`.
 **Rules:**
 - Both sandbox providers are execution_mode='sandbox' — no real bank/external API calls
 - `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
-- Velocity is checked at intent creation but only recorded at confirm (future: at execute)
-- **Every balance-moving path must go through `checkVelocityLimit()` before
-  the move and `recordVelocity()` after it.** `money:split-pay` did neither
-  until 2026-10-26 — it moved money with no durable volume control, and its
-  volume was invisible to every other path's budget. The lesson is where the
-  control lives: velocity was enforced in *routes*, so a path whose money
-  movement sat in a library function (`paySplitPortion()`) was simply missed.
-  Put the gate next to the movement, so a new caller inherits it
+- Velocity is **previewed** at intent creation and admitted nowhere on this
+  rail. The line here used to say "recorded at confirm"; that was never true —
+  no confirm or execute route has ever written velocity, so a transfer
+  consumes no budget at all, while sandbox confirm does move the platform
+  balance. Open gap, listed below; deliberately not fixed by decision 0008,
+  which was scoped to the three paths that had the TOCTOU
+- **Every balance-moving path must call `admitVelocity()` inside its money
+  transaction, passing `tx`.** It is one atomic operation, not a check now and
+  a record later. That older shape — `checkVelocityLimit()`, move money,
+  `recordVelocity()` — is the TOCTOU (CWE-367) decision 0008 closed: the read
+  and the write sat on separate snapshots with nothing holding the payer's
+  rows between them, so two concurrent payments by one payer both saw the
+  pre-payment total and both were admitted. The ceiling bounded a request, not
+  an account. `admitVelocity()` claims first and verifies after, under row
+  locks held to commit; a refusal **throws** `VelocityLimitError`, which rolls
+  the claim back, and every money route maps that to **429**.
+  `checkVelocityLimit()` survives only as a non-binding preview with exactly
+  one permitted caller (`POST /api/transfers/intent`, which moves no money);
+  `recordVelocity()` must not be called from a money path at all.
+  `lib/__tests__/velocity-admission-callers.test.ts` fails if either rule is
+  broken, because the defect was a *shape* copied from path to path rather
+  than a bug in one function.
+  `money:split-pay` had no velocity control of any kind until 2026-10-26 — it
+  moved money with no durable volume control, and its volume was invisible to
+  every other path's budget. The lesson is where the control lives: velocity
+  was enforced in *routes*, so a path whose money movement sat in a library
+  function (`paySplitPortion()`) was simply missed. Put the gate next to the
+  movement, so a new caller inherits it
 - **A velocity call made from inside `sql.begin` MUST be passed the
   transaction (`tx`).** `lib/db.ts` sets **`max: 5`**. A caller holding a pool
   connection inside a transaction that lets `checkVelocityLimit()` or
@@ -421,14 +446,14 @@ made only in `lib/providers/TransferProviderFactory.ts`.
   assertion, which is what the bug does to a request. Both functions take an
   optional `executor` (`VelocityExecutor`, the same `postgres.ISql` shape as
   `LedgerExecutor`), so passing `tx` is always available.
-  Passing `tx` to `recordVelocity()` also makes consumption commit **with** the
+  Passing `tx` to `admitVelocity()` also makes consumption commit **with** the
   payment: a rollback consumes no budget, and a commit cannot leave the money
-  moved with the budget unconsumed. The post-commit form had its own failure
-  mode — its writes ran after the money moved, so a failure returned 500 for a
-  payment that had succeeded, with no recovery path. The other three money
-  paths still record after commit; they avoid the pool deadlock only because
-  they check *before* opening their transaction, and the 500-after-success
-  window is still open on them
+  moved with the budget unconsumed. The old post-commit `recordVelocity()`
+  form had its own failure mode — its writes ran after the money moved, so a
+  failure returned 500 for a payment that had succeeded, with no recovery
+  path. **All three balance-moving paths now admit inside their transaction,
+  so that window is closed** (it was open on `money:send` and request-accept
+  until decision 0008)
 - Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
@@ -508,6 +533,16 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
+- **The transfer rail consumes no velocity budget.** `POST
+  /api/transfers/intent` runs a non-binding preview; no confirm or execute
+  route has ever written velocity, despite a comment in the intent route that
+  claimed it was "recorded at confirm". Sandbox confirm does move the platform
+  balance, so this is a balance-moving path with no durable volume control —
+  the same gap `money:split-pay` had until 2026-10-26, on a different rail.
+  Deliberately out of scope for decision 0008, which fixed the ordering defect
+  on the three paths that already had a control; adding one here is a
+  financial-behaviour change (it decides whether a transfer consumes budget at
+  intent, confirm or execute) and belongs with the rail work.
 - `AdminAuditService.verifyImmutability()` returns a hardcoded
   `verification_status: 'clean'` with `total_logs_checked: 0`. Nothing calls
   it, so no path trusts the false answer. A real implementation exists at
@@ -599,38 +634,38 @@ arbitrary end user.
   still open for the rest.** The owner **accepted** keeping all three money
   buckets **fail-open** on Redis loss (`docs/decisions/0007`, status Accepted),
   with a fail-closed requirement in the other direction: **if `velocity_checks`
-  cannot be evaluated atomically, the money path must refuse.** That holds in
-  effect today only *incidentally* — `checkVelocityLimit()` has no `try/catch`
-  and no caller wraps it, so a DB error 500s before any balance moves — with
-  **no explicit branch**. Wrapping that call to "be resilient" would silently
-  make it fail-open.
+  cannot be evaluated atomically, the money path must refuse.**
 
-  **Coverage of that requirement, per path, as of 2026-10-26.** Only
-  `money:split-pay` has a test pinning it:
-  `lib/__tests__/split-pay-velocity.test.ts` asserts that a velocity-evaluation
-  error moves no money and leaves the portion owed, and swallowing the error
-  fails exactly that one case. `money:send`, request-accept and
-  `money:transfer-execute` (checked at intent) still rely on the same
-  incidental propagation **with nothing pinning it**, so a `try/catch` added
-  around any of those three calls would invert the requirement silently. Those
-  three are the open side of this item.
+  **That requirement is now implemented and pinned on all three
+  balance-moving paths (decision 0008, 2026-11-07).** `admitVelocity()` has no
+  `try/catch`, no caller wraps it, and a refusal throws rather than returning,
+  so an evaluation failure and a breached ceiling both abort the transaction
+  before any balance moves. A `catch` added "to be resilient" would now invert
+  the requirement *and* swallow `VelocityLimitError`, turning a refusal into
+  an admission. `lib/__tests__/split-pay-velocity.test.ts` and
+  `lib/__tests__/velocity-admission.test.ts` fail on exactly that mutation.
+  This paragraph read "holds in effect today only *incidentally*… with no
+  explicit branch" and listed `money:send` and request-accept as unpinned;
+  both are now routed through the same admission and covered by the same
+  tests.
 
-  **One premise of that decision was false for one bucket, and is now fixed.**
+  **The remaining path is the transfer rail**, which consumes no budget
+  anywhere: `POST /api/transfers/intent` previews, and no confirm or execute
+  route has ever written velocity. That is an absent control, not an unpinned
+  one, and it is listed separately below.
+
+  **One premise of the 0007 decision was false for one bucket, and is fixed.**
   `lib/splits.ts` contained **zero** velocity references: `paySplitPortion()`
-  debited the payer and credited the creator calling neither
-  `checkVelocityLimit()` nor `recordVelocity()`, so `money:split-pay` had no
-  durable volume control behind the rate limit and its volume never entered
-  `velocity_checks` to consume any other path's budget. **Resolved
-  2026-10-26 (owner-authorized option A):** the gate now lives *inside*
-  `paySplitPortion()`, not in the route — the amount is read from
-  `split_participants` under `FOR UPDATE`, so the amount checked is exactly the
-  amount about to move, and any future caller inherits the control. A
-  `VELOCITY_EXCEEDED` error maps to **429**, as on every other money path.
-  **Do not wrap that `checkVelocityLimit()` call in a `try/catch`** — 0007
-  requires this path to fail closed when velocity cannot be evaluated, and the
-  throw aborting the transaction before any balance moves is what implements
-  it. `lib/__tests__/split-pay-velocity.test.ts` pins all of it and is
-  mutation-checked three ways; swallowing that error fails exactly one case.
+  debited the payer and credited the creator calling no velocity function at
+  all, so `money:split-pay` had no durable volume control behind the rate
+  limit and its volume never entered `velocity_checks` to consume any other
+  path's budget. **Resolved 2026-10-26 (owner-authorized option A):** the gate
+  lives *inside* `paySplitPortion()`, not in the route — the amount is read
+  from `split_participants` under `FOR UPDATE`, so the amount checked is
+  exactly the amount about to move, and any future caller inherits the
+  control. A velocity refusal maps to **429**, as on every other money path.
+  The first implementation shipped the same check-then-record shape as the
+  rest; decision 0008 replaced it on all three paths.
 
   When shared rate limiting is lost — Redis unreachable, or
   no usable client header — every bucket currently fails *open*: the request is
