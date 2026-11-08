@@ -233,6 +233,23 @@ yarn lockfile back.
 
 **Branching:** Feature branches off `master`. The `documentation/handoff-package` branch contains all handoff docs. Vercel auto-deploys on every push to `master`.
 
+**A stacked PR gets no CI, and the PR page does not say so.** Both `ci.yml` and
+`codeql.yml` trigger on `branches: [master, 'integration/**']`, which filters
+the **base** of a `pull_request`. A PR targeting another feature branch — as
+PR #75 targets #74's branch, on purpose, so a known defect is never deployed
+alone — therefore runs no tests, no dependency audit, no secret scan and no
+CodeQL. Its checks list shows only Vercel and CodeRabbit, which looks like a
+short list rather than an absent one. This is the same failure mode as reading
+"ALL GREEN 1/1" as green: **nothing pending is not the same as something
+passed.**
+
+Those workflows also fire on **push** to `integration/**`, so the way to get
+real evidence for a stacked head is to push that exact commit to an
+`integration/<topic>` branch and read the run. It uses a pattern the workflows
+already bless, needs no change to CI permissions, and creates no second merge
+path into `master`. Name the SHA when reporting the result, because the
+evidence belongs to the commit and not to the PR.
+
 **Schema changes:** When adding a table or column, update **three** places:
 1. `lib/db.ts` → `initializeSchema()` — so fresh environments get it on first boot.
 2. `app/api/migrate/route.ts` → `ALTER TABLE … ADD COLUMN IF NOT EXISTS` or
