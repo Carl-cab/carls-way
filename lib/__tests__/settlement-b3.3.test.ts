@@ -8,6 +8,7 @@
 import { SettlementExecutor } from '../settlement/SettlementExecutor';
 import type { SettlementPlan } from '../settlement/SettlementOrchestrator';
 import { recordVelocity } from '../auth';
+import { createVelocityClaim, VELOCITY_CLAIM_PROVIDER } from '../velocity-claims';
 import { getSql, initializeSchema } from '../db';
 import { minorUnitsToMajorNumber, parseSignedDatabaseMoney } from '../money';
 
@@ -70,11 +71,13 @@ beforeAll(async () => {
 beforeEach(async () => {
   await sql`DELETE FROM notifications WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM velocity_checks WHERE user_id = ${USER_ID}`;
+  await sql`DELETE FROM velocity_claims WHERE user_id = ${USER_ID}`;
 });
 
 afterAll(async () => {
   await sql`DELETE FROM notifications WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM velocity_checks WHERE user_id = ${USER_ID}`;
+  await sql`DELETE FROM velocity_claims WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM audit_logs WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM transfer_intents WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM users WHERE id = ${USER_ID}`;
@@ -147,7 +150,13 @@ describe('executeVelocityReversal', () => {
     expect(await dailyVelocityTotal()).toBe(before);
   });
 
-  it('reverses recorded velocity for a returned transfer', async () => {
+  // This case previously asserted that a returned transfer always reversed
+  // velocity, and that the window netted back to zero. Both were true of
+  // reverseVelocity() and both were the defect: the rail holds no claim, so
+  // there was nothing to attribute the release to, and it took whatever the
+  // window held — budget money:send and money:split-pay had consumed. The
+  // single assertion hid the distinction, so it is now two cases.
+  it('releases NOTHING for a returned transfer that holds no claim', async () => {
     await recordVelocity(USER_ID, 10_000, 'CAD');
     expect(await dailyVelocityTotal()).toBe(100);
 
@@ -155,10 +164,37 @@ describe('executeVelocityReversal', () => {
       makePlan({ reverseVelocity: true, nextStatus: 'returned' })
     );
 
+    // Not a settlement failure: the correct release for a path that consumed
+    // no budget is zero, and the executor says so rather than inventing one.
+    expect(result.success).toBe(true);
+    expect(result.velocityReversed).toBe(false);
+    expect(result.reason).toMatch(/no_claim/);
+    // The recorded 100 is untouched — this is the assertion the old test
+    // inverted, expecting the window to be drained to zero.
+    expect(await dailyVelocityTotal()).toBe(100);
+  });
+
+  it('releases exactly the claim for a returned transfer that holds one', async () => {
+    await recordVelocity(USER_ID, 10_000, 'CAD');
+    expect(await dailyVelocityTotal()).toBe(100);
+
+    // A claim for half the recorded volume. The release must take 50, not 100.
+    await createVelocityClaim({
+      userId: USER_ID,
+      provider: VELOCITY_CLAIM_PROVIDER,
+      reference: String(intentId),
+      claimKind: 'funding',
+      amount: 5_000,
+      currency: 'CAD',
+    });
+
+    const result = await executor.executeVelocityReversal(
+      makePlan({ reverseVelocity: true, nextStatus: 'returned' })
+    );
+
     expect(result.success).toBe(true);
     expect(result.velocityReversed).toBe(true);
-    // Compensating rows net the window back to zero.
-    expect(await dailyVelocityTotal()).toBe(0);
+    expect(await dailyVelocityTotal()).toBe(50);
   });
 
   it('returns failure (never throws) when the intent is missing', async () => {

@@ -427,6 +427,59 @@ export async function POST(req: NextRequest) {
       console.error('velocity_checks unique index creation failed:', indexErr);
     }
 
+    // ── velocity_claims ────────────────────────────────────────────────────
+    // Makes a velocity release identifiable and bounded. Without it,
+    // reverseVelocity() released min(amount, current window total), and that
+    // total spans every money path — so a returned transfer freed budget
+    // money:send and money:split-pay had genuinely consumed. Decision 0012.
+    //
+    // The window_start columns are the claim's OWN windows, recorded when it
+    // was created, because a return can arrive 60 (US unauthorized debit) or
+    // 90 (CA PAD personal dispute) calendar days later.
+    await sql`
+      CREATE TABLE IF NOT EXISTS velocity_claims (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        provider TEXT NOT NULL,
+        reference TEXT NOT NULL,
+        claim_kind TEXT NOT NULL,
+        amount NUMERIC(14,2) NOT NULL,
+        currency TEXT NOT NULL,
+        hourly_window_start TIMESTAMPTZ NOT NULL,
+        daily_window_start TIMESTAMPTZ NOT NULL,
+        weekly_window_start TIMESTAMPTZ NOT NULL,
+        state TEXT NOT NULL DEFAULT 'reserved',
+        released_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+        released_at TIMESTAMPTZ,
+        release_event_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`ALTER TABLE velocity_claims ADD COLUMN IF NOT EXISTS claim_kind TEXT`;
+    await sql`ALTER TABLE velocity_claims ADD COLUMN IF NOT EXISTS released_amount NUMERIC(14,2) NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE velocity_claims ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE velocity_claims ADD COLUMN IF NOT EXISTS release_event_id TEXT`;
+    // One claim per (provider, reference) — what makes a release identifiable
+    // and a duplicate confirmation unable to claim twice.
+    let velocityClaimIndexNote: string | undefined;
+    try {
+      await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS velocity_claims_reference_key
+          ON velocity_claims (provider, reference)
+      `;
+    } catch (claimIndexErr) {
+      velocityClaimIndexNote =
+        'velocity_claims_reference_key could not be created — the table holds duplicate ' +
+        'rows for at least one (provider, reference). Dedupe them and re-run this ' +
+        'migration; claim-bounded velocity release depends on that uniqueness.';
+      console.error('velocity_claims unique index creation failed:', claimIndexErr);
+    }
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_velocity_claims_user_state
+        ON velocity_claims (user_id, state, currency)
+    `;
+
     // ── audit_logs and fx_rates ─────────────────────────────────────────────
     // Both were read and written by application code but created by neither
     // initializeSchema() nor this route. auditLog() swallows its own errors,
@@ -778,7 +831,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const warnings = [velocityIndexNote, fxIndexNote].filter(
+    const warnings = [velocityIndexNote, velocityClaimIndexNote, fxIndexNote].filter(
       (w): w is string => typeof w === 'string',
     );
 
