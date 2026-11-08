@@ -251,22 +251,17 @@ export async function checkVelocityLimit(
   // Validates currency without ever interpreting cents as major units.
   parsePositiveMoney(toDatabaseDecimal(amount), currency);
   const sql = executor ?? getSql();
-  const userRows = await sql`SELECT kyc_status FROM users WHERE id = ${userId}`;
-  const kycStatus = userRows[0]?.kyc_status as string;
-  const limits = kycStatus === 'verified'
-    ? VELOCITY_LIMITS.verified_user
-    : VELOCITY_LIMITS.new_user;
-
-  const now = new Date();
-  const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
-  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
+  const limits = await velocityLimitsFor(sql, userId);
+  // Shared with admitVelocity() rather than recomputed. These boundaries must
+  // agree across preview, admission and reversal: a reversal computed on a
+  // different boundary stops matching the rows admission wrote, so it releases
+  // nothing. Four copies of this definition existed before PR #75.
+  const [hourly, daily, weekly] = velocityWindows();
 
   const hourlyRows = await sql`
     SELECT COALESCE(SUM(total_amount), 0) as total FROM velocity_checks
     WHERE user_id = ${userId} AND window_type = 'hourly'
-      AND window_start >= ${hourStart.toISOString()} AND currency = ${currency}
+      AND window_start >= ${hourly.start.toISOString()} AND currency = ${currency}
   `;
   if (parseSignedDatabaseMoney(String(hourlyRows[0]?.total ?? '0'), currency) + amount > limits.hourly_max_amount * 100) {
     return { allowed: false, reason: `Hourly limit of ${currency} ${limits.hourly_max_amount.toLocaleString()} exceeded` };
@@ -276,7 +271,7 @@ export async function checkVelocityLimit(
     SELECT COALESCE(SUM(total_amount), 0) as total, COALESCE(SUM(transaction_count), 0) as count
     FROM velocity_checks
     WHERE user_id = ${userId} AND window_type = 'daily'
-      AND window_start >= ${dayStart.toISOString()} AND currency = ${currency}
+      AND window_start >= ${daily.start.toISOString()} AND currency = ${currency}
   `;
   if (parseSignedDatabaseMoney(String(dailyRows[0]?.total ?? '0'), currency) + amount > limits.daily_max_amount * 100) {
     return { allowed: false, reason: `Daily limit of ${currency} ${limits.daily_max_amount.toLocaleString()} exceeded` };
@@ -288,7 +283,7 @@ export async function checkVelocityLimit(
   const weeklyRows = await sql`
     SELECT COALESCE(SUM(total_amount), 0) as total FROM velocity_checks
     WHERE user_id = ${userId} AND window_type = 'weekly'
-      AND window_start >= ${weekStart.toISOString()} AND currency = ${currency}
+      AND window_start >= ${weekly.start.toISOString()} AND currency = ${currency}
   `;
   if (parseSignedDatabaseMoney(String(weeklyRows[0]?.total ?? '0'), currency) + amount > limits.weekly_max_amount * 100) {
     return { allowed: false, reason: `Weekly limit of ${currency} ${limits.weekly_max_amount.toLocaleString()} exceeded` };
@@ -449,17 +444,8 @@ export async function recordVelocity(
   // separately and a failure here reports 500 for a payment that succeeded.
   const sql = executor ?? getSql();
   const amountDecimal = toDatabaseDecimal(amount);
-  const now = new Date();
-  const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
-  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
 
-  for (const [windowType, windowStart] of [
-    ['hourly', hourStart] as const,
-    ['daily', dayStart] as const,
-    ['weekly', weekStart] as const,
-  ]) {
+  for (const { type: windowType, start: windowStart } of velocityWindows()) {
     // Single atomic upsert. This was previously an INSERT ... ON CONFLICT DO
     // NOTHING followed by an unconditional UPDATE, which counted the first
     // transaction of every window twice: the INSERT seeded the row with
@@ -539,18 +525,9 @@ export async function reverseVelocity(
   // original transaction timestamp, which this signature does not carry; the
   // clamp below keeps the effect conservative in the meantime.
   const reversalAmount = Math.min(amount, MAX_SINGLE_TRANSFER_AMOUNT * 100);
-  const now = new Date();
-  const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
-  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
 
   try {
-    for (const [windowType, windowStart] of [
-      ['hourly', hourStart] as const,
-      ['daily', dayStart] as const,
-      ['weekly', weekStart] as const,
-    ]) {
+    for (const { type: windowType, start: windowStart } of velocityWindows()) {
       // A window's recorded volume can never be driven below zero: a reversal
       // releases at most what that window currently holds.
       const recorded = await sql`

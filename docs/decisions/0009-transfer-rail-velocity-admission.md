@@ -206,6 +206,37 @@ Operational — and distinct from the above, which is all code verification:
     reconciliation job runs.
 12. Stranded reservations have a named owner and an alert.
 
+## In-flight exposure is not realized loss
+
+Raised in review of PR #75, and it is a real hole in the proposal above rather
+than a detail of it.
+
+A funding budget built as option C bounds **unsettled in-flight value** and
+releases the claim when a transfer is `returned`. But a return is exactly the
+moment the loss becomes *realized*: if the credited balance was already spent
+through P2P before the NSF return arrived, releasing the claim restores the
+payer's funding headroom while the platform is still short the money. The
+control then admits the next deposit as though nothing had happened, and the
+cycle repeats — each round bounded only by the per-deposit ceiling, never by the
+cumulative amount already lost.
+
+So "release on return" is correct for an in-flight *reservation* and wrong for a
+realized *loss*, and one counter cannot be both. The options:
+
+- **Accept it**, on the grounds that the funding ceiling plus KYC plus the
+  provider's own return monitoring bound the damage, and that repeat NSF is a
+  fraud-operations problem rather than a velocity one.
+- **Account for realized returns separately** — a second, non-releasing counter
+  that a `returned` transfer increments and nothing decrements, with its own
+  ceiling, so a payer who has cost the platform money loses funding capacity
+  rather than regaining it.
+
+This record does not choose. It is a loss-tolerance question, not an
+engineering one, and the second option needs a number only the owner can set.
+It is listed below as a decision rather than folded into C, because C is
+implementable without it and this is the part that stops C from being a
+complete answer to funding abuse.
+
 ## Decisions required from the owner
 
 1. Approve or reject C as the architecture.
@@ -214,3 +245,7 @@ Operational — and distinct from the above, which is all code verification:
    same budget a P2P send does.
 3. Set the funding and withdrawal ceilings, and the funding window. These are
    business numbers; this record deliberately proposes none.
+4. Decide the **repeated-return** question above: accept that releasing a
+   returned claim restores headroom while the loss stands, or add a separate
+   non-releasing counter for realized returns — and if the latter, set its
+   ceiling.

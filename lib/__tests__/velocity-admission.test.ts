@@ -143,11 +143,20 @@ describe('admitVelocity is an atomic admission, not a check and a later write', 
         throw err;
       });
 
-    await new Promise((r) => setTimeout(r, 400));
-    // Under read-then-write this is `true` by now, and 'admitted'.
-    expect(secondSettled, 'second admission decided while the first held the rows').toBe(false);
-
-    releaseFirst();
+    // try/finally, because this test deliberately holds a transaction open: if
+    // the assertion throws, `releaseFirst()` never runs, `first` keeps its row
+    // locks and its pool connection, and the next `beforeEach(cleanup)` blocks
+    // on `DELETE FROM velocity_checks` for this same payer until the vitest
+    // timeout. The real assertion message would then be buried under cascading
+    // hook timeouts — the exact failure mode this file was written to detect,
+    // reappearing as the way its own failure gets reported.
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      // Under read-then-write this is `true` by now, and 'admitted'.
+      expect(secondSettled, 'second admission decided while the first held the rows').toBe(false);
+    } finally {
+      releaseFirst();
+    }
     await first;
 
     // Now it resumes, increments on top of a settled 400, and is refused.
