@@ -1,6 +1,6 @@
 # 0012 — Claim-bounded velocity release
 
-- **Status:** Accepted
+- **Status:** Accepted — **revised 2026-11-08 after an independent inspection found a critical accounting defect in the first implementation. Read §"The first implementation was wrong" before anything else.**
 - **Date:** 2026-11-08
 - **Authorized by:** repository owner, who classified release of another transaction's velocity budget as a critical financial-control defect and required a claim-bounded, idempotent release design.
 - **Prerequisite for:** `0009-transfer-rail-velocity-admission.md`'s sandbox stopgap and for enabling any transfer rail. **No rail may be enabled until this is verified.**
@@ -24,6 +24,43 @@ Two further defects lived in the same function, each matching a requirement the 
 - **No transaction.** The three per-window inserts ran as three separate statements. A failure on the second left the first one's release committed — real budget handed back for a release that did not complete.
 - **A swallowing `catch`.** It logged and returned normally, so that partial release was silent and the caller could not distinguish a failed release from a completed one. This is the "database errors do not silently create extra budget" requirement failing in the plainest way.
 
+## The first implementation was wrong, and the tests asserted the defect
+
+An independent GitHub inspection of `836a8cd` found that `createVelocityClaim()`
+records a claim **without charging `velocity_checks`**, while
+`releaseVelocityClaim()` wrote negative compensating rows **into**
+`velocity_checks`. Investigated against the source and a real database, the
+finding is **confirmed, and worse than reported.**
+
+The root cause is architectural, not arithmetic. **`velocity_checks` has no
+domain column.** It is one undifferentiated pool per
+`(user_id, window_type, window_start, currency)` holding `money:send`,
+request-accept and `money:split-pay` consumption together. Any credit into it
+is therefore cross-domain by construction, whatever the amount is bounded by.
+
+Measured, on a database built from the CI fixture:
+
+| Probe | Result |
+|---|---|
+| Funding claim of 100 released against 450 of **pure P2P** volume | P2P usage `45000 → 35000`. The funding return paid back P2P spending |
+| **Withdrawal** claim of 150 released against 400 of P2P volume | P2P usage `40000 → 25000`. Cross-domain in the second direction too |
+| Release of a 300 claim from an **empty** start | Usage drove to **−300**. `parseDatabaseMoney` refused to read it — negative net usage |
+| After that release, P2P admissions against a **500** hourly ceiling | Admitted **500**, then a further **250**. The payer moved **750 against a 500 ceiling** — a 50% bypass, from a return on a transfer that consumed nothing |
+
+**The first version's own tests asserted this.** `velocity-claim-release.test.ts`
+contained `expect(await consumed()).toBe(cad('350.00'))` after releasing a 100
+claim against 450 of P2P volume, under a title claiming it proved the release
+was "bounded by the claim". The amount was bounded; the *domain* was not, and
+the title hid the difference. One case even commented that a claim owner going
+negative against an empty window was "representable and auditable" — a
+rationalisation of capacity creation.
+
+This is the same failure as the deleted `reverseVelocity` tests, one revision
+later and by my own hand: a test that encodes the current behaviour as the
+expectation, so the defect reads as a feature and the fix would read as a
+regression. Clamping the negative rows would have hidden the third probe and
+left the first two untouched, so the model changed instead.
+
 ## The decision
 
 A release must have an **identity**. A webhook names an *intent*, not a window.
@@ -32,11 +69,22 @@ A release must have an **identity**. A webhook names an *intent*, not a window.
 
 Each required property is structural rather than conventional:
 
+Funding and withdrawal exposure lives in `velocity_claims` and is **derived
+from claim state** by `claimedExposure()`, scoped by `user_id`, `claim_kind`
+and `currency`. **Nothing in this module writes to `velocity_checks` at all** —
+not an insert, not an update, not a clamped one. `velocity_checks` is the P2P
+outbound domain and stays that way. A release is a state transition that
+removes the claim from the reserved set, so it reduces only its own domain's
+exposure.
+
 | Requirement | How it holds |
 |---|---|
 | A release identifies the original claim | The claim is looked up by `(provider, reference)`; there is no code path that releases without one |
-| Never exceeds the original claimed amount | The amount comes from the claim row. **Nothing in the release path sums `velocity_checks` to decide how much to give back** — that was the defect |
-| Never frees unrelated P2P or split-payment budget | Same: the amount is the claim's, and the compensating rows carry the claim's `user_id` and `currency` |
+| Never exceeds the original claimed amount | Exposure is a `SUM` over the reserved subset; releasing removes exactly one claim's own `amount` |
+| A funding claim cannot reduce P2P velocity consumption | The module makes **no write to `velocity_checks`**, enforced by a static guard in `velocity-admission-callers.test.ts` |
+| A withdrawal claim cannot reduce funding exposure | `claimedExposure()` filters on `claim_kind`, so the two domains are different sums |
+| A release without an original charge cannot create negative usage or capacity | Exposure sums the **positive** `amount` of a subset of rows, so it cannot go below zero. A property of the model, not a clamp |
+| Late returns cannot increase P2P headroom | No credit is ever written to `velocity_checks`, so there is nothing to mis-date |
 | Duplicate webhook cannot double-release | `SELECT ... FOR UPDATE` serialises, and a conditional `UPDATE ... WHERE state <> 'released'` decides. Idempotency is keyed on the **claim**, not the event id — keying on the event would let two distinct deliveries each take the amount once |
 | Late returns do not credit unrelated current windows | The claim records its **own** `hourly/daily/weekly_window_start` at claim time. A release credits those, not the windows current when the return arrives |
 | Database errors do not silently create extra budget | Claim state and all three compensating rows are **one transaction**, and the function deliberately has **no `try/catch`** |
@@ -53,23 +101,63 @@ It is not silent. A mismatch row is written on the caller's transaction (not thr
 
 From `0010`'s evidence: a US unauthorized-consumer-debit return can arrive **60 calendar days** after settlement, and a CA PAD personal-account dispute **90 calendar days**. By then the claim's original hourly and daily windows are long past. Crediting the *current* windows would hand back headroom in a window that never carried the charge — free budget, the same class of defect from the other direction.
 
+## Transaction and audit integrity
+
+The first implementation also called `auditLog()` from **inside** the release
+transaction. `auditLog()` takes its own connection from `getSql()` and
+swallows its errors — two defects at once, both already documented in
+`CLAUDE.md`, and both reintroduced here by me. Confirmed by mutation:
+
+- **Pool deadlock.** `lib/db.ts` sets `max: 5`. A release holding a
+  transaction connection and then asking the same pool for a second is the
+  shape that deadlocked `paySplitPortion()`. Restoring the `auditLog()` call
+  makes the six-concurrent-release test **time out at 5000 ms** and cascade
+  into 10-second hook timeouts on the tests after it — it hangs rather than
+  failing, which is what the bug does to a request.
+- **Misleading success.** With the swallowing `catch` back, the two atomicity
+  cases report `promise resolved "undefined" instead of rejecting`: a release
+  whose audit write failed returned normally.
+- **An audit row that outlives its own rollback.** Written on a separate
+  connection, the audit row commits independently, so a rolled-back release
+  leaves a record of something that did not happen — worse than a missing one.
+
+The release now writes its audit row on the caller's executor, so it commits
+and rolls back with the release and a failure propagates. The static guard
+asserts the module never calls `auditLog()` again.
+
 ## Evidence
 
-Suite: **67 files / 955 tests, all passing** on a database created fresh for the run with the CI fixture applied. Typecheck 0 errors; lint 0 errors / 30 pre-existing warnings. `scripts/verify-migrate.sql` reports `velocity_claims` and `velocity_claims_reference_key` both `OK`.
+Suite: **67 files / 965 tests, all passing** on a database created fresh for
+the run with the CI fixture applied. Typecheck 0 errors; lint 0 errors / 30
+pre-existing warnings; `pnpm run build` succeeds. `scripts/verify-migrate.sql`
+reports `velocity_claims` and `velocity_claims_reference_key` both `OK`.
 
-`lib/__tests__/velocity-claim-release.test.ts` — 19 cases against real PostgreSQL, titled by requirement. Mutation-checked, each mutation applied to the real source and the suite re-run:
+`lib/__tests__/velocity-claim-release.test.ts` — 26 cases against real
+PostgreSQL, titled by requirement. Mutation-checked, each mutation applied to
+the real source and the suite re-run:
 
 | Mutation | Caught by |
 |---|---|
-| Bound the release by the current window total, crediting current windows | 2 cases — the late-return case reads `35000` instead of `45000` |
-| **The actual original defect**: on `no_claim`, release from the window (what `reverseVelocity()` did) | 2 cases — the payer's entire 450 of P2P budget is drained; `expected +0 to be 45000` |
-| Remove the early return and the `state <> 'released'` guard | 2 cases — a redelivered return releases again, and three concurrent deliveries all succeed instead of one |
+| **The reported defect**: reintroduce the cross-domain compensating rows | **12 cases across four files**, including the static guard |
+| Restore the `auditLog()` call inside the transaction | 5 cases — a 5s pool-deadlock timeout, cascading hook timeouts, and two "resolved instead of threw" |
+| On `no_claim`, release from the window (what `reverseVelocity()` did) | 2 cases — the payer's entire 450 of P2P budget is drained |
+| Remove the early return and the `state <> 'released'` guard | 2 cases — three concurrent deliveries all release instead of one |
 
-The atomicity cases inject the failure by **proxying the executor** to throw on the second compensating insert. An earlier draft tried to force it by pointing the claim at a non-existent user, which cannot work — `velocity_claims.user_id` has a foreign key, so the *setup* threw rather than the release. The proxy is both honest and closer to the real hazard: it fails after the first insert is already written, which is exactly the old implementation's failure mode.
+Two harness bugs were found by running these rather than by reading them, and
+both are worth recording because each looked like a production defect at
+first: the executor proxy needed `sql.json` carried across, or `jsonbParam()`
+failed with "sql.json is not a function"; and the static guard's own
+string-stripper blanked `'reserved'`, so its assertion could never have
+matched.
 
-### Two tests were deleted rather than preserved
+### Five tests were rewritten because they asserted the defect
 
-`velocity.test.ts` held an eight-case `describe('reverseVelocity')` block, and `settlement-b3.3.test.ts` asserted `velocityReversed === true` for any returned transfer. Both pinned the defective behaviour — "releases the reversed amount from every window" for a caller-supplied amount, and "the window nets back to zero". They were accurate about the code and wrong about what the code should do, so keeping them would have made the fix look like a regression. The settlement case is now **two** cases, because the old single assertion conflated "released nothing because there was no claim" with "released correctly".
+Three in `velocity-claim-release.test.ts`, one in `velocity-admission.test.ts`
+("releases headroom when a claim is released" — it asserted P2P usage dropping
+from 450 to 150), and one in `settlement-b3.3.test.ts` (which expected the
+recorded P2P volume to fall from 100 to 50 after a funding return). Each is now
+stated as the invariant it should have been, with the old expectation named in a
+comment so the next reader sees what changed and why.
 
 ## What this does not do
 

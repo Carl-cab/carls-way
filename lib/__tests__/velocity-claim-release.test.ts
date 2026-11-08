@@ -26,6 +26,8 @@ import {
   findVelocityClaim,
   findVelocityClaimsNeedingReconciliation,
   releaseVelocityClaim,
+  fundingExposure,
+  withdrawalExposure,
   VELOCITY_CLAIM_PROVIDER,
 } from '../velocity-claims';
 
@@ -74,46 +76,113 @@ async function cleanup() {
 beforeEach(cleanup);
 afterAll(cleanup);
 
-describe('a release identifies the original claim', () => {
-  it('releases exactly the claimed amount, not the window total', async () => {
-    // THE DEFECT, DIRECTLY. The payer has 450 of consumed budget from a P2P
-    // path. A funding claim of 100 is released. The old implementation would
-    // have released min(100, 450) = 100 here too — so the distinguishing case
-    // is the next test, where the claim is SMALLER than the window holds and
-    // the release must still be the claim's amount.
+describe('accounting domains are separate — a release touches only its own', () => {
+  // THESE CASES REPLACE A BLOCK THAT ASSERTED THE DEFECT.
+  //
+  // The previous versions asserted that a funding release REDUCED the payer's
+  // P2P consumption — "expect(await consumed()).toBe(cad('350.00'))" after
+  // releasing a 100 claim against 450 of pure P2P volume. That assertion was
+  // accurate about the code and wrong about what the code should do, which is
+  // exactly the trap the deleted reverseVelocity tests fell into one revision
+  // earlier. Measured consequences of the old behaviour, on a real database:
+  // a withdrawal release cut the P2P pool 400 -> 250; and a release with no
+  // prior charge drove usage to -300, after which the payer moved 750 of P2P
+  // against a 500 hourly ceiling.
+
+  it('a funding release does NOT reduce P2P consumption', async () => {
     await admitVelocity(PAYER, cad('450.00'), 'CAD');
     await createVelocityClaim({
-      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-exact',
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-p2p',
       claimKind: 'funding', amount: cad('100.00'), currency: 'CAD',
     });
 
-    const outcome = await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-exact');
+    const outcome = await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-p2p');
 
     expect(outcome).toMatchObject({ released: true, amount: cad('100.00') });
-    expect(await consumed()).toBe(cad('350.00'));
+    // The invariant. Under the old implementation this read 350.
+    expect(await consumed()).toBe(cad('450.00'));
   });
 
-  it('NEVER releases more than the original claimed amount, however much the window holds', async () => {
-    // The payer consumed 450 through P2P. A funding claim of 25 is released.
-    // Only 25 may come back. Under the old window-bounded release an
-    // over-large reversal request would have taken whatever the window held —
-    // this is the assertion that the claim, not the window, is the bound.
-    await admitVelocity(PAYER, cad('450.00'), 'CAD');
+  it('a withdrawal release does NOT reduce P2P consumption', async () => {
+    await admitVelocity(PAYER, cad('400.00'), 'CAD');
     await createVelocityClaim({
-      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-small',
-      claimKind: 'funding', amount: cad('25.00'), currency: 'CAD',
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-wd',
+      claimKind: 'withdrawal', amount: cad('150.00'), currency: 'CAD',
     });
 
-    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-small');
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-wd');
 
-    expect(await consumed()).toBe(cad('425.00'));
+    // Under the old implementation this read 250.
+    expect(await consumed()).toBe(cad('400.00'));
+  });
+
+  it('a withdrawal release does NOT reduce funding exposure, and vice versa', async () => {
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-fund-a',
+      claimKind: 'funding', amount: cad('100.00'), currency: 'CAD',
+    });
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-wd-a',
+      claimKind: 'withdrawal', amount: cad('80.00'), currency: 'CAD',
+    });
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(cad('100.00'));
+    expect(await withdrawalExposure(PAYER, 'CAD')).toBe(cad('80.00'));
+
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-wd-a');
+
+    // Only the withdrawal domain moved.
+    expect(await withdrawalExposure(PAYER, 'CAD')).toBe(0);
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(cad('100.00'));
+  });
+
+  it('a release reduces its own domain exposure by exactly the claim amount', async () => {
+    for (const [ref, amt] of [['claim-test-e1', '60.00'], ['claim-test-e2', '40.00']] as const) {
+      await createVelocityClaim({
+        userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: ref,
+        claimKind: 'funding', amount: cad(amt), currency: 'CAD',
+      });
+    }
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(cad('100.00'));
+
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-e1');
+
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(cad('40.00'));
+  });
+
+  it('a release with NO original charge cannot create negative usage or capacity', async () => {
+    // The worst of the measured cases. From an empty start the old code drove
+    // usage to -300 and then admitted 750 against a 500 ceiling.
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-nocharge',
+      claimKind: 'funding', amount: cad('300.00'), currency: 'CAD',
+    });
+
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-nocharge');
+
+    // No P2P usage was created or destroyed...
+    expect(await consumed()).toBe(0);
+    // ...exposure is zero, not negative...
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    // ...and the P2P ceiling still binds at its real value: 450 fits, a
+    // further 100 does not. Under the old behaviour both were admitted.
+    await expect(admitVelocity(PAYER, cad('450.00'), 'CAD')).resolves.toBeUndefined();
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(/Hourly limit/i);
+  });
+
+  it('exposure is never negative, however many claims are released', async () => {
+    for (const ref of ['claim-test-n1', 'claim-test-n2', 'claim-test-n3']) {
+      await createVelocityClaim({
+        userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: ref,
+        claimKind: 'funding', amount: cad('50.00'), currency: 'CAD',
+      });
+      await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, ref);
+    }
+    // A SUM over a subset of positive amounts has no way to go below zero.
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    expect(await consumed()).toBe(0);
   });
 
   it('releases NOTHING when no claim exists, and records a reconciliation signal', async () => {
-    // This is the transfer rail's state today: it holds no claims, so the
-    // correct release for a returned transfer is zero. Guessing an amount
-    // from the window is the defect. A mismatch row is written because a
-    // return against an unknown reference is a signal, not a no-op.
     await admitVelocity(PAYER, cad('450.00'), 'CAD');
     const before = await mismatchCount();
 
@@ -121,11 +190,16 @@ describe('a release identifies the original claim', () => {
 
     expect(outcome).toEqual({ released: false, reason: 'no_claim' });
     expect(await consumed()).toBe(cad('450.00'));
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
     expect(await mismatchCount()).toBe(before + 1);
   });
 
-  it('never frees another user budget', async () => {
+  it('never touches another user exposure', async () => {
     await admitVelocity(OTHER, cad('400.00'), 'CAD');
+    await createVelocityClaim({
+      userId: OTHER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-othersown',
+      claimKind: 'funding', amount: cad('70.00'), currency: 'CAD',
+    });
     await createVelocityClaim({
       userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-crossuser',
       claimKind: 'funding', amount: cad('100.00'), currency: 'CAD',
@@ -133,23 +207,25 @@ describe('a release identifies the original claim', () => {
 
     await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-crossuser');
 
-    // The other user's budget is untouched; the claim's owner went negative
-    // against their own (empty) window, which is representable and auditable.
     expect(await consumed(OTHER)).toBe(cad('400.00'));
+    expect(await fundingExposure(OTHER, 'CAD')).toBe(cad('70.00'));
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
   });
 
-  it('never frees another currency budget', async () => {
-    await admitVelocity(PAYER, cad('400.00'), 'CAD');
-    await admitVelocity(PAYER, usd('400.00'), 'USD');
+  it('never touches another currency exposure', async () => {
     await createVelocityClaim({
-      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-ccy',
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-ccy-cad',
       claimKind: 'funding', amount: cad('100.00'), currency: 'CAD',
     });
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-ccy-usd',
+      claimKind: 'funding', amount: usd('100.00'), currency: 'USD',
+    });
 
-    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-ccy');
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-ccy-cad');
 
-    expect(await consumed(PAYER, 'CAD')).toBe(cad('300.00'));
-    expect(await consumed(PAYER, 'USD')).toBe(usd('400.00'));
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    expect(await fundingExposure(PAYER, 'USD')).toBe(usd('100.00'));
   });
 });
 
@@ -171,7 +247,9 @@ describe('duplicate delivery cannot double-release', () => {
     // event rather than the claim would let two distinct deliveries each take
     // the amount once.
     expect(third).toMatchObject({ released: false, reason: 'already_released' });
-    expect(await consumed()).toBe(cad('300.00'));
+    // Exposure went to zero once, and P2P was never involved.
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    expect(await consumed()).toBe(cad('400.00'));
   });
 
   it('concurrent deliveries of the same return release once', async () => {
@@ -188,7 +266,8 @@ describe('duplicate delivery cannot double-release', () => {
     ]);
 
     expect(outcomes.filter((o) => o.released)).toHaveLength(1);
-    expect(await consumed()).toBe(cad('300.00'));
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    expect(await consumed()).toBe(cad('400.00'));
   });
 
   it('a duplicate confirmation cannot create a second claim for one intent', async () => {
@@ -262,7 +341,8 @@ describe('late returns and adversarial ordering', () => {
     // finalize must refuse a released claim rather than move it back.
     expect(await finalizeVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-ooo')).toBe(false);
     expect((await findVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-ooo'))!.state).toBe('released');
-    expect(await consumed()).toBe(cad('300.00'));
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    expect(await consumed()).toBe(cad('400.00'));
   });
 
   it('repeated returns across separate claims each release their own amount only', async () => {
@@ -278,9 +358,11 @@ describe('late returns and adversarial ordering', () => {
       expect((await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, ref)).released).toBe(true);
     }
 
-    // 450 − (3 × 50). Not 450 − 450, which is what an unbounded release of
-    // three returns against one window would have produced.
-    expect(await consumed()).toBe(cad('300.00'));
+    // Each release reduced only its own claim's funding exposure; the P2P
+    // pool is untouched. The previous version of this case expected 450 − 150
+    // in the P2P pool, which was the cross-domain defect.
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    expect(await consumed()).toBe(cad('450.00'));
   });
 });
 
@@ -298,9 +380,12 @@ describe('a database error does not silently create budget', () => {
   function failOnNthVelocityInsert(tx: unknown, n: number) {
     let seen = 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return ((...args: any[]) => {
+    const proxy = ((...args: any[]) => {
       const text = String(args[0]?.[0] ?? '');
-      if (text.includes('INSERT INTO velocity_checks')) {
+      // The release's only write beyond the claim state change is its audit
+      // row, which is now transaction-bound. Failing it must roll the whole
+      // release back rather than leaving a released claim with no record.
+      if (text.includes('INSERT INTO audit_logs')) {
         seen += 1;
         if (seen === n) throw new Error('simulated database failure mid-release');
       }
@@ -308,6 +393,14 @@ describe('a database error does not silently create budget', () => {
       return (tx as any)(...args);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
+    // jsonbParam() reaches for sql.json, so a bare function proxy fails with
+    // "sql.json is not a function" — a test-harness bug that looked like a
+    // production one on the first run. Carry the driver's own helpers across.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    proxy.json = (tx as any).json?.bind(tx);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    proxy.unsafe = (tx as any).unsafe?.bind(tx);
+    return proxy;
   }
 
   it('a failure part-way leaves the claim unreleased and NO window credited', async () => {
@@ -325,7 +418,7 @@ describe('a database error does not silently create budget', () => {
     await expect(
       sql.begin(async (tx) => {
         await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-fail', {
-          executor: failOnNthVelocityInsert(tx, 2),
+          executor: failOnNthVelocityInsert(tx, 1),
         });
       }),
     ).rejects.toThrow(/simulated database failure/);
@@ -335,6 +428,9 @@ describe('a database error does not silently create budget', () => {
     expect((await findVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-fail'))!.state)
       .toBe('reserved');
     expect(await consumed()).toBe(cad('400.00'));
+    // Exposure is still held: the release did not take effect.
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(cad('100.00'));
+    // And no negative row exists anywhere — this module writes none at all now.
     const anyNegative = await sql`
       SELECT COUNT(*)::int AS n FROM velocity_checks
       WHERE user_id = ${PAYER} AND transaction_count < 0
@@ -364,6 +460,88 @@ describe('a database error does not silently create budget', () => {
     expect(outcome).toBe('threw');
     expect((await findVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-noswallow'))!.state)
       .toBe('reserved');
+  });
+});
+
+describe('transaction and audit integrity', () => {
+  it('does not exhaust the connection pool under concurrent releases', async () => {
+    // `lib/db.ts` sets max: 5. The previous revision called auditLog() from
+    // inside the release transaction, and auditLog() takes its OWN connection
+    // from getSql() — so a release holding one pool connection asked the same
+    // 5-connection pool for a second while holding it. Six concurrent
+    // releases is one past that ceiling. Under the defect this does not fail
+    // an assertion, it HANGS until the vitest timeout, which is what the bug
+    // does to a request. The audit row is now written on the release's own
+    // executor, so no second connection is ever requested.
+    const refs = Array.from({ length: 6 }, (_, i) => `claim-test-pool-${i}`);
+    for (const ref of refs) {
+      await createVelocityClaim({
+        userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: ref,
+        claimKind: 'funding', amount: cad('10.00'), currency: 'CAD',
+      });
+    }
+
+    const outcomes = await Promise.all(
+      refs.map((ref) => releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, ref)),
+    );
+
+    expect(outcomes.filter((o) => o.released)).toHaveLength(6);
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+  });
+
+  it('writes exactly one audit row per release, and none for a duplicate', async () => {
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-audit',
+      claimKind: 'funding', amount: cad('25.00'), currency: 'CAD',
+    });
+
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-audit', { eventId: 'evt_a' });
+    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-audit', { eventId: 'evt_a' });
+
+    const rows = await sql`
+      SELECT metadata FROM audit_logs
+      WHERE user_id = ${PAYER} AND action = 'velocity_claim_released'
+    `;
+    expect(rows).toHaveLength(1);
+    // And the record is queryable — jsonbParam(), not JSON.stringify(), so
+    // metadata->>'reference' is not silently NULL. This repo has shipped that
+    // defect twice on other writers.
+    const queryable = await sql`
+      SELECT COUNT(*)::int AS n FROM audit_logs
+      WHERE action = 'velocity_claim_released'
+        AND metadata->>'reference' = 'claim-test-audit'
+        AND metadata->>'claimKind' = 'funding'
+    `;
+    expect(queryable[0].n).toBe(1);
+  });
+
+  it('rolls the audit row back with the release when the caller aborts', async () => {
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-auditrb',
+      claimKind: 'funding', amount: cad('25.00'), currency: 'CAD',
+    });
+
+    await expect(
+      sql.begin(async (tx) => {
+        await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-auditrb', {
+          executor: tx as never,
+        });
+        throw new Error('caller aborted after release');
+      }),
+    ).rejects.toThrow(/caller aborted/);
+
+    // Neither the state change nor its audit row survived. Under the old
+    // auditLog() call the audit row committed on its own connection and
+    // survived a rollback of the release — a record of something that did not
+    // happen, which is worse than a missing one.
+    expect((await findVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-auditrb'))!.state)
+      .toBe('reserved');
+    const rows = await sql`
+      SELECT COUNT(*)::int AS n FROM audit_logs
+      WHERE action = 'velocity_claim_released'
+        AND metadata->>'reference' = 'claim-test-auditrb'
+    `;
+    expect(rows[0].n).toBe(0);
   });
 });
 
@@ -441,17 +619,27 @@ describe('funding and withdrawal are distinguished', () => {
   });
 });
 
-describe('the ceiling still binds after a release', () => {
-  it('released budget is spendable but the ceiling is not raised', async () => {
+describe('a release frees its own domain capacity, not P2P capacity', () => {
+  it('released funding exposure frees FUNDING room and leaves the P2P ceiling where it was', async () => {
+    // The previous version of this case asserted that released budget became
+    // spendable on P2P — "admitVelocity(100) resolves" after releasing a 100
+    // funding claim against 450 of P2P volume. That was the cross-domain
+    // defect stated as an expectation.
     await admitVelocity(PAYER, cad('450.00'), 'CAD');
     await createVelocityClaim({
       userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'claim-test-ceiling',
       claimKind: 'funding', amount: cad('100.00'), currency: 'CAD',
     });
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(cad('100.00'));
+
     await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-ceiling');
 
-    // 350 consumed, 500 ceiling: 100 fits, a further 100 does not.
-    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).resolves.toBeUndefined();
+    // Funding room came back...
+    expect(await fundingExposure(PAYER, 'CAD')).toBe(0);
+    // ...and the P2P pool is exactly where it was, so the P2P ceiling still
+    // binds at 450 of 500: 50 fits, 100 does not.
+    expect(await consumed()).toBe(cad('450.00'));
+    await expect(admitVelocity(PAYER, cad('50.00'), 'CAD')).resolves.toBeUndefined();
     await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(/Hourly limit/i);
     expect(await consumed()).toBeLessThanOrEqual(LIMITS.hourly_max_amount * 100);
   });

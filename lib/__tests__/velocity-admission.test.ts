@@ -313,18 +313,20 @@ describe('admitVelocity is an atomic admission, not a check and a later write', 
     expect(await consumed('hourly')).toBe(0);
   });
 
-  it('releases headroom when a claim is released, bounded by the claim', async () => {
-    // releaseVelocityClaim() appends compensating rows with
-    // transaction_count < 0, which the partial unique index deliberately
-    // excludes. admitVelocity() sums ALL rows in a window rather than reading
-    // the accumulating row, so a release actually frees budget. If it read
-    // only the upserted row — the obvious shortcut, since the upsert can
-    // RETURNING its own totals — a released claim would free nothing.
+  it('a released claim does NOT give back P2P headroom', async () => {
+    // This case asserted the opposite one revision ago — that releasing a 300
+    // funding claim dropped the payer's P2P usage from 450 to 150 — and that
+    // assertion WAS the defect. velocity_checks has no domain column, so it
+    // is one pool holding send, request-accept and split-pay consumption
+    // together; crediting it from a funding return pays back P2P spending.
+    // Measured consequence: from an empty start a release drove usage to -300
+    // and the payer then moved 750 against a 500 hourly ceiling.
+    //
+    // Funding and withdrawal exposure now live in velocity_claims and are
+    // derived from claim state, so nothing writes to velocity_checks here.
     await admitVelocity(PAYER, cad('450.00'), 'CAD');
     await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(VelocityLimitError);
 
-    // A claim for 300, released, frees exactly 300 — not the window total,
-    // which is the defect this replaced.
     await createVelocityClaim({
       userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'admission-test-1',
       claimKind: 'funding', amount: cad('300.00'), currency: 'CAD',
@@ -332,17 +334,17 @@ describe('admitVelocity is an atomic admission, not a check and a later write', 
     const outcome = await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'admission-test-1');
     expect(outcome.released).toBe(true);
 
-    expect(await consumed('hourly')).toBe(cad('150.00'));
-    // The payment refused a moment ago now fits.
-    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).resolves.toBeUndefined();
-    expect(await consumed('hourly')).toBe(cad('250.00'));
+    // P2P usage is untouched, so the payment refused above is STILL refused.
+    expect(await consumed('hourly')).toBe(cad('450.00'));
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(VelocityLimitError);
 
-    // Both rows are retained: the original and its compensating entry.
-    const rows = await sql`
-      SELECT transaction_count FROM velocity_checks
-      WHERE user_id = ${PAYER} AND window_type = 'hourly' ORDER BY id
+    // And no compensating row was written at all — the mechanism is gone,
+    // not merely clamped.
+    const negatives = await sql`
+      SELECT COUNT(*)::int AS n FROM velocity_checks
+      WHERE user_id = ${PAYER} AND transaction_count < 0
     `;
-    expect(rows.map((r) => Number(r.transaction_count))).toContain(-1);
+    expect(negatives[0].n).toBe(0);
   });
 
   it('rejects a non-positive or non-integer amount rather than admitting it', async () => {

@@ -71,6 +71,54 @@ function code(source: string): string {
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
 }
 
+describe('accounting domains stay separate', () => {
+  it('lib/velocity-claims.ts contains NO write to velocity_checks', () => {
+    // The defect this guards was architectural, not arithmetic. velocity_checks
+    // has no domain column, so it is one pool per (user, window, currency)
+    // holding money:send, request-accept and money:split-pay consumption
+    // together. Any INSERT or UPDATE into it from the claim module is
+    // cross-domain by construction: a funding or withdrawal return pays back
+    // P2P spending, and a release with no prior charge drives usage negative
+    // and creates capacity above the ceiling. All three were measured on a
+    // real database before this guard existed.
+    //
+    // Funding and withdrawal exposure is DERIVED from claim state by
+    // claimedExposure(). A reviewer reading one diff cannot see that writing
+    // a "compensating row" here is forbidden, so the rule is mechanical.
+    const src = code(read('lib/velocity-claims.ts'));
+
+    expect(src).not.toMatch(/INSERT\s+INTO\s+velocity_checks/i);
+    expect(src).not.toMatch(/UPDATE\s+velocity_checks/i);
+    expect(src).not.toMatch(/DELETE\s+FROM\s+velocity_checks/i);
+  });
+
+  it('exposure is scoped by claim_kind, so one domain cannot release another', () => {
+    // A release reducing the wrong domain is the same class of defect one
+    // level in: a withdrawal return must not free funding room. The scoping
+    // lives in claimedExposure()'s predicate, so assert it is there.
+    // RAW source here, not code(): the stripper blanks quoted strings, so it
+    // turns `state = 'reserved'` into `state = ''` and the assertion below
+    // could never match. Caught on the first run of this guard.
+    const raw = read('lib/velocity-claims.ts');
+    const exposure = raw.slice(raw.indexOf('export async function claimedExposure'));
+
+    expect(exposure).toMatch(/claim_kind\s*=\s*\$\{claimKind\}/);
+    expect(exposure).toMatch(/user_id\s*=\s*\$\{userId\}/);
+    expect(exposure).toMatch(/currency\s*=\s*\$\{currency\}/);
+    expect(exposure).toMatch(/state\s*=\s*'reserved'/);
+  });
+
+  it('the claim module does not call auditLog(), which takes its own connection', () => {
+    // auditLog() uses getSql() and swallows its errors. Called from inside a
+    // release transaction it risks the max:5 pool deadlock documented in
+    // CLAUDE.md, and a swallowed failure means a release reports success with
+    // no audit record. The release writes its audit row on the caller's
+    // executor instead, so it commits and rolls back with the release.
+    const src = code(read('lib/velocity-claims.ts'));
+    expect(src).not.toMatch(/\bauditLog\s*\(/);
+  });
+});
+
 describe('velocity admission is the only way a money path consumes budget', () => {
   it('no application file outside lib/auth.ts calls recordVelocity()', () => {
     const offenders = sourceFiles().filter((p) => /\brecordVelocity\s*\(/.test(code(read(p))));

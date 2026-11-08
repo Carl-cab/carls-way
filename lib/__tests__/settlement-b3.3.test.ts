@@ -8,7 +8,7 @@
 import { SettlementExecutor } from '../settlement/SettlementExecutor';
 import type { SettlementPlan } from '../settlement/SettlementOrchestrator';
 import { recordVelocity } from '../auth';
-import { createVelocityClaim, VELOCITY_CLAIM_PROVIDER } from '../velocity-claims';
+import { createVelocityClaim, fundingExposure, VELOCITY_CLAIM_PROVIDER } from '../velocity-claims';
 import { getSql, initializeSchema } from '../db';
 import { minorUnitsToMajorNumber, parseSignedDatabaseMoney } from '../money';
 
@@ -174,11 +174,10 @@ describe('executeVelocityReversal', () => {
     expect(await dailyVelocityTotal()).toBe(100);
   });
 
-  it('releases exactly the claim for a returned transfer that holds one', async () => {
+  it('releases the claim for a returned transfer that holds one, WITHOUT touching P2P volume', async () => {
     await recordVelocity(USER_ID, 10_000, 'CAD');
     expect(await dailyVelocityTotal()).toBe(100);
 
-    // A claim for half the recorded volume. The release must take 50, not 100.
     await createVelocityClaim({
       userId: USER_ID,
       provider: VELOCITY_CLAIM_PROVIDER,
@@ -187,6 +186,7 @@ describe('executeVelocityReversal', () => {
       amount: 5_000,
       currency: 'CAD',
     });
+    expect(await fundingExposure(USER_ID, 'CAD')).toBe(5_000);
 
     const result = await executor.executeVelocityReversal(
       makePlan({ reverseVelocity: true, nextStatus: 'returned' })
@@ -194,7 +194,12 @@ describe('executeVelocityReversal', () => {
 
     expect(result.success).toBe(true);
     expect(result.velocityReversed).toBe(true);
-    expect(await dailyVelocityTotal()).toBe(50);
+    // Funding exposure cleared...
+    expect(await fundingExposure(USER_ID, 'CAD')).toBe(0);
+    // ...and the recorded P2P volume is UNCHANGED. One revision ago this
+    // expected 50 — i.e. the funding return paying back half the P2P
+    // consumption, which was the cross-domain defect.
+    expect(await dailyVelocityTotal()).toBe(100);
   });
 
   it('returns failure (never throws) when the intent is missing', async () => {

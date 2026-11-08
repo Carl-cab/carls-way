@@ -16,12 +16,18 @@
  * point — each is enforced by the database or by control flow, not by a
  * caller remembering:
  *
- *   - **Bounded.** The released amount comes from the claim row, never from a
- *     window sum. There is no code path here that reads `velocity_checks` to
- *     decide how much to give back.
+ *   - **Domain-separated.** Funding and withdrawal exposure live in
+ *     `velocity_claims` and are DERIVED from claim state by
+ *     `claimedExposure()`. Nothing here writes to `velocity_checks`, which is
+ *     the P2P outbound pool and has no domain column — so a credit into it
+ *     would be cross-domain by construction. A release reduces only the
+ *     exposure of its own `claim_kind`, for its own user and currency.
+ *   - **Incapable of creating capacity.** Exposure is a SUM over the positive
+ *     amounts of the reserved subset, so it cannot go negative. That is a
+ *     property of the model, not a clamp on a negative row.
  *   - **Idempotent.** The release is a conditional `UPDATE ... WHERE state <>
  *     'released'`. A redelivered webhook updates zero rows and the function
- *     returns `already_released` without touching `velocity_checks`.
+ *     returns `already_released` without changing any exposure.
  *   - **Atomic.** Claim state and compensating rows commit together. The old
  *     implementation wrote three window rows in three separate statements with
  *     no transaction, so a failure part-way left a partial release committed
@@ -30,14 +36,13 @@
 
 import type postgres from 'postgres';
 import { getSql } from '@/lib/db';
-import { auditLog, velocityWindows, type VelocityExecutor } from '@/lib/auth';
+import { velocityWindows, type VelocityExecutor } from '@/lib/auth';
 import { jsonbParam } from '@/lib/jsonb';
 import {
   type MinorUnits,
   MoneyValidationError,
   parseSignedDatabaseMoney,
   toDatabaseDecimal,
-  toSignedDatabaseDecimal,
 } from '@/lib/money';
 
 /**
@@ -156,6 +161,73 @@ export async function createVelocityClaim(
   return rows.length === 0 ? null : rowToClaim(rows[0] as Record<string, unknown>);
 }
 
+/**
+ * Current exposure for one accounting domain, derived from claim state.
+ *
+ * **This is what a release reduces.** `velocity_checks` is the P2P outbound
+ * pool and is deliberately untouched by anything in this module: it has no
+ * domain column, so writing into it mixes funding, withdrawal and P2P
+ * accounting in one number. Funding and withdrawal exposure are therefore
+ * computed here instead of mirrored there.
+ *
+ * Only `reserved` claims count. A `finalized` claim has settled, so it is no
+ * longer unsettled value in flight — that is the quantity 0009's funding
+ * budget is meant to bound. A `released` claim is gone. Per decision 0011,
+ * realized loss after a return is a **separate** counter and is not this.
+ *
+ * `claimKind` scoping is what keeps a withdrawal release from reducing
+ * funding exposure, and vice versa.
+ *
+ * Returns minor units, and is never negative: it sums the positive `amount`
+ * of a subset of rows.
+ */
+export async function claimedExposure(
+  userId: number,
+  claimKind: VelocityClaimKind,
+  currency: string,
+  options?: { executor?: VelocityExecutor; windowType?: 'hourly' | 'daily' | 'weekly' },
+): Promise<MinorUnits> {
+  const sql = options?.executor ?? getSql();
+  const windowType = options?.windowType ?? 'daily';
+  const column =
+    windowType === 'hourly' ? 'hourly_window_start'
+    : windowType === 'weekly' ? 'weekly_window_start'
+    : 'daily_window_start';
+  const [hourly, daily, weekly] = velocityWindows();
+  const boundary =
+    windowType === 'hourly' ? hourly.start
+    : windowType === 'weekly' ? weekly.start
+    : daily.start;
+
+  // The claim's OWN recorded window boundary is compared against the current
+  // one, so a claim made in a past window has already rolled out of exposure
+  // without any compensating write. A late return therefore cannot credit a
+  // current window, because no credit is ever written.
+  const rows = await sql`
+    SELECT COALESCE(SUM(amount), 0) AS total
+    FROM velocity_claims
+    WHERE user_id = ${userId}
+      AND claim_kind = ${claimKind}
+      AND currency = ${currency}
+      AND state = 'reserved'
+      AND ${sql(column)} >= ${boundary.toISOString()}
+  `;
+  return parseSignedDatabaseMoney(String(rows[0]?.total ?? '0'), currency);
+}
+
+/** Convenience wrappers, so call sites read as the domain they mean. */
+export const fundingExposure = (
+  userId: number,
+  currency: string,
+  options?: { executor?: VelocityExecutor; windowType?: 'hourly' | 'daily' | 'weekly' },
+) => claimedExposure(userId, 'funding', currency, options);
+
+export const withdrawalExposure = (
+  userId: number,
+  currency: string,
+  options?: { executor?: VelocityExecutor; windowType?: 'hourly' | 'daily' | 'weekly' },
+) => claimedExposure(userId, 'withdrawal', currency, options);
+
 /** Read a claim without changing it. For reconciliation and for tests. */
 export async function findVelocityClaim(
   provider: string,
@@ -258,34 +330,60 @@ async function releaseWithin(
     return { released: false, reason: 'already_released', claimId: claim.id };
   }
 
-  // Compensating rows into the claim's OWN windows, read from the claim row.
-  // Nothing here sums velocity_checks to pick an amount — that was the defect.
-  const windows: ReadonlyArray<[string, unknown]> = [
-    ['hourly', (locked[0] as Record<string, unknown>).hourly_window_start],
-    ['daily', (locked[0] as Record<string, unknown>).daily_window_start],
-    ['weekly', (locked[0] as Record<string, unknown>).weekly_window_start],
-  ];
-  for (const [windowType, windowStart] of windows) {
-    await sql`
-      INSERT INTO velocity_checks (
-        user_id, window_start, window_type, transaction_count, total_amount, currency
-      ) VALUES (
-        ${claim.userId}, ${windowStart as string}, ${windowType},
-        -1, ${toSignedDatabaseDecimal(-claim.amount)}, ${claim.currency}
-      )
-    `;
-  }
+  // NOTHING is written to velocity_checks. That is the correction, and it is
+  // the whole point of this function's second revision.
+  //
+  // The first version inserted negative "compensating" rows into
+  // velocity_checks, reasoning by analogy with how reverseVelocity() worked.
+  // That was wrong at the accounting level, not merely at the amount level:
+  // velocity_checks has NO domain column, so it is one undifferentiated pool
+  // per (user, window, currency) holding P2P send, request-accept and
+  // split-pay consumption together. A credit into it is cross-domain by
+  // construction. Measured on a real database:
+  //
+  //   - a funding claim of 100 released against 450 of pure P2P volume left
+  //     350 — the funding return paid back P2P spending;
+  //   - a WITHDRAWAL claim behaved the same way, 400 -> 250;
+  //   - a release with no prior charge drove usage to -300, and the payer
+  //     then moved 750 of P2P against a 500 hourly ceiling. A 50% ceiling
+  //     bypass, from a return on a transfer that consumed nothing.
+  //
+  // Clamping the negative rows would have hidden the third case and left the
+  // first two untouched, so the model changed instead: funding and withdrawal
+  // exposure lives in velocity_claims and is DERIVED from claim state, never
+  // mirrored into the P2P pool. Releasing a claim reduces funding exposure by
+  // removing it from the reserved set — see claimedExposure(). Exposure is a
+  // SUM over positive amounts of a subset, so it cannot go negative and
+  // cannot create capacity, by construction rather than by a clamp.
+  //
+  // `lib/__tests__/velocity-claim-domains.test.ts` pins each invariant, and
+  // `velocity-admission-callers.test.ts` fails if this file ever gains an
+  // INSERT into velocity_checks again.
 
-  await auditLog(claim.userId, 'velocity_claim_released', {
-    provider,
-    reference,
-    claimId: claim.id,
-    claimKind: claim.claimKind,
-    amount: toDatabaseDecimal(claim.amount),
-    currency: claim.currency,
-    reason: options?.reason ?? 'transfer_returned',
-    eventId: options?.eventId ?? null,
-  });
+  // Transaction-bound audit. The previous revision called auditLog(), which
+  // takes its OWN pool connection from getSql() and swallows its errors —
+  // two defects at once, both already documented in CLAUDE.md and both of
+  // which I reintroduced here. `lib/db.ts` sets max: 5, so a release holding
+  // a transaction connection and asking for a second risks the pool
+  // deadlock; and a swallowed audit failure means a release reported success
+  // with no record of it. Writing on `sql` makes the audit row commit and
+  // roll back with the release, and lets a failure propagate.
+  await sql`
+    INSERT INTO audit_logs (user_id, action, metadata)
+    VALUES (
+      ${claim.userId}, 'velocity_claim_released',
+      ${jsonbParam(sql as unknown as postgres.Sql, {
+        provider,
+        reference,
+        claimId: claim.id,
+        claimKind: claim.claimKind,
+        amount: toDatabaseDecimal(claim.amount),
+        currency: claim.currency,
+        reason: options?.reason ?? 'transfer_returned',
+        eventId: options?.eventId ?? null,
+      })}
+    )
+  `;
 
   return { released: true, amount: claim.amount, claimId: claim.id };
 }
