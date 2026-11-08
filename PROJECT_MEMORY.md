@@ -3793,3 +3793,118 @@ dependency audit red on the pre-existing follow-redirects advisory; any later
 commit on the branch is documentation only — a branch name cannot identify the tree after a later push, which is
 why the governance rule asks for the SHA. Also prepared and pushed separately,
 not part of #75: `sec/follow-redirects-1-16-2` at `ca2c4fd`.
+
+---
+
+## 2026-11-08 — A confirmed cross-domain accounting defect, and the model that replaced it
+
+**Purpose and scope.** An independent GitHub inspection found a potential
+critical defect in `sec/claim-bounded-velocity-release` at `836a8cd`:
+`createVelocityClaim()` records a claim without charging `velocity_checks`,
+while `releaseVelocityClaim()` writes negative rows into it. Investigated
+against the source and a real database as instructed, rather than dismissed
+because the suite passed. **Confirmed, and worse than reported.**
+
+**Financial behaviour affected — the finding.** The root cause is
+architectural. `velocity_checks` has **no domain column**: it is one
+undifferentiated pool per `(user_id, window_type, window_start, currency)`
+holding `money:send`, request-accept and `money:split-pay` consumption
+together. Any credit into it is cross-domain by construction, whatever bounds
+the amount. Measured on a database built from the CI fixture:
+
+- a funding claim of 100 released against 450 of **pure P2P** volume left 350
+  — the funding return paid back P2P spending;
+- a **withdrawal** claim behaved the same way, 400 → 250;
+- a release from an empty start drove usage to **−300**, which
+  `parseDatabaseMoney` refused to read;
+- after that release the payer admitted 500 and then a further 250 — **750 of
+  P2P against a 500 hourly ceiling**, a 50% bypass from a return on a transfer
+  that consumed nothing.
+
+Clamping the negative rows would have hidden the third case and left the first
+two untouched, so the model changed rather than the arithmetic.
+
+**My own tests asserted the defect.** `velocity-claim-release.test.ts` held
+`expect(await consumed()).toBe(cad('350.00'))` under a title claiming the
+release was "bounded by the claim" — the amount was bounded, the *domain* was
+not, and the title hid the difference. One case described a claim owner going
+negative against an empty window as "representable and auditable", which is a
+rationalisation of capacity creation. This is the same failure as the
+`reverseVelocity` tests deleted one revision earlier, by the same hand: a test
+that encodes current behaviour as the expectation, so the defect reads as a
+feature and the fix reads as a regression. Five tests across three files were
+rewritten, each now stating the invariant with the old expectation named in a
+comment.
+
+**The correction.** Funding and withdrawal exposure lives in
+`velocity_claims` and is **derived** from claim state by `claimedExposure()`,
+scoped on `user_id` / `claim_kind` / `currency`. `lib/velocity-claims.ts` now
+writes to `velocity_checks` **not at all** — no insert, no update, no clamp. A
+release is a state transition removing the claim from the reserved set, so it
+reduces only its own domain. Exposure sums **positive** amounts over a subset,
+so it cannot go negative or create capacity: a property of the model rather
+than a guard on a row.
+
+**Transaction and audit integrity — also confirmed.** The release called
+`auditLog()` inside its transaction; that helper takes its own connection from
+`getSql()` and swallows errors. Mutation restoring it makes the
+six-concurrent-release test **time out at 5000 ms** with cascading 10-second
+hook timeouts — the `max: 5` pool deadlock, hanging rather than failing — and
+the atomicity cases report `resolved instead of rejecting`. The audit row also
+committed on its own connection, so it **outlived a rolled-back release**: a
+record of something that did not happen, which is worse than a missing one.
+The audit row is now written on the caller's executor.
+
+**Structural guards added**, because both revisions of this defect were
+invisible to a reviewer reading one diff:
+`velocity-admission-callers.test.ts` now fails if `lib/velocity-claims.ts`
+contains any write against `velocity_checks`, if `claimedExposure()` stops
+scoping on `claim_kind`, or if the module calls `auditLog()`.
+
+**Tests run and their results.** **67 files / 965 tests, all passing** at
+`6b0ceb8` on a database created fresh with the CI fixture. Typecheck 0 errors;
+lint 0 errors / 30 pre-existing warnings; `pnpm run build` succeeds;
+`scripts/verify-migrate.sql` reports `velocity_claims` and its unique index
+`OK`. Mutation-checked four ways: the reported cross-domain write is caught by
+**12 cases across four files**; restoring `auditLog()` by 5; the original
+`reverseVelocity` window-release by 2; removing both idempotency guards by 2.
+
+Two harness bugs were found by running the tests rather than reading them, and
+both first looked like production defects: the executor proxy needed
+`sql.json` carried across or `jsonbParam()` failed with "sql.json is not a
+function"; and the static guard's own string-stripper blanked `'reserved'`, so
+its assertion could never have matched.
+
+**Documents.** `0012` revised to lead with the defect rather than the design.
+`0009` marked **Accepted (architecture only)** per the owner's approval of
+Option C, with its sandbox step 2 marked **wrong** — it said to admit with
+`admitVelocity()`, which would have made a simulated `add_money` consume the
+payer's real P2P outbound budget. `0010` (funding/withdrawal limits) and
+`0011` (realized loss) landed as Proposed. `0013` written as the corrected
+sandbox acceptance criteria and regression-test specification, before
+implementation, as instructed.
+
+**Migration impact.** One table, `velocity_claims`, in all three schema
+sources plus `scripts/verify-migrate.sql`. `POST /api/migrate` required after
+deploy. No live path reads it yet.
+
+**Rollback requirement.** Revert the commits; the table is additive and unused
+by any live path. Reverting restores the defect, so the rail stays disabled.
+
+**Unresolved findings.** The accounting model has **not** been independently
+validated — the owner requires that before this branch merges, and the
+history justifies it: this control has been got wrong twice in two revisions,
+in opposite directions, with the tests asserting the defect both times. The
+second was caught by an independent inspection, not by the suite, which
+passed. CodeRabbit cannot supply the validation: auto-review is disabled for
+this repository (fewer than 10 stars) and manual triggers hit the free-OSS
+rate limit.
+
+**Next recommended action.** Owner: arrange independent validation of the
+accounting model; decide the #76 review exception; approve `0013`'s sandbox
+approach and set its ceiling; supply `0010`'s limits and `0011`'s thresholds.
+
+**Commit / PR.** Branch `sec/claim-bounded-velocity-release`, commits
+`836a8cd` (first implementation, defective) and `6b0ceb8` (the correction).
+Not merged, no PR opened. Stacked on PR #75 → PR #74. PR #76 is the dependency
+fix at `ca2c4fd`, open against `master`.

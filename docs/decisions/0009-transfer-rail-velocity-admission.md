@@ -1,6 +1,6 @@
 # 0009 — Transfer-rail velocity admission
 
-- **Status:** **Proposed — awaiting owner approval. Not implemented.**
+- **Status:** **Accepted (architecture only) — owner approved Option C on 2026-11-08. NOT implemented, and this approval is explicitly not approval to enable a live rail or to use unapproved limits.**
 - **Date:** 2026-11-08
 - **Relates to:** `0008-atomic-velocity-admission.md` (which closed the same
   class of defect on the three P2P paths and deliberately left this rail out),
@@ -145,11 +145,19 @@ in-flight value rather than completed volume.
 1. **Prerequisite, independent of the choice:** bound `reverseVelocity()`'s
    release by the claim being released rather than by the window total. Until
    then no rail may be enabled.
-2. **Sandbox now, under option B:** admit at `settleSandboxTransfer()`, inside
-   the transaction that already locks the intent and moves the balance, with
-   `admitVelocity()` exactly as the P2P paths use it. Small, consistent with
-   0008, and it removes "a balance-moving path with no volume control" from the
-   sandbox beta. Explicitly labelled a stopgap that does not generalise.
+2. **Sandbox stopgap — THIS STEP AS WRITTEN WAS WRONG. See `0013`.**
+   It said to admit at `settleSandboxTransfer()` "with `admitVelocity()`
+   exactly as the P2P paths use it". `admitVelocity()` writes to
+   `velocity_checks`, which has **no domain column**, so that would have made
+   a simulated `add_money` consume the payer's real **P2P outbound** budget —
+   a user funding their wallet would lose capacity to send money to other
+   people. It is the same cross-domain error that `0012` corrected in the
+   release direction, where it was measured letting a payer move 750 against
+   a 500 ceiling.
+   `0013-sandbox-funding-admission-stopgap.md` replaces this step: the sandbox
+   admission creates a **funding claim** inside the settlement transaction,
+   and exposure is derived per domain by `claimedExposure()`. Do not implement
+   the sentence this paragraph replaces.
 3. **C before any live rail**, as a separate authorized change with its
    numbers agreed first.
 
@@ -231,8 +239,11 @@ realized *loss*, and one counter cannot be both. The options:
   ceiling, so a payer who has cost the platform money loses funding capacity
   rather than regaining it.
 
-This record does not choose. It is a loss-tolerance question, not an
-engineering one, and the second option needs a number only the owner can set.
+**The owner chose separate realized-loss accounting on 2026-11-08**, rejecting
+"accept it". Worked out in `0011-realized-loss-and-repeated-returns.md`
+(Proposed), which still needs the thresholds — a loss-tolerance question, not
+an engineering one, and nothing in this repository carries either the capital
+or an observed return rate to derive them from.
 It is listed below as a decision rather than folded into C, because C is
 implementable without it and this is the part that stops C from being a
 complete answer to funding abuse.

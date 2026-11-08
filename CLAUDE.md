@@ -81,6 +81,8 @@ Client (React 19)
 | `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: consumes budget, admits on the transaction, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **releases the claim when a later step of the payment fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked; the pool case *hangs* rather than fails when the `tx` argument is dropped |
 | `lib/__tests__/velocity-admission.test.ts` | Pins `admitVelocity()` itself. Its central case asserts the **lock**, not a race: it holds one admission's transaction open and requires the second to be unable to reach a decision. The obvious version — two concurrent admissions, assert one wins — was written first and **passed under the read-then-write mutation**, because whether they interleave is up to the scheduler. Do not replace it with that. Also covers CAD/USD budget isolation, window rollover (a previous hour is out of scope hourly and still counted daily), the daily-count, daily-amount and weekly-amount ceilings, and that `reverseVelocity()`'s compensating rows actually **release headroom** — which they do only because admission sums all rows in a window instead of reading the row it upserted |
 | `lib/__tests__/money-path-velocity-status.test.ts` | `money:send` and request-accept answer **429**, not 500, when admission refuses — and admission is called with the transaction's own executor, so a refusal reaches no later statement. These catch branches are new with decision 0008 on paths that had no route test; dropping either makes three cases fail with "expected 500 to be 429". Also pins 400 for `INSUFFICIENT_BALANCE`, 409 for `ALREADY_PROCESSED` and 500 for an unexpected fault, since all of them share one `catch` |
+| `lib/velocity-claims.ts` | The funding/withdrawal exposure ledger and the **only** velocity release path. `createVelocityClaim()` / `finalizeVelocityClaim()` / `releaseVelocityClaim()` / `claimedExposure()` / `findVelocityClaimsNeedingReconciliation()`. Three rules, each learned by getting it wrong: it must **never write to `velocity_checks`** (see the domain rule below); it must **never call `auditLog()`**, which takes its own connection and swallows errors — restoring that call deadlocks the `max: 5` pool and makes the concurrency test *hang* at 5s; and a release signals refusal by **throwing**, with no `try/catch`, so a failure cannot be reported as success |
+| `lib/__tests__/velocity-claim-release.test.ts` | 26 cases against a real database pinning the claim/exposure model: domains separate, exposure never negative, duplicate and concurrent releases idempotent, late returns credit nothing, audit rolls back with the release, and six concurrent releases do not exhaust the pool. Mutation-checked four ways; reintroducing the cross-domain write fails **12 cases across four files** |
 | `lib/__tests__/velocity-admission-callers.test.ts` | Static guard, in the manner of the workflow-pinning test: no money path may call `checkVelocityLimit()` (one allowlisted preview call site) or `recordVelocity()`, and every `admitVelocity()` call must pass an executor. It strips comments **and quoted strings** before grepping — `app/api/migrate/route.ts` names `recordVelocity()` in an operator error message |
 | `lib/__tests__/split-pay-route-status.test.ts` | Pins the route's status contract, which the file above cannot: it calls `paySplitPortion()` directly, so a regression mapping `VELOCITY_EXCEEDED` to 400 instead of **429** would have stayed green. Also pins 403/409/409/400 for the other codes and **500 for a non-`SplitPaymentError`**, so a velocity-evaluation failure is never reported as the caller's fault |
 | `lib/__tests__/provider-event-duplicates.test.ts` | Duplicate-webhook detection. Its `beforeEach` was `TRUNCATE provider_webhook_events` — on a **shared** table, which destroyed other files' rows *and* left its own behind. Now a delete scoped to its own ids. Keep it scoped: the leak was invisible only because another file's unrelated cleanup happened to run in between |
@@ -276,16 +278,17 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **66 files /
-943 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 943 pass. The baseline on `master` at `403acf1` is
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **67 files /
+965 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 965 pass. The baseline on `master` at `403acf1` is
 **61 / 907**, and the difference belongs to two unmerged branches, not to that
 commit: PR #74 adds `split-pay-velocity.test.ts` (9) and
-`split-pay-route-status.test.ts` (6) when `money:split-pay` was brought under
-the velocity control; PR #75, stacked on it, adds
+`split-pay-route-status.test.ts` (6); PR #75, stacked on it, adds
 `velocity-admission.test.ts` (12), `velocity-admission-callers.test.ts` (3)
-and `money-path-velocity-status.test.ts` (7), and rewrites the first of #74's
-two. Several of all of these exist for defects the first implementations
+and `money-path-velocity-status.test.ts` (7); and branch
+`sec/claim-bounded-velocity-release`, stacked on #75, adds
+`velocity-claim-release.test.ts` (26) and three domain guards while deleting
+the eight-case `reverseVelocity` block. Several of all of these exist for defects the first implementations
 shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
@@ -458,6 +461,28 @@ made only in `lib/providers/TransferProviderFactory.ts`.
   was enforced in *routes*, so a path whose money movement sat in a library
   function (`paySplitPortion()`) was simply missed. Put the gate next to the
   movement, so a new caller inherits it
+- **`velocity_checks` is the P2P outbound domain, and NOTHING else may write
+  to it.** It has **no domain column**: one undifferentiated pool per
+  `(user_id, window_type, window_start, currency)` holding `money:send`,
+  request-accept and `money:split-pay` consumption together. So a charge or a
+  credit from any other domain is wrong **regardless of its amount**, and
+  bounding the amount does not fix it. Funding and withdrawal exposure lives
+  in `velocity_claims` and is **derived** by `claimedExposure()`, scoped on
+  `user_id` / `claim_kind` / `currency`.
+  This was learned twice in two revisions. `reverseVelocity()` released
+  `min(amount, window total)` — the window total spans every path, so a
+  returned transfer freed budget `money:send` and `money:split-pay` had spent.
+  Its replacement then wrote "compensating" negative rows into the same pool,
+  which was the identical error with a tighter bound: measured, a funding
+  release cut pure P2P volume `450 → 350`, a **withdrawal** release cut it
+  `400 → 250`, and a release with no prior charge drove usage to **−300**,
+  after which the payer moved **750 against a 500 hourly ceiling**. Both
+  revisions shipped tests that *asserted* the defect under titles claiming the
+  release was "bounded by the claim" — the amount was, the domain was not.
+  `lib/__tests__/velocity-admission-callers.test.ts` now fails if
+  `lib/velocity-claims.ts` contains any `INSERT`/`UPDATE`/`DELETE` against
+  `velocity_checks`, because a reviewer reading one diff cannot see that a
+  compensating row is forbidden. See `docs/decisions/0012`.
 - **A velocity call made from inside `sql.begin` MUST be passed the
   transaction (`tx`).** `lib/db.ts` sets **`max: 5`**. A caller holding a pool
   connection inside a transaction that lets `checkVelocityLimit()` or
@@ -558,19 +583,21 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
-- **`reverseVelocity()` can release budget the rail never consumed — and that
-  another path did.** `SettlementExecutor` calls it when a transfer is
-  `returned`. The rail holds no claim (next item), and the function releases
-  `min(amount, current window total)` where that total is the user's volume
-  from **every** path. So a returned transfer frees budget `money:send` or
-  `money:split-pay` genuinely spent. The abuse shape is plain: fund by
-  `add_money`, spend the credit through P2P, let the funding transfer return
-  NSF, recover outbound budget that was actually used. **Latent, not
-  reachable:** a `returned` status needs a provider webhook and both live flags
-  are off. It is a **prerequisite for enabling any rail**, independent of how
-  the next item is resolved — a release must be bounded by the claim being
-  released, identified by intent id, never by a window total. See
-  `docs/decisions/0009`.
+- **`reverseVelocity()` is deleted; its replacement is on an unmerged branch
+  awaiting independent validation.** The defect: it released
+  `min(amount, current window total)`, and that total spans every money path,
+  so a returned transfer freed budget `money:send` and `money:split-pay` had
+  genuinely consumed. Abuse shape: fund by `add_money`, spend the credit
+  through P2P, let the funding transfer return NSF, recover outbound budget
+  actually used. Latent — a `returned` status needs a provider webhook and
+  both live flags are off.
+  Replaced by `lib/velocity-claims.ts` on `sec/claim-bounded-velocity-release`
+  (`docs/decisions/0012`): claims keyed `(provider, reference)`, exposure
+  derived per domain, release is a state transition that writes nothing to
+  `velocity_checks`. **Still a prerequisite for enabling any rail**, because
+  the owner requires independent validation of the accounting model before
+  that branch merges — the first implementation of it reproduced the same
+  cross-domain error in the opposite direction and its own tests asserted it.
 - **The transfer rail consumes no velocity budget.** `POST
   /api/transfers/intent` runs a non-binding preview; no confirm or execute
   route has ever written velocity, despite a comment in the intent route that
