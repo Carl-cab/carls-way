@@ -28,7 +28,7 @@
 
 import { getSql } from '../db';
 import { parseDatabaseMoney, parsePositiveMoney } from '../money';
-import { admitVelocity, VelocityLimitError, VELOCITY_LIMITS } from '../auth';
+import { admitVelocity, reverseVelocity, VelocityLimitError, VELOCITY_LIMITS } from '../auth';
 
 // Its own user: vitest runs files in parallel and this file drives a payer to
 // a ceiling, so sharing one with split-pay-velocity.test.ts would make each
@@ -42,12 +42,46 @@ const cad = (amount: string) => parsePositiveMoney(amount, 'CAD');
 // 5 daily count, 2500 weekly (major units).
 const LIMITS = VELOCITY_LIMITS.new_user;
 
-async function consumed(windowType: 'hourly' | 'daily' | 'weekly'): Promise<number> {
+const usd = (amount: string) => parsePositiveMoney(amount, 'USD');
+
+async function consumed(
+  windowType: 'hourly' | 'daily' | 'weekly',
+  currency: 'CAD' | 'USD' = 'CAD',
+): Promise<number> {
   const rows = await sql`
     SELECT COALESCE(SUM(total_amount), 0) AS total FROM velocity_checks
-    WHERE user_id = ${PAYER} AND window_type = ${windowType} AND currency = 'CAD'
+    WHERE user_id = ${PAYER} AND window_type = ${windowType} AND currency = ${currency}
   `;
-  return parseDatabaseMoney(String(rows[0].total), 'CAD');
+  return parseDatabaseMoney(String(rows[0].total), currency);
+}
+
+/** The window boundaries `admitVelocity()` normalizes to, computed the same way. */
+function windowStarts(now: Date = new Date()) {
+  const hour = new Date(now); hour.setMinutes(0, 0, 0);
+  const day = new Date(now); day.setHours(0, 0, 0, 0);
+  const week = new Date(now);
+  week.setDate(now.getDate() - now.getDay()); week.setHours(0, 0, 0, 0);
+  return { hour, day, week };
+}
+
+/**
+ * Seeds a window row directly, to put the payer in a state a sequence of
+ * admissions cannot reach — a *previous* hour's volume, or a weekly total with
+ * no matching hourly volume. Without this the hourly ceiling (500) is always
+ * the first one hit and the daily (1000) and weekly (2500) amount ceilings are
+ * unreachable, so they would go untested.
+ */
+async function seedWindow(
+  windowType: 'hourly' | 'daily' | 'weekly',
+  start: Date,
+  amountMinor: number,
+  count = 1,
+  currency: 'CAD' | 'USD' = 'CAD',
+) {
+  await sql`
+    INSERT INTO velocity_checks (user_id, window_start, window_type, transaction_count, total_amount, currency)
+    VALUES (${PAYER}, ${start.toISOString()}, ${windowType}, ${count}, ${(amountMinor / 100).toFixed(2)}, ${currency})
+  `;
 }
 
 async function rowCount(): Promise<number> {
@@ -207,6 +241,87 @@ describe('admitVelocity is an atomic admission, not a check and a later write', 
     });
 
     expect(await consumed('hourly')).toBe(cad('75.00'));
+  });
+
+  it('keeps CAD and USD budgets separate', async () => {
+    // Both the claim and the verification filter on currency. A USD payment
+    // must not consume a CAD ceiling, or a dual-currency user would be
+    // refused in one currency for volume moved in the other — and the two
+    // ceilings are denominated amounts, not a shared number.
+    await admitVelocity(PAYER, cad('450.00'), 'CAD');
+
+    // Would breach the hourly ceiling if the budgets were shared.
+    await expect(admitVelocity(PAYER, usd('450.00'), 'USD')).resolves.toBeUndefined();
+
+    expect(await consumed('hourly', 'CAD')).toBe(cad('450.00'));
+    expect(await consumed('hourly', 'USD')).toBe(usd('450.00'));
+
+    // And each currency still enforces its own ceiling.
+    await expect(admitVelocity(PAYER, usd('100.00'), 'USD')).rejects.toThrow(VelocityLimitError);
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(VelocityLimitError);
+  });
+
+  it('ignores a previous hour for the hourly ceiling but still counts it daily', async () => {
+    // Window boundaries are the reason velocity is three rows and not one.
+    // A previous hour's volume has rolled out of the hourly window and must
+    // not refuse a payment, while the same volume is still inside today.
+    const { hour, day, week } = windowStarts();
+    const previousHour = new Date(hour.getTime() - 60 * 60 * 1000);
+
+    await seedWindow('hourly', previousHour, cad('450.00'));
+    await seedWindow('daily', day, cad('950.00'));
+    await seedWindow('weekly', week, cad('950.00'));
+
+    // 100 against a fresh hourly window: the stale 450 is out of scope...
+    // ...but 950 + 100 breaches the 1000 daily ceiling, so this is refused
+    // for the DAILY reason, not the hourly one.
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(/Daily limit/i);
+
+    // Proof the hourly window really did roll: a 40 payment fits daily too.
+    await expect(admitVelocity(PAYER, cad('40.00'), 'CAD')).resolves.toBeUndefined();
+    // The current hour holds only the new payment; the previous hour's row is
+    // untouched and still present as evidence.
+    const current = await sql`
+      SELECT total_amount FROM velocity_checks
+      WHERE user_id = ${PAYER} AND window_type = 'hourly' AND window_start = ${hour.toISOString()}
+    `;
+    expect(parseDatabaseMoney(String(current[0].total_amount), 'CAD')).toBe(cad('40.00'));
+  });
+
+  it('refuses on the weekly ceiling when hourly and daily both have room', async () => {
+    const { week } = windowStarts();
+    await seedWindow('weekly', week, cad('2450.00'));
+
+    // 100 is fine hourly (500) and daily (1000); 2450 + 100 breaches weekly.
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(/Weekly limit/i);
+    // Refused, so nothing was consumed in any window.
+    expect(await consumed('weekly')).toBe(cad('2450.00'));
+    expect(await consumed('hourly')).toBe(0);
+  });
+
+  it('releases headroom when a transfer is reversed', async () => {
+    // reverseVelocity() appends compensating rows with transaction_count < 0,
+    // which the partial unique index deliberately excludes. admitVelocity()
+    // sums ALL rows in a window rather than reading the accumulating row, so
+    // a reversal actually frees budget. If it read only the upserted row —
+    // the obvious shortcut, since the upsert can RETURNING its own totals —
+    // a returned transfer would never release anything.
+    await admitVelocity(PAYER, cad('450.00'), 'CAD');
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(VelocityLimitError);
+
+    await reverseVelocity(PAYER, cad('300.00'), 'CAD', 'transfer_returned');
+
+    expect(await consumed('hourly')).toBe(cad('150.00'));
+    // The payment refused a moment ago now fits.
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).resolves.toBeUndefined();
+    expect(await consumed('hourly')).toBe(cad('250.00'));
+
+    // Both rows are retained: the original and its compensating entry.
+    const rows = await sql`
+      SELECT transaction_count FROM velocity_checks
+      WHERE user_id = ${PAYER} AND window_type = 'hourly' ORDER BY id
+    `;
+    expect(rows.map((r) => Number(r.transaction_count))).toContain(-1);
   });
 
   it('rejects a non-positive or non-integer amount rather than admitting it', async () => {

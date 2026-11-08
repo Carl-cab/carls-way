@@ -154,3 +154,58 @@ what it cannot see. The test that does detect it asserts the **lock**: hold the
 first transaction open and observe that the second has not reached a decision.
 That is a direct observation of the property with no reliance on scheduling,
 and it is what `velocity-admission.test.ts` now does.
+
+---
+
+## Addendum — 2026-11-08: extended validation
+
+Appended, not rewritten: the decision above is unchanged, and this records
+coverage added after it was accepted, at the owner's direction to validate a
+named list of behaviours before #74 is merged.
+
+Suite now **66 files / 943 tests, all passing**; typecheck 0 errors; lint 0
+errors / 28 pre-existing warnings; `pnpm run build` succeeds.
+
+Five behaviours on the list were genuinely uncovered and now are:
+
+| Behaviour | Where | Why it was worth a test |
+|---|---|---|
+| CAD/USD budget isolation | `velocity-admission.test.ts` | Both the claim and the verification filter on currency. Shared budgets would refuse a dual-currency user in one currency for volume moved in the other, against ceilings that are denominated amounts |
+| Window rollover | same | A previous hour's volume must be out of scope hourly and still counted daily. This is why velocity is three rows rather than one |
+| Daily-amount and weekly-amount ceilings | same | The hourly ceiling (500) is the tightest, so neither is reachable by a sequence of admissions; both needed a seeded window to exercise at all, and both were previously untested |
+| Reversal releases headroom | same | `reverseVelocity()` appends rows with `transaction_count < 0`, which the partial unique index excludes. Admission frees that budget **only because it sums all rows in a window** rather than reading the row it upserted — the obvious `RETURNING` shortcut would make a returned transfer release nothing |
+| 429 on `money:send` and request-accept | `money-path-velocity-status.test.ts` | Admission moving inside `sql.begin` means `VelocityLimitError` now escapes the transaction and must be caught alongside `INSUFFICIENT_BALANCE` and `ALREADY_PROCESSED`. New code, no prior route test on either path |
+
+Mutation evidence for the new route branches: deleting the
+`VelocityLimitError` branch from either route fails three cases with
+`expected 500 to be 429`. That is the failure mode that matters — a client
+that cannot distinguish "you have hit your ceiling" from "we are broken"
+retries immediately.
+
+Two items on the list were examined and need no new test, which is worth
+saying rather than leaving implied:
+
+- **Connection-pool exhaustion on `money:send` and request-accept.** Both now
+  admit inside their transaction, so they carry the same hazard
+  `paySplitPortion()` hit. It is foreclosed structurally rather than
+  behaviourally: `velocity-admission-callers.test.ts` requires every
+  `admitVelocity()` call to pass an executor, and the two route tests assert
+  the executor is the transaction's own `tx` object. A behavioural pool test
+  per route would need the full route driven against a real database with
+  concurrency, for a property the static guard already makes impossible to
+  regress silently.
+- **Idempotent retries.** Covered by the rollback-then-retry case: a rolled
+  back admission leaves no rows, and the retry consumes exactly once. There is
+  no provider-style idempotency key here because admission has no external
+  effect to deduplicate — the transaction boundary *is* the idempotency
+  mechanism.
+
+One limit of this validation, stated because the directive asked for the
+distinction: all of it is **code verification**. None of it is production
+operational verification. No part of this change has run against the
+production database, and the behaviour under Supabase's transaction pooler —
+which is what `DATABASE_URL` points at in production, and which multiplexes
+sessions — has not been observed. Row locks and transaction scope are
+PostgreSQL semantics and are not altered by a pooler in transaction mode, but
+"not altered in theory" is not an observation. That belongs in the sandbox
+beta's operational evidence, not here.

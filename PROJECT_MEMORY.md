@@ -3687,3 +3687,99 @@ which is stacked on it.
 
 **Commit / PR.** Branch `claude/cool-cerf-ErxD3`, stacked on PR #74's head
 `04bb94e`. No PR opened — not requested.
+
+---
+
+## 2026-11-08 — Atomic velocity: stacked PR #75, extended validation, and the transfer-rail proposal
+
+**Purpose and scope.** Owner-authorized three things: open a stacked PR for the
+decision 0008 work targeting #74's branch rather than `master`; validate a named
+list of behaviours before #74 merges; and review the transfer rail to recommend
+where a durable velocity claim belongs. No new financial policy implemented.
+
+**PR opened.** **#75**, head `claude/cool-cerf-ErxD3`, base
+`docs/sprint1-owner-confirmations`. Targeting #74's branch is the point of the
+exercise: #74 alone carries the check-then-record concurrency defect, so merging
+it to `master` first would deploy a known weakness. The correction has to land
+in #74 before #74 lands in `master`.
+
+**Financial or security behaviour affected.** No change to 0008's behaviour.
+Five uncovered behaviours from the validation list are now pinned, and two
+findings came out of the rail review.
+
+Added coverage (all against a real PostgreSQL instance except the route file):
+CAD/USD budget isolation; window rollover (a previous hour out of scope hourly,
+still counted daily); the daily-amount and weekly-amount ceilings, neither of
+which was reachable by a sequence of admissions and so neither previously
+tested; that `reverseVelocity()`'s compensating rows actually release headroom —
+true only because admission sums all rows in a window rather than reading the
+row it upserted, so the obvious `RETURNING` shortcut would have made a returned
+transfer release nothing; and 429 rather than 500 on `money:send` and
+request-accept, whose `VelocityLimitError` catch branches are new with 0008 on
+paths that had no route test at all.
+
+**A defect found by the rail review, reported not fixed.**
+`SettlementExecutor` calls `reverseVelocity()` when a transfer is `returned`.
+The rail holds no claim, and that function releases `min(amount, current window
+total)` — where the total is the user's volume from every path. A returned
+transfer therefore frees budget `money:send` and `money:split-pay` genuinely
+spent. Abuse shape: fund by `add_money`, spend the credit through P2P, let the
+funding transfer return NSF, recover outbound budget that was actually used.
+**Latent** — `returned` needs a provider webhook and both live flags are off —
+and a prerequisite for enabling any rail, independent of the architecture
+chosen. Recorded in `CLAUDE.md`, `CURRENT_STATUS.md` and
+`docs/decisions/0009`.
+
+**Transfer-rail recommendation (Proposed, not implemented).**
+`docs/decisions/0009-transfer-rail-velocity-admission.md`. Recommends option
+**C built in A's shape**: reserve at confirm, finalize at settlement, release on
+failure/return, keyed on the intent, with **separate funding and withdrawal
+budgets**. Two conclusions worth carrying:
+
+- **On the live rail, settlement is too late to refuse.** By the time a
+  settlement webhook arrives the provider has already moved the money at the
+  bank, so option B — admit at the first balance movement — can record but
+  cannot say no. B is viable only as a sandbox stopgap and must not be described
+  as closing the rail's gap.
+- **The live rail's invariant is necessarily weaker than the P2P paths'.**
+  Because a transaction must never be held open across a provider call, "the
+  claim commits with the money" is impossible; it becomes "reserved before the
+  external call, reconciled after". That makes reconciliation *part of* the
+  control rather than a net beside it.
+
+Funding and withdrawal are deliberately not given one policy: a funding ceiling
+protects against return fraud over a settlement-plus-return window measured in
+days, which the existing hourly/daily/weekly ceilings do not express, while
+withdrawal is the outbound direction velocity was designed for. No limit
+numbers are proposed — those are the owner's.
+
+**Tests run and their results.** **66 files / 943 tests, all passing** on a
+database created fresh for the run with the CI fixture applied. Typecheck 0
+errors; lint 0 errors / 28 pre-existing warnings; `pnpm run build` succeeds.
+Mutation-checked: deleting the `VelocityLimitError` branch from either of the
+two routes fails three cases with `expected 500 to be 429`. The three 0008
+mutations from the previous entry still hold.
+
+**Code verification versus operational verification.** All of the above is code
+verification. Nothing here has run against the production database, and the
+behaviour under Supabase's transaction pooler has not been observed — row locks
+and transaction scope are PostgreSQL semantics a transaction-mode pooler does
+not alter, but that is reasoning, not an observation, and it belongs in the
+sandbox beta's operational evidence.
+
+**Migration impact.** None. No schema change.
+
+**Rollback requirement.** Revert the commits on `claude/cool-cerf-ErxD3`. No
+data migration to undo.
+
+**Unresolved findings.** The `reverseVelocity()` over-release, above. The rail's
+absent claim, pending approval of 0009. 0007's observability asks, untouched:
+nothing scrapes `rateLimitBackendHealth()`, and sustained Redis degradation has
+no alert and no named owner.
+
+**Next recommended action.** Owner: approve 0009's architecture (and separately
+the sandbox stopgap), then review #75 → merge into #74's branch → revalidate #74
+→ merge #74 to `master`. Do not merge #74 to `master` without #75.
+
+**Commit / PR.** PR **#75** (`claude/cool-cerf-ErxD3` → `docs/sprint1-owner-confirmations`),
+stacked on PR #74.

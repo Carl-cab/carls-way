@@ -79,7 +79,8 @@ Client (React 19)
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
 | `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `admitVelocity()`. Two rules, both learned by getting them wrong: the admission call must stay **unwrapped** (fail-closed, decision 0007 — and a `catch` would also swallow `VelocityLimitError`, turning a refusal into an admission), and it must be passed **`tx`** — see the `max: 5` pool note below |
 | `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: consumes budget, admits on the transaction, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **releases the claim when a later step of the payment fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked; the pool case *hangs* rather than fails when the `tx` argument is dropped |
-| `lib/__tests__/velocity-admission.test.ts` | Pins `admitVelocity()` itself. Its central case asserts the **lock**, not a race: it holds one admission's transaction open and requires the second to be unable to reach a decision. The obvious version — two concurrent admissions, assert one wins — was written first and **passed under the read-then-write mutation**, because whether they interleave is up to the scheduler. Do not replace it with that |
+| `lib/__tests__/velocity-admission.test.ts` | Pins `admitVelocity()` itself. Its central case asserts the **lock**, not a race: it holds one admission's transaction open and requires the second to be unable to reach a decision. The obvious version — two concurrent admissions, assert one wins — was written first and **passed under the read-then-write mutation**, because whether they interleave is up to the scheduler. Do not replace it with that. Also covers CAD/USD budget isolation, window rollover (a previous hour is out of scope hourly and still counted daily), the daily-count, daily-amount and weekly-amount ceilings, and that `reverseVelocity()`'s compensating rows actually **release headroom** — which they do only because admission sums all rows in a window instead of reading the row it upserted |
+| `lib/__tests__/money-path-velocity-status.test.ts` | `money:send` and request-accept answer **429**, not 500, when admission refuses — and admission is called with the transaction's own executor, so a refusal reaches no later statement. These catch branches are new with decision 0008 on paths that had no route test; dropping either makes three cases fail with "expected 500 to be 429". Also pins 400 for `INSUFFICIENT_BALANCE`, 409 for `ALREADY_PROCESSED` and 500 for an unexpected fault, since all of them share one `catch` |
 | `lib/__tests__/velocity-admission-callers.test.ts` | Static guard, in the manner of the workflow-pinning test: no money path may call `checkVelocityLimit()` (one allowlisted preview call site) or `recordVelocity()`, and every `admitVelocity()` call must pass an executor. It strips comments **and quoted strings** before grepping — `app/api/migrate/route.ts` names `recordVelocity()` in an operator error message |
 | `lib/__tests__/split-pay-route-status.test.ts` | Pins the route's status contract, which the file above cannot: it calls `paySplitPortion()` directly, so a regression mapping `VELOCITY_EXCEEDED` to 400 instead of **429** would have stayed green. Also pins 403/409/409/400 for the other codes and **500 for a non-`SplitPaymentError`**, so a velocity-evaluation failure is never reported as the caller's fault |
 | `lib/__tests__/provider-event-duplicates.test.ts` | Duplicate-webhook detection. Its `beforeEach` was `TRUNCATE provider_webhook_events` — on a **shared** table, which destroyed other files' rows *and* left its own behind. Now a delete scoped to its own ids. Keep it scoped: the leak was invisible only because another file's unrelated cleanup happened to run in between |
@@ -253,16 +254,17 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **65 files /
-932 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 932 pass. The baseline on `master` at `403acf1` is
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **66 files /
+943 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 943 pass. The baseline on `master` at `403acf1` is
 **61 / 907**, and the difference belongs to two unmerged branches, not to that
 commit: PR #74 adds `split-pay-velocity.test.ts` (9) and
 `split-pay-route-status.test.ts` (6) when `money:split-pay` was brought under
-the velocity control; stacked on it, the decision 0008 work adds
-`velocity-admission.test.ts` (8) and `velocity-admission-callers.test.ts` (3)
-and rewrites the first of those two. Several of all of these exist for defects
-the first implementations shipped. Not carried over from either side of a merge: the branches had
+the velocity control; PR #75, stacked on it, adds
+`velocity-admission.test.ts` (12), `velocity-admission-callers.test.ts` (3)
+and `money-path-velocity-status.test.ts` (7), and rewrites the first of #74's
+two. Several of all of these exist for defects the first implementations
+shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same
@@ -533,6 +535,19 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
+- **`reverseVelocity()` can release budget the rail never consumed — and that
+  another path did.** `SettlementExecutor` calls it when a transfer is
+  `returned`. The rail holds no claim (next item), and the function releases
+  `min(amount, current window total)` where that total is the user's volume
+  from **every** path. So a returned transfer frees budget `money:send` or
+  `money:split-pay` genuinely spent. The abuse shape is plain: fund by
+  `add_money`, spend the credit through P2P, let the funding transfer return
+  NSF, recover outbound budget that was actually used. **Latent, not
+  reachable:** a `returned` status needs a provider webhook and both live flags
+  are off. It is a **prerequisite for enabling any rail**, independent of how
+  the next item is resolved — a release must be bounded by the claim being
+  released, identified by intent id, never by a window total. See
+  `docs/decisions/0009`.
 - **The transfer rail consumes no velocity budget.** `POST
   /api/transfers/intent` runs a non-binding preview; no confirm or execute
   route has ever written velocity, despite a comment in the intent route that
@@ -543,6 +558,16 @@ arbitrary end user.
   on the three paths that already had a control; adding one here is a
   financial-behaviour change (it decides whether a transfer consumes budget at
   intent, confirm or execute) and belongs with the rail work.
+  `docs/decisions/0009` is the **Proposed** architecture — reserve at confirm,
+  finalize at settlement, release on failure, with **separate funding and
+  withdrawal budgets** — and it is awaiting owner approval, so nothing in it is
+  implemented. Two findings from it are worth carrying here. On the live rail
+  **settlement is too late to refuse**: the provider has already moved the money
+  at the bank, so a control that first speaks at settlement can record but not
+  say no. And because a transaction must never be held open across a provider
+  call, the live rail's invariant cannot be "the claim commits with the money"
+  — it is "reserved before the external call, reconciled after", which makes
+  reconciliation part of the control rather than a net beside it.
 - `AdminAuditService.verifyImmutability()` returns a hardcoded
   `verification_status: 'clean'` with `total_logs_checked: 0`. Nothing calls
   it, so no path trusts the false answer. A real implementation exists at
