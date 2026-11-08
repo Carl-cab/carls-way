@@ -16,11 +16,16 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on **commit `37e2a43`** — the head of PR #75, not the `e0f3f0d`
-baseline this header names —
+Measured on **commit `f520e22`** — PR #75's head *at the time of measurement*,
+not the `e0f3f0d` baseline this header names —
 on a database created fresh for the run and with
 the CI fixture applied: **66 files / 943 tests** pass, typecheck 0 errors, lint 0
-errors / 28 warnings, and `pnpm run build` succeeds. Earlier baselines on this
+errors / 28 warnings, and `pnpm run build` succeeds. The phrasing is deliberate
+and was itself a review finding: an earlier revision read "commit `37e2a43`,
+the head of PR #75", which named the right commit and then made a claim about
+it that the very next push falsified. A measurement belongs to the commit it
+was taken on; whether that commit is still anyone's head is a separate fact
+with a shorter life. Earlier baselines on this
 file: 55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at
 `6d8861c`, 57 / 832 at `6927ebd`, and **61 / 907 at `e0f3f0d`** — which is the
 figure that belongs to this header's commit. 943 becomes a baseline fact only

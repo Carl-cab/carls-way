@@ -3785,8 +3785,11 @@ the sandbox stopgap), then review #75 → merge into #74's branch → revalidate
 
 **Commit / PR.** PR **#75** (`claude/cool-cerf-ErxD3` →
 `docs/sprint1-owner-confirmations`), stacked on PR #74. Commits `78d7bb8` (the
-added coverage and decision 0009) and `37e2a43` (the stacked-PR CI note).
-**`37e2a43` is the commit every test and CI figure in this entry was measured
-against** — a branch name cannot identify the tree after a later push, which is
+added coverage and decision 0009), `37e2a43` (the stacked-PR CI note), `7a7e71f`
+and `f520e22` (two rounds of review findings).
+**`f520e22` is the commit every test and CI figure in this entry was measured
+against** — test/lint/build, secret scan and CodeQL all green there, the
+dependency audit red on the pre-existing follow-redirects advisory; any later
+commit on the branch is documentation only — a branch name cannot identify the tree after a later push, which is
 why the governance rule asks for the SHA. Also prepared and pushed separately,
 not part of #75: `sec/follow-redirects-1-16-2` at `ca2c4fd`.
