@@ -238,10 +238,15 @@ yarn lockfile back.
 the **base** of a `pull_request`. A PR targeting another feature branch — as
 PR #75 targets #74's branch, on purpose, so a known defect is never deployed
 alone — therefore runs no tests, no dependency audit, no secret scan and no
-CodeQL. Its checks list shows only Vercel and CodeRabbit, which looks like a
-short list rather than an absent one. This is the same failure mode as reading
+CodeQL. **CodeRabbit's automatic review is skipped too**, in its own words:
+"Auto reviews are disabled on base/target branches other than the default
+branch." So a stacked PR loses *both* safety nets, and its checks list shows
+only Vercel plus a skipped CodeRabbit run — which looks like a short list
+rather than an absent one. This is the same failure mode as reading
 "ALL GREEN 1/1" as green: **nothing pending is not the same as something
-passed.**
+passed.** The review has to be asked for explicitly with
+`@coderabbitai review`, and **do not push while it runs** — a push aborts it
+with "Head commit changed", which has now happened twice in this repo.
 
 Those workflows also fire on **push** to `integration/**`, so the way to get
 real evidence for a stacked head is to push that exact commit to an

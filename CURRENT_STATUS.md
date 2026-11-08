@@ -16,7 +16,8 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on the **PR #75 tree, not the `e0f3f0d` baseline this header names**,
+Measured on **commit `37e2a43`** — the head of PR #75, not the `e0f3f0d`
+baseline this header names —
 on a database created fresh for the run and with
 the CI fixture applied: **66 files / 943 tests** pass, typecheck 0 errors, lint 0
 errors / 28 warnings, and `pnpm run build` succeeds. Earlier baselines on this

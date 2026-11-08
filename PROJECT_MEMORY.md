@@ -3685,8 +3685,10 @@ change; only the velocity counters are addressed here.
 **Next recommended action.** Owner: review and merge PR #74, then this work,
 which is stacked on it.
 
-**Commit / PR.** Branch `claude/cool-cerf-ErxD3`, stacked on PR #74's head
-`04bb94e`. No PR opened — not requested.
+**Commit / PR.** Commits `6e5c5fc` (the admission change) and `9c1f4c6` (the
+records), on branch `claude/cool-cerf-ErxD3`, stacked on PR #74's head
+`04bb94e`. No PR opened at the time of this entry — not then requested; PR #75
+was opened the following day against #74's branch.
 
 ---
 
@@ -3781,5 +3783,10 @@ no alert and no named owner.
 the sandbox stopgap), then review #75 → merge into #74's branch → revalidate #74
 → merge #74 to `master`. Do not merge #74 to `master` without #75.
 
-**Commit / PR.** PR **#75** (`claude/cool-cerf-ErxD3` → `docs/sprint1-owner-confirmations`),
-stacked on PR #74.
+**Commit / PR.** PR **#75** (`claude/cool-cerf-ErxD3` →
+`docs/sprint1-owner-confirmations`), stacked on PR #74. Commits `78d7bb8` (the
+added coverage and decision 0009) and `37e2a43` (the stacked-PR CI note).
+**`37e2a43` is the commit every test and CI figure in this entry was measured
+against** — a branch name cannot identify the tree after a later push, which is
+why the governance rule asks for the SHA. Also prepared and pushed separately,
+not part of #75: `sec/follow-redirects-1-16-2` at `ca2c4fd`.
