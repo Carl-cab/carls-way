@@ -4065,3 +4065,98 @@ rather than left asserting a control that is not there.
 
 **Next recommended action.** Owner: authorize `#74 → master`. Final head
 **`3d6769a`**.
+
+---
+
+## 2026-11-09 — PR #74 merged to master: atomic velocity admission is now live on master
+
+**Purpose and scope.** Owner-authorized ("merge 74 in master"). PR #74 merged
+as **`d78918a`**, from head **`694550b`** with `expectedHeadSha` pinned. Master
+moves `4495f13` → `d78918a`. This carries both stages of the P2P velocity work,
+because PR #75 had already been merged into #74's branch as `3d6769a`.
+
+**Financial behaviour now on master — this is the significant part of this
+entry.** Two controls that were previously only on branches:
+
+1. **`money:split-pay` has a durable volume control at all.** `lib/splits.ts`
+   contained zero velocity references; `paySplitPortion()` debited the payer
+   and credited the split creator with no ceiling behind the rate limit, and
+   its volume never entered `velocity_checks` to consume any other path's
+   budget. The gate now sits **inside** `paySplitPortion()`, so the amount
+   checked is read from `split_participants` under `FOR UPDATE` and is exactly
+   the amount about to move, and any future caller inherits it.
+2. **The velocity TOCTOU (CWE-367) is closed on all three balance-moving
+   paths.** `checkVelocityLimit()` → move money → `recordVelocity()` read and
+   wrote on separate snapshots with nothing holding the payer's rows between
+   them, so two concurrent payments by one payer both saw the pre-payment
+   total and both were admitted — the ceiling bounded a request, not an
+   account. `admitVelocity()` claims the window rows first under row locks held
+   to commit, verifies after, and throws on a breach.
+
+**Behaviour change, not purely additive.** A split portion now consumes the
+payer's velocity budget, so a payer near their ceiling on another path can be
+refused a split payment that previously succeeded; and one payer's concurrent
+payments are now serialized against each other. Both intended. Distinct payers
+take disjoint rows and are unaffected. No user is newly locked out for being
+unverified — the velocity tier selects `new_user` vs `verified_user` limits and
+does not gate on KYC.
+
+**Pre-merge verification, each item checked rather than assumed.** Head
+unchanged at `694550b`; all four required checks green on that exact commit
+plus CodeQL; 22 files, all within the change set; **no** provider, factory,
+env-gating, workflow or dependency file touched; live-flag names appear in the
+diff only as prose in `readiness.json` describing that they are off; and the
+only schema source changed is `lib/__tests__/helpers/test-schema.sql`, the CI
+fixture.
+
+**Migration impact: NONE, and that was verified rather than assumed.**
+`lib/db.ts` and `app/api/migrate/route.ts` are unchanged against master, so
+**`POST /api/migrate` is not required for this merge** and was not run. The
+fixture gains one test user (9121).
+
+**Tests run and their results.** On merged master at `d78918a`: **66 files /
+943 tests pass**, on a database created fresh with the CI fixture applied.
+Master's own CI run has since completed — **all four required checks green on
+`d78918a`**: `install · typecheck · lint · test · build`, `secret scan`,
+`dependency audit`, `analyze javascript-typescript`. (An earlier draft of this
+entry said the run was "in progress at the time of writing" with two checks
+reported; completed here rather than left as a partial result, since the entry
+had not yet merged.)
+
+**Production deployment CONFIRMED.** GitHub deployment `7664954762`,
+environment Production, sha `d78918a`, state **success**, 2026-11-09T20:14:45Z.
+Read from the GitHub deployments API rather than inferred from the merge — the
+same source that answered "what SHA is in Production" without Vercel access
+earlier in this program, since `api.vercel.com` answers 403 CONNECT through
+this environment's egress proxy.
+
+**So this is the first time either control has run in production**, and the
+behaviour change above is now in front of real users: a split portion consumes
+the payer's velocity budget, so a payer near their ceiling on another path can
+be refused a split payment that previously succeeded, and one payer's
+concurrent payments are serialized against each other. A 429 on
+`money:split-pay` is the expected shape of that, not a regression.
+
+**Deployment.** Pushing to `master` triggers a Vercel production build
+automatically, per the repository's configured behaviour — not a separate
+action taken here. No credential, environment variable or rail flag was
+changed, and `PLAID_TRANSFER_LIVE` / `CA_EFT_LIVE` still gate provider
+selection in `TransferProviderFactory` and are both off.
+
+**Unresolved findings — explicitly NOT closed by this merge.** The transfer
+rail still consumes no velocity budget anywhere. The intent route's
+cross-domain gate still refuses funding on the P2P outbound pool, deliberately,
+until a verified funding control replaces it. `reverseVelocity()`'s replacement
+is on PR #77, unmerged and awaiting independent validation of its accounting
+model. `0009`, `0010`, `0011` and `0013` are all decided or approved and all
+unimplemented. FINTRAC/FinCEN applicability is open. `0011`'s escalation owner
+is interim.
+
+**Rollback requirement.** Reverting `d78918a` restores the TOCTOU on three
+money paths *and* removes split-pay's only durable volume control. If it must
+be reverted, `0007` and `0008` must be amended in the same change rather than
+left asserting controls that are not there. Vercel also keeps deployment
+history, so a bad production build can be rolled back independently of the
+git revert.
+
+**Next recommended action.** Validation verdict on PR #77, which gates `0013`.
