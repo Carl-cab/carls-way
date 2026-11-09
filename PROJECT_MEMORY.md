@@ -3908,3 +3908,94 @@ approach and set its ceiling; supply `0010`'s limits and `0011`'s thresholds.
 `836a8cd` (first implementation, defective) and `6b0ceb8` (the correction).
 Not merged, no PR opened. Stacked on PR #75 → PR #74. PR #76 is the dependency
 fix at `ca2c4fd`, open against `master`.
+
+---
+
+## 2026-11-09 — PR #76's review requirement: asked the reviewer, got "unverified"
+
+**Purpose and scope.** PR #76 (the `follow-redirects` dependency patch) was
+conditionally authorized to merge on four conditions, one of which was "the
+review is clean". This entry records why that condition is **not met**, and
+that the finding came from asking the reviewer rather than from inferring.
+
+**What happened.** Four attempts at an independent review. Three returned
+`Review rate limited` — CodeRabbit's auto-review is disabled for this
+repository (fewer than 10 stars, so every review is hand-triggered) and its
+free OSS capacity was exhausted. The fourth, roughly five hours later,
+reported **`Finished`** with zero inline comments and zero review objects, and
+**without** the explicit "Actionable comments posted: 0" that a completed
+clean review normally carries.
+
+`Finished` with no findings is ambiguous between "reviewed and found nothing"
+and "treated the commit as already seen and did nothing" — CodeRabbit's own
+note says it "does not re-review already reviewed commits", and it *had*
+generated a Walkthrough for `ca2c4fd` at 05:03:50Z before the rate-limited
+attempts.
+
+**So I asked it, instead of reading the summary word as a verdict.** Its
+answer, quoted:
+
+> I can't conclusively distinguish (1) from (2) for the 10:25 run. … Please
+> treat the substantive review requirement as **unverified** until the per-file
+> run details or CodeRabbit support confirm it.
+
+Its reasoning: the check reports run ID `93846a1f-…` while the review summary
+reports `dd51b718-…`, so it cannot establish that the file-selection details
+describe that check run, nor that selecting a file proves the file was
+analysed. It added that it has **not** independently verified the lockfile or
+the audit results.
+
+**Why this matters beyond one PR.** This is the fourth time in this engagement
+that a check's summary word would have stood in for a verdict it did not give:
+"ALL GREEN 1/1", "Review paused", "neutral", and now "Finished". The pattern
+is identical each time — a status that means *absence* read as *success*. The
+only thing that resolved it was asking a direct, falsifiable question with the
+two possible answers spelled out, and committing in advance to what each one
+would mean.
+
+**A structural limit no retry fixes.** CodeRabbit's configuration excludes
+`pnpm-lock.yaml` via `!**/pnpm-lock.yaml`, and the lockfile is half of this
+two-file diff. So even a confirmed clean review covers `package.json` only.
+That half rests on mechanical verification and is reported as such.
+
+**The precise rule, since the owner asked for it.** Ruleset `25851827`
+("master CI and security checks", active, branch-targeted) carries exactly one
+rule: `required_status_checks` with four contexts. There is **no**
+`required_approving_review_count` and no pull-request-review rule. All four
+contexts are green on `ca2c4fd`. So repository policy requires no review,
+merging would **satisfy** branch protection rather than bypass it, and the
+blocker is the owner's own condition — which is the right way round, but it
+means only the owner can clear it.
+
+**Financial or security behaviour affected.** None by this entry. The patch
+itself remains unmerged: `follow-redirects@1.16.1` stays in the production
+tree, so CI's `dependency audit` stays red on `master` and on both stacked
+branches, which continues to block revalidating #74.
+
+**Tests run and their results.** No code changed. The repository state is
+unchanged from `495c8c0`: 67 files / 965 tests passing, typecheck 0, lint 0
+errors, build succeeds.
+
+**Also corrected here.** `CLAUDE.md`'s transfer-rail gap still described
+`0009` as "**Proposed** … awaiting owner approval", which the owner's
+2026-11-08 approval of Option C had made false. Corrected to "Accepted as
+architecture only", with the explicit qualifier that accepted is not
+implemented and is not approval to enable a rail or use unapproved limits, and
+with a pointer to `0013` replacing 0009's wrong sandbox step 2. Found by the
+session re-reading the file, not by a test — the same neighbouring-stale-claim
+pattern this file has now recorded three times.
+
+**Unresolved findings.** The review requirement on #76, above. The accounting
+model on `sec/claim-bounded-velocity-release` still needs independent
+validation. `0010`, `0011` and `0013` are all Proposed and all need owner
+numbers.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Owner: pick one of (a) an explicit documented
+review exception for #76, permitted by repository policy since it requires no
+review; (b) a human or second reviewer, noting the lockfile is reviewable only
+by hand or by the audit job; (c) paid CodeRabbit capacity and a retry.
+
+**Commit / PR.** PR #76 at `ca2c4fd`, open against `master`, unmerged. Branch
+`sec/claim-bounded-velocity-release` at `495c8c0`.

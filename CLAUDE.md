@@ -608,10 +608,21 @@ arbitrary end user.
   on the three paths that already had a control; adding one here is a
   financial-behaviour change (it decides whether a transfer consumes budget at
   intent, confirm or execute) and belongs with the rail work.
-  `docs/decisions/0009` is the **Proposed** architecture — reserve at confirm,
-  finalize at settlement, release on failure, with **separate funding and
-  withdrawal budgets** — and it is awaiting owner approval, so nothing in it is
-  implemented. Two findings from it are worth carrying here. On the live rail
+  `docs/decisions/0009` is **Accepted as architecture only** (owner, 2026-11-08):
+  reserve at confirm, finalize at verified settlement, release only the matching
+  claim, idempotent reconciliation, no DB transaction held open across a
+  provider call, and **separate funding and withdrawal budgets**. Accepted is
+  not implemented, and is explicitly not approval to enable a rail or to use
+  unapproved limits — `0010` (limits) and `0011` (realized loss) are still
+  Proposed, and neither carries a production number.
+  **0009's own sandbox step 2 was wrong and is marked so in the record.** It
+  said to admit at `settleSandboxTransfer()` "with `admitVelocity()` exactly as
+  the P2P paths use it", which would have made a simulated `add_money` consume
+  the payer's real **P2P outbound** budget — the same cross-domain error as the
+  release defect, in the charge direction. `docs/decisions/0013` replaces it
+  with a funding claim created inside the settlement transaction, and carries
+  the acceptance criteria and regression tests to write **before**
+  implementation. Two further findings are worth carrying here. On the live rail
   **settlement is too late to refuse**: the provider has already moved the money
   at the bank, so a control that first speaks at settlement can record but not
   say no. And because a transaction must never be held open across a provider
