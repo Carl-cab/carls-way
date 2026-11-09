@@ -206,6 +206,66 @@ Operational — and distinct from the above, which is all code verification:
     reconciliation job runs.
 12. Stranded reservations have a named owner and an alert.
 
+## Unresolved: how long a finalized funding claim consumes capacity
+
+Raised in review of PR #75 against criterion 2 above, and the criteria as
+written do not answer it.
+
+Criterion 2 moves a claim to `finalized` when the settlement webhook arrives.
+It says nothing about whether a `finalized` claim still counts against the
+funding ceiling, or when it stops counting — and settlement is **not** the end
+of exposure. A credited ACH debit can still be returned: R01 NSF typically
+within two banking days, an unauthorized consumer debit within 60 calendar
+days; a Canadian PAD personal dispute within 90 calendar days. So the
+reservation horizon and the loss horizon differ by a factor of roughly 12–18,
+and the choice of anchor decides which one the ceiling actually bounds.
+
+Neither obvious answer is safe on its own:
+
+- **Stop counting at settlement** restores the user's full funding headroom
+  while the credited funds remain returnable. This is what the claim ledger on
+  `sec/claim-bounded-velocity-release` does today — `claimedExposure()` there
+  sums only `state='reserved'`, so a finalize removes the amount from the total
+  immediately. That file is **not** in this branch's tree, so the behaviour is
+  stated as the reversal branch's, not as this commit's. It makes the ceiling
+  a bound on *unsettled* value only, which is defensible but is not what
+  "funding limit" reads as.
+- **Count finalized claims indefinitely** makes the ceiling cumulative and
+  eventually exhausts a legitimate user's capacity with no path to recovery.
+
+What a decision has to state, and this record deliberately does not invent:
+
+1. **The anchor** — which event starts the clock. The settlement webhook's
+   receipt time, the provider's own settlement date, or the confirm time.
+   These differ by days on a real rail, and only one of them is a fact the
+   provider asserts rather than a time this system happened to observe.
+2. **The horizon** — how long after that anchor a finalized claim keeps
+   consuming capacity. Per direction and per rail, because the US and Canadian
+   windows above are not the same, and because a withdrawal's reversal risk is
+   not a funding return.
+3. **Whether the horizon is the same number as the realized-loss window** in
+   the section below. If it is not, there are two clocks and both need an
+   owner.
+
+Acceptance cases either answer needs, in the manner of criteria 6–10:
+
+- A claim finalized and queried **before** the horizon expires still consumes
+  capacity; the same claim queried **after** it does not. Both boundaries
+  asserted, against a real PostgreSQL instance, with the anchor set explicitly
+  rather than taken from `now()`.
+- A claim finalized at the anchor's edge is counted on exactly one side of the
+  boundary, so the comparison's inclusivity is pinned rather than incidental.
+- Redelivery of the settlement event does not move the anchor, so a provider
+  retry cannot extend or restart the window.
+- The expiry is a property of the **query**, not a background job that mutates
+  state, so a stalled worker cannot silently restore headroom.
+
+**Not resolved here.** Both the anchor and the horizon are financial-policy
+numbers, and this program's standing constraint is not to invent them. Until
+they are set, read criterion 2 as finalizing the claim's *state* only, with its
+capacity treatment undefined — which is a gap in the proposal, not a decision
+already taken.
+
 ## In-flight exposure is not realized loss
 
 Raised in review of PR #75, and it is a real hole in the proposal above rather

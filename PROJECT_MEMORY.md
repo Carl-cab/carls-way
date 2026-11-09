@@ -3886,3 +3886,43 @@ finalized-claim window. Both are financial-behaviour calls.
 
 **Commit / PR.** PR #75 at `eddcffb` (base `docs/sprint1-owner-confirmations`
 at `24a24ec`). #76 merged to `master` as `4495f13`.
+
+---
+
+## 2026-11-09 — Decision 0009: the finalized-claim capacity window is named as unresolved
+
+**Purpose and scope.** A review finding on PR #75 observed that criterion 2 of
+decision 0009 finalizes a claim at settlement without saying whether a
+`finalized` claim still consumes funding capacity, or when it stops. The
+finding is correct and it is the same gap recorded in the previous entry as
+"Finding B". Documentation only: 0009 gains a section
+*Unresolved: how long a finalized funding claim consumes capacity*, stating the
+question, why neither obvious answer is safe, the three things a decision must
+fix (anchor, horizon, and whether that horizon equals the realized-loss
+window), and four acceptance cases including both sides of the expiry boundary.
+
+**Financial or security behaviour affected.** None. 0009 remains Accepted as
+architecture only; no rail is enabled, no limit is set, and no code changed.
+The record now says explicitly that criterion 2 finalizes the claim's *state*
+only, with its capacity treatment undefined — so the gap cannot be read as a
+decision already taken. No anchor and no horizon were invented; both are
+financial-policy numbers for the owner.
+
+**Tests run and their results.** No code changed, so the suite is unaffected;
+the measurement for this branch stands at `a937a5a` (66 files / 943 tests,
+typecheck 0, audit clean, four required checks green via
+`integration/pr75-refreshed`). This entry's own commit is documentation-only
+and was not separately measured.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The anchor and the horizon, above. The intent-route
+cross-domain gate. The accounting model on
+`sec/claim-bounded-velocity-release`, which still needs independent
+validation. `0010`, `0011` and `0013` remain Proposed and need owner numbers.
+PR #75 is still unmerged, awaiting owner authorization to merge into #74.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Owner: set the anchor and horizon, or record that
+the ceiling deliberately bounds unsettled value only.
