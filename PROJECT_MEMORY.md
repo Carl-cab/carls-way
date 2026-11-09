@@ -3989,3 +3989,79 @@ and recorded; neither is implemented. The accounting model on
 
 **Next recommended action.** Validate and merge #75 into #74 per the owner's
 Decision 1 preconditions, then report #74's final head for merge authorization.
+
+---
+
+## 2026-11-09 — PR #75 merged into PR #74's branch
+
+**Purpose and scope.** Owner-authorized integration (Decision 1, conditional).
+PR #75 — atomic velocity admission on the three P2P money paths, decision 0008
+— merged into `docs/sprint1-owner-confirmations` as merge commit **`3d6769a`**,
+from head **`33dc009`** with `expectedHeadSha` pinned. #74 is **not** merged to
+master and awaits separate owner authorization.
+
+**Preconditions verified before merging, each named because the authorization
+was conditional.**
+
+1. **Head SHA and required checks.** `33dc009`. All four required contexts
+   green via `integration/pr75-refreshed`: `install · typecheck · lint · test ·
+   build`, `secret scan`, `dependency audit`, `analyze javascript-typescript`.
+   The `CodeRabbit` context read `neutral`, which is a skipped job and not a
+   pass; recorded as such rather than counted in the green column.
+2. **The two open findings verified and recorded**, not implemented — option C
+   for the intent gate with the existing refusal deliberately retained, and
+   the 60/90-day funding-capacity window. See the preceding two entries.
+3. **No documented gap represented as implemented.** `0009` carries "NOT
+   IMPLEMENTED" in its Status line, `0010` holds live funding and withdrawals
+   at zero, and both that record and `CLAUDE.md` state that the intent-route
+   gate is still in the tree and still refusing.
+4. **Review acceptance: NOT obtained at this head, and documented as such.**
+   The `@coderabbitai review` request returned "Action not completed. Review
+   rate limited" — one included review per hour, used at 02:20Z on `eddcffb`.
+   Proceeded under the owner's documented-deferral alternative, on the verified
+   basis that **every change since the last reviewed commit is documentation**:
+   `git diff --name-only eddcffb..33dc009 | grep -v '\.md$'` returns nothing,
+   and the three changed files are `CLAUDE.md`, `PROJECT_MEMORY.md` and
+   `docs/decisions/0009`. The reviewed code is the code that merged. This is
+   recorded as an unfulfilled review requirement with a stated reason, which is
+   a different claim from a passed review, and no GitHub protection was
+   bypassed — the `master` ruleset's four contexts are untouched by a merge
+   into a feature branch.
+5. **Atomic velocity tests confirmed passing.** The five files run explicitly
+   at `33dc009`: 36/36 — `velocity-admission`, `velocity-admission-callers`,
+   `money-path-velocity-status`, `split-pay-velocity`,
+   `split-pay-route-status`.
+6. **No unintended changes.** 18 files against #74's branch, all within the
+   change set. `app/api/transfers/intent/route.ts`'s diff is **comment-only** —
+   verified by reading it, because that file is the one the owner's Decision 2
+   forbids changing yet. No provider, factory, migrate-route, workflow or
+   env-gating file touched.
+
+**Financial or security behaviour affected.** On `docs/sprint1-owner-
+confirmations` only, not on master: the three P2P balance-moving paths now
+admit velocity inside their money transaction, and a refusal answers 429. The
+old `checkVelocityLimit()` → move money → `recordVelocity()` sequence is gone
+from every money path — verified by grep, where the only remaining mentions are
+comments, the function definition, and the operator error message in the
+migrate route that the static guard allowlists.
+
+**Tests run and their results.** Combined branch at `3d6769a`: **66 files / 943
+tests pass** on a database created fresh with the CI fixture applied; typecheck
+0 errors; lint 0 errors / 28 warnings; `pnpm audit --prod` no known
+vulnerabilities. CI evidence pushed to `integration/pr74-combined` at the same
+SHA.
+
+**Migration impact.** None. `lib/__tests__/helpers/test-schema.sql` gains
+fixture user 9121 only.
+
+**Unresolved findings.** Review acceptance at `33dc009` (above). FINTRAC /
+FinCEN applicability. The claim-bounded release on
+`sec/claim-bounded-velocity-release` still needs independent validation.
+`0009`, `0010`, `0011` and `0013` are all decided and all unimplemented.
+
+**Rollback requirement.** Reverting `3d6769a` restores the TOCTOU on three
+money paths. If it must be reverted, `0008` must be amended in the same change
+rather than left asserting a control that is not there.
+
+**Next recommended action.** Owner: authorize `#74 → master`. Final head
+**`3d6769a`**.
