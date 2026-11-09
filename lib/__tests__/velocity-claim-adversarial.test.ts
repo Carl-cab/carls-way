@@ -129,17 +129,32 @@ describe('ATTACK 4 — the abuse shape the owner named, end to end', () => {
 });
 
 describe('ATTACK 5 — a finalized claim cannot be released for value', () => {
-  it('finalize then release does not reduce exposure twice', async () => {
+  it('finalize drops the claim from the reserved set, and release is then idempotent', async () => {
     await createVelocityClaim({ userId: U, provider: VELOCITY_CLAIM_PROVIDER, reference: 'atk5', claimKind: 'funding', amount: cad('100.00'), currency: 'CAD' });
+    // This case asserted `>= 0` on both values until review of PR #77 pointed
+    // out that it could not fail: claimedExposure() SUMs positive amounts, so
+    // non-negativity holds under every implementation including a broken one,
+    // and the interesting numbers went to a console.log that nothing checked.
+    // In a file whose whole purpose is assertions that CAN fail, that was the
+    // exact defect this suite exists to catch. Now it pins the values.
     const beforeFinalize = await fundingExposure(U, 'CAD');
     expect(beforeFinalize).toBe(cad('100.00'));
+
     await finalizeVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'atk5');
     const afterFinalize = await fundingExposure(U, 'CAD');
-    await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'atk5');
+    // CURRENT policy: finalize removes the claim from the reserved set, so a
+    // settled-but-still-returnable deposit stops counting immediately. That is
+    // the finalized-claim capacity window gap decided in 0009 (60 days US ACH
+    // / 90 days CA PAD) and NOT implemented. When it is, this line must fail
+    // and be changed deliberately — which is the point of pinning it.
+    expect(afterFinalize).toBe(0);
+
+    const first = await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'atk5');
+    const second = await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'atk5');
+    expect(first.released).toBe(true);
+    expect(second).toMatchObject({ released: false, reason: 'already_released' });
+
     const afterRelease = await fundingExposure(U, 'CAD');
-    // whatever the policy, exposure must never go below zero
-    expect(afterFinalize).toBeGreaterThanOrEqual(0);
-    expect(afterRelease).toBeGreaterThanOrEqual(0);
-    console.log(`  [observed] reserved=${beforeFinalize} finalized=${afterFinalize} released=${afterRelease}`);
+    expect(afterRelease).toBe(0);
   });
 });
