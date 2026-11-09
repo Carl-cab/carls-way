@@ -279,13 +279,18 @@ reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 **Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **66 files /
 943 tests** — measured on a database created fresh for the run with the CI
 fixture applied; all 943 pass. The baseline on `master` at `403acf1` is
-**61 / 907**, and the difference belongs to two unmerged branches, not to that
-commit: PR #74 adds `split-pay-velocity.test.ts` (9) and
+**61 / 907**, and the difference belongs to this branch, which is **not yet
+merged to `master`**: `split-pay-velocity.test.ts` (9) and
 `split-pay-route-status.test.ts` (6) when `money:split-pay` was brought under
-the velocity control; PR #75, stacked on it, adds
-`velocity-admission.test.ts` (12), `velocity-admission-callers.test.ts` (3)
-and `money-path-velocity-status.test.ts` (7), and rewrites the first of #74's
-two. Several of all of these exist for defects the first implementations
+the velocity control, plus `velocity-admission.test.ts` (12),
+`velocity-admission-callers.test.ts` (3) and
+`money-path-velocity-status.test.ts` (7) from **PR #75, merged into this
+branch as `3d6769a`**, which also rewrote the first of the other two.
+A further **67 / 965** is measured on `sec/claim-bounded-velocity-release`
+(PR #77, stacked on this branch and *not* validated yet), which adds
+`velocity-claim-release.test.ts` (26) and three domain guards while deleting
+the eight-case `reverseVelocity` block — so do not read 965 as this branch's
+number. Several of all of these exist for defects the first implementations
 shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
