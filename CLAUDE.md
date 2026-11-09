@@ -280,21 +280,21 @@ reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 
 **Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **67 files /
 965 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 965 pass. The baseline on `master` at `403acf1` is
-**61 / 907**, and the difference belongs to this branch and its base, neither
-of which is on `master`. PR #74's branch (`docs/sprint1-owner-confirmations`,
-head `694550b`, **66 / 943**) carries `split-pay-velocity.test.ts` (9) and
-`split-pay-route-status.test.ts` (6), plus `velocity-admission.test.ts` (12),
-`velocity-admission-callers.test.ts` (3) and
-`money-path-velocity-status.test.ts` (7) from **PR #75, merged into it as
-`3d6769a`** — #75 is closed, not pending. This branch
-(`sec/claim-bounded-velocity-release`, **PR #77**, stacked on #74's branch and
-**not yet validated**) adds the remaining **22**, and the composition is worth
-writing out because it is not a single number: `velocity-claim-release.test.ts`
-(**+26**), three domain guards in `velocity-admission-callers.test.ts` (**+3**),
-one assertion split into two in `settlement-b3.3.test.ts` (**+1**), and the
-eight-case `reverseVelocity` block deleted from `velocity.test.ts` (**−8**).
-26 + 3 + 1 − 8 = 22, and 943 + 22 = 965. Several of all of these exist for defects the first implementations
+fixture applied; all 965 pass. That is the number **on `master`** once this
+change lands: master ran **66 / 943** at `10f96507`, and this change adds
+**22**. The composition is worth writing out because it is not a single
+number: `velocity-claim-release.test.ts` (**+26**), three domain guards in
+`velocity-admission-callers.test.ts` (**+3**), one assertion split into two in
+`settlement-b3.3.test.ts` (**+1**), and the eight-case `reverseVelocity` block
+deleted from `velocity.test.ts` (**−8**). 26 + 3 + 1 − 8 = 22, and
+943 + 22 = 965.
+The earlier baseline was **61 / 907** on `master` at `403acf1`; the 943 came
+from PR #74 (`split-pay-velocity.test.ts` 9 and
+`split-pay-route-status.test.ts` 6) together with PR #75, merged into #74's
+branch as `3d6769a` (`velocity-admission.test.ts` 12,
+`velocity-admission-callers.test.ts` 3,
+`money-path-velocity-status.test.ts` 7), the pair reaching master as
+`d78918a`. Several of all of these exist for defects the first implementations
 shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
