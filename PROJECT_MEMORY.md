@@ -4392,3 +4392,106 @@ owner is interim. `0012`'s model still needs independent validation before
 
 **Next recommended action.** Independent validation of `0012`, then implement
 `0013` in a focused PR against the approved numbers.
+
+---
+
+## 2026-11-09 — Independent review of PR #77 found two real defects in decision 0013
+
+**Purpose and scope.** The owner required independent validation of the
+claim-bounded release accounting model before `sec/claim-bounded-velocity-release`
+merges. PR #77 was opened to give that a review surface; a manually triggered
+external review ran on `eee2656` and returned **11 actionable findings, 4
+Major**. All 11 are addressed in `4f696fc`. Documentation and comments only —
+no behaviour changed.
+
+**The two findings that mattered, both in `0013`'s specified mechanism rather
+than in the release implementation.**
+
+1. **The cumulative sandbox cap was pointed at a rolling-window function.**
+   `claimedExposure()` sums `reserved` claims whose recorded window start is at
+   or after the *current* window boundary. The owner's approved cap is
+   **cumulative per test cycle**, resettable only by an authorized audited
+   operation. Wiring one to the other hands every user fresh capacity at each
+   calendar boundary — the exact opposite of the approved property, and the
+   record asserted both things four paragraphs apart. `0013` now specifies a
+   per-user/per-currency/per-cycle consumption total that a release does **not**
+   decrement, and the limitation is documented at `claimedExposure()` itself so
+   the mistake is visible where someone would make it. The unwindowed measure
+   was deliberately **not** added as an unused export.
+
+2. **Write-then-verify cannot serialize two concurrent confirmations of
+   *distinct* intents.** This is the one worth carrying forward. That ordering
+   closes the TOCTOU in `admitVelocity()` only because the rows it writes are
+   **shared** — one per `(user, window_type, window_start, currency)` — so a
+   second admission by the same payer upserts the *same* row, blocks on the
+   first transaction's lock, and only then reads a total that includes it.
+   **The lock is what makes the verify meaningful.** `velocity_claims` rows are
+   per-intent (`ON CONFLICT (provider, reference)`), so two concurrent
+   confirmations insert *different* rows, contend on nothing, and at
+   `READ COMMITTED` each verifies against a snapshot that cannot see the other:
+   two CA$60 confirmations both pass a CA$100 check. Verified against the
+   source — there is no `FOR UPDATE` and no advisory lock anywhere in the
+   claim-creation path. **This is the same CWE-367 defect decision 0008
+   exists to close**, reproduced on the funding path by copying a mechanism
+   without its precondition. `0013` now requires a shared per-user/currency
+   lock held through commit, preferring `SELECT ... FOR UPDATE` on the
+   per-cycle counter row so the lock and the counter are one object, plus a
+   concurrent-distinct-intents test asserted as a **lock** observation rather
+   than a scheduling race.
+
+**The lesson, stated plainly because it is now the third instance.** A control
+carried from one path to another loses the property that made it work unless
+that property is carried too: velocity enforcement in routes missed
+`paySplitPortion()`; the release's amount bound was carried without its domain
+bound; and write-then-verify has now been carried without its shared-row lock.
+In each case the mechanism was copied and its precondition was not.
+
+**The other nine findings.** `0010` attributed the 55–85 day post-settlement
+return exposure to `0011`'s realized-loss counter, which stays at zero until a
+return produces an unrecovered shortfall and so carries none of it — three
+quantities are now named separately, with the gap covered by the
+finalized-claim capacity window. `0012`'s guarantee table still promised
+compensating-row behaviour, the model it rejects. Comments in `lib/auth.ts`,
+`lib/velocity-claims.ts`, `lib/db.ts`, the CI fixture and two tests still
+described `velocity_checks` writes that no longer happen, and one named a test
+file that does not exist — these matter more than usual, because the PR asks a
+reviewer to validate the accounting model and the comments described the
+rejected one. `CLAUDE.md` stated the release contract as "signals refusal by
+throwing"; it **returns** `{ released: false }` for `no_claim` and
+`already_released`, and only a genuine fault throws. Statuses corrected:
+`0013` Proposed → Approved, and `0009`'s pointer to `0011` as still needing
+thresholds.
+
+**`readiness.json`, and why rendering the report is a rule.** Editing the
+fields caught none of what actually misled. Rendering it caught **six
+neighbouring rows** asserting what this change made false: an owner action
+still requesting three answered decisions, the merged dependency fix still
+listed as a pending decision, a row claiming no external review was obtainable
+(one ran, and found these defects), `#75` described as unmerged, a stale
+evidence commit, and the deleted `reverseVelocity()` still credited with
+releasing headroom. One of those rows now also records an error of mine from
+earlier in this program, rather than quietly dropping it.
+
+**Financial or security behaviour affected.** None. No code path changed; the
+corrections are to records and to comments. The two `0013` defects were in a
+specification that is **not implemented**, so they were caught before anything
+was built on them — which is the point of specifying acceptance criteria before
+implementation.
+
+**Tests run and their results.** At `4f696fc`: **67 files / 965 tests pass** on
+a database created fresh with the CI fixture applied; typecheck 0 errors; lint
+0 errors / 29 warnings.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The accounting model itself still has no independent
+validation verdict — the review found no defect *in the release
+implementation*, which is not the same as validating it. FINTRAC/FinCEN
+applicability. The interim escalation owner. `0013` cannot be built until the
+model is validated.
+
+**Rollback requirement.** None; documentation and comments only.
+
+**Next recommended action.** A reviewer's verdict on the accounting model
+itself, against the five checks named in `0010`'s owner-action row. `0013`'s
+implementation waits on it.
