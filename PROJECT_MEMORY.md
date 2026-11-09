@@ -3999,3 +3999,57 @@ by hand or by the audit job; (c) paid CodeRabbit capacity and a retry.
 
 **Commit / PR.** PR #76 at `ca2c4fd`, open against `master`, unmerged. Branch
 `sec/claim-bounded-velocity-release` at `495c8c0`.
+
+---
+
+## 2026-11-09 — Reversal branch refreshed from patched master and measured
+
+**Purpose and scope.** `sec/claim-bounded-velocity-release` was stacked on a
+pre-`4495f13` base, so `pnpm audit --prod` on it reported **1 high** —
+`follow-redirects: Cross-realm sensitiveHeaders arrays`, reached by
+`.>plaid>axios>follow-redirects`, which is exactly the advisory PR #76 closed.
+Merged `origin/master` in (`26f98c7`), reinstalled from the merged lockfile,
+and re-measured. Also removed one lint warning in
+`lib/settlement/SettlementExecutor.ts`: the velocity-reversal block bound
+`parsePositiveMoney()`'s result to `amountMinor` and then deliberately never
+used it, because the release amount comes from the claim row. The call is kept
+as a validation guard and the binding dropped, so the shape no longer invites a
+later edit to pass the intent's amount; the adjacent comment was reworded to
+match.
+
+**Financial or security behaviour affected.** None by the merge — it changes
+`package.json` and `pnpm-lock.yaml` only. The `SettlementExecutor` change is
+behaviour-preserving: the same corrupt-amount guard runs and still returns
+`INVALID_AMOUNT`, and `releaseVelocityClaim()` is called with the same three
+arguments.
+
+**Tests run and their results.** Measured on a database created fresh for the
+run with `lib/__tests__/helpers/test-schema.sql` applied, per the CI
+"Prepare test schema" step.
+
+- Before the master merge, at `5d9bcea`: **67 files / 965 tests pass**,
+  typecheck 0 errors, `pnpm audit --prod` **1 high** (above).
+- After the merge and the lint fix: **67 files / 965 tests pass**, typecheck 0
+  errors, lint 0 errors / 29 warnings (down from 30), `pnpm audit --prod`
+  reports no known vulnerabilities.
+
+**Mutation check re-run on the central invariant.** Replacing
+`AND claim_kind = ${claimKind}` in `claimedExposure()` with
+`AND claim_kind IS NOT NULL` — the defect the owner's review identified, in
+which one domain's release credits another's capacity — fails **2 files / 2
+tests**. The file was restored and `git diff` confirmed clean afterwards.
+
+**Migration impact.** None beyond the `velocity_claims` table already carried
+by this branch in all four schema sources.
+
+**Unresolved findings.** The accounting model on this branch still requires the
+**independent validation** the owner made a precondition; the measurement above
+is evidence for a reviewer, not a substitute for one. The branch is not merged.
+
+**Rollback requirement.** Revert `26f98c7` and the lint commit; neither touches
+schema or financial behaviour.
+
+**Next recommended action.** Independent review of the corrected accounting
+model. Owner decisions outstanding: merging #75 into #74, the intent-route
+cross-domain gate, the finalized-claim capacity window, and the numbers for
+`0010`, `0011` and `0013`.

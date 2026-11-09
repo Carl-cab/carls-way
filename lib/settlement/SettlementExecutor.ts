@@ -664,9 +664,13 @@ export class SettlementExecutor {
         currency: string;
       };
 
-      let amountMinor: number;
+      // Validation only. The parsed value is deliberately not bound: the
+      // release amount comes from the claim row, never from the intent (see
+      // the note below). Keeping the call rejects a corrupt intent amount
+      // before a release is attempted; keeping the binding would invite a
+      // later edit to pass it.
       try {
-        amountMinor = parsePositiveMoney(intent.amount, intent.currency);
+        parsePositiveMoney(intent.amount, intent.currency);
       } catch {
         return {
           success: false,
@@ -684,9 +688,10 @@ export class SettlementExecutor {
       // only return the claim's own recorded amount, to the claim's own
       // windows, once. Decision 0012.
       //
-      // `amountMinor` above is deliberately NOT passed as the release amount:
-      // the amount comes from the claim row. Passing the intent's amount would
-      // reintroduce an unbounded release if the two ever disagreed.
+      // The intent's amount, validated above, is deliberately NOT passed as
+      // the release amount: the amount comes from the claim row. Passing the
+      // intent's amount would reintroduce an unbounded release if the two ever
+      // disagreed.
       const outcome = await releaseVelocityClaim(
         VELOCITY_CLAIM_PROVIDER,
         String(intent.id),
