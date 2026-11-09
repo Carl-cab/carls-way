@@ -4495,3 +4495,56 @@ model is validated.
 **Next recommended action.** A reviewer's verdict on the accounting model
 itself, against the five checks named in `0010`'s owner-action row. `0013`'s
 implementation waits on it.
+
+---
+
+## 2026-11-09 — The two findings GitHub could not post inline
+
+**Purpose and scope.** The #77 review's summary comment carried a
+`⚠️ Outside diff range comments (2)` block — two findings GitHub could not
+attach inline because they fall outside the diff. They were **not** in the 11
+inline comments I worked from, and I only found them by reading the review
+body rather than the comment list. Worth recording as a process note: the
+inline-comment count is not the finding count.
+
+**Finding A (Major) — `readiness.json` owner action still naming the deleted
+function.** An owner action instructed the owner to "bound `reverseVelocity()`'s
+release by the claim", with an explanation saying `SettlementExecutor` calls it.
+The function is deleted. The report renders that as a **current** action, so an
+owner reading the table would be told to fix something that no longer exists
+while the real outstanding item — independent validation of its replacement —
+sat in the neighbouring row. **Already corrected** in `4f696fc`, before this
+finding was read, as part of the rendered-report pass.
+
+**Finding B (Minor) — `CURRENT_STATUS.md` presenting it as working
+infrastructure.** Two lines in the "What's Working" sections described
+`reverseVelocity()` as implemented in `lib/auth.ts`, creating compensating
+negative velocity records — directly contradicting the warning 22 lines above
+saying it was deleted as a critical financial-control defect. A reader of the
+working-infrastructure list got the opposite answer about the returned-transfer
+path from a reader of the warnings list, in the same file. **Corrected here**,
+with both lines replaced by the deletion and the unmerged, unvalidated status of
+the replacement, and the contradiction itself named so the correction is not
+mistaken for the original text.
+
+**Also corrected in the same pass:** `lib/auth.ts` described
+`releaseVelocityClaim()` as `recordVelocity()`'s "counterpart", which implies a
+credit to `velocity_checks` that does not exist — the second half of inline
+finding 8, which I had missed while fixing the first half. And
+`CURRENT_STATUS.md` still called `0009` "Proposed, awaiting approval" after the
+owner accepted it.
+
+**Financial or security behaviour affected.** None. Records and comments only.
+
+**Tests run and their results.** 67 files / 965 tests pass; typecheck 0 errors;
+lint 0 errors / 29 warnings; the readiness report renders.
+
+**Migration impact.** None.
+
+**Unresolved findings.** Unchanged: the accounting model has no independent
+validation verdict; FINTRAC/FinCEN applicability; the interim escalation owner.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Unchanged — a reviewer's verdict on the accounting
+model itself.

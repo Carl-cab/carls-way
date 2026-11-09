@@ -426,8 +426,10 @@ async function admitVelocityWithin(
  *
  * **Not for a money path.** Writing without verifying is half of the race
  * `admitVelocity()` exists to close; pairing this with
- * `checkVelocityLimit()` reproduces it exactly. It remains exported because
- * `releaseVelocityClaim()` is its counterpart and the pair is covered by
+ * `checkVelocityLimit()` reproduces it exactly. It has **no counterpart that
+ * credits `velocity_checks`** — `releaseVelocityClaim()` is a different
+ * accounting domain in `lib/velocity-claims.ts` and writes nothing here. It
+ * remains exported because it is covered by
  * `velocity.test.ts`, and because a future non-money accounting caller may
  * legitimately want to record volume it has already authorized by other
  * means. `lib/__tests__/velocity-admission-callers.test.ts` fails if a money

@@ -169,8 +169,9 @@ misleading of the two failure modes.
     platform balance with no durable volume control; no confirm, execute or
     settlement path has ever written `velocity_checks`. An earlier line here
     read "sandbox intents do NOT consume real velocity budget" as though that
-    were the intended design — it is a gap, and `docs/decisions/0009` (Proposed,
-    awaiting approval) sets out the architecture
+    were the intended design — it is a gap, and `docs/decisions/0009`
+    (**Accepted as architecture only**, owner 2026-11-08, with its parameters set
+    2026-11-09; **not implemented**) sets out the architecture
   - ⚠️ **`reverseVelocity()` deleted; replacement unmerged and awaiting
     independent validation.** It released budget bounded only by the user's
     window total across all paths, so it freed budget other money paths
@@ -193,7 +194,7 @@ misleading of the two failure modes.
 - **Phase A2 Infrastructure**: Webhook event deduplication and velocity reversal (not yet wired to live providers)
   - `provider_webhook_events` table: id, provider, provider_event_id, event_type, related_provider_reference, raw_payload JSONB, processing_status, processing_error, processed_at, created_at
   - `lib/provider-events.ts`: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`, `getProviderEvent()`
-  - `reverseVelocity()` in `lib/auth.ts`: creates compensating negative velocity records (immutable audit trail), calls `auditLog()`, non-blocking
+  - ⚠️ **`reverseVelocity()` is DELETED** — see the warning above. It used to live in `lib/auth.ts` and wrote compensating negative velocity records, which is the accounting model that was rejected: the release freed budget other money paths had genuinely spent. Its replacement, `releaseVelocityClaim()` in `lib/velocity-claims.ts`, is a claim-state transition plus one transaction-bound audit row and writes to `velocity_checks` not at all. It is on `sec/claim-bounded-velocity-release` (PR #77), **unmerged and awaiting independent validation**, so the returned-transfer path has no release on `master` today
   - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection — creates opening_balance ledger entries for users with seed balances
   - All functions marked "Future Use Only" — infrastructure ready for live provider integration
 - ✅ **Phase A3 Provider Execution Framework**: Complete provider abstraction and factory pattern
@@ -367,7 +368,7 @@ analysis in `docs/decisions/0005-migration-privilege-separation.md`.
 - ✅ **Phase A2 Infrastructure** (webhook events + velocity reversal)
   - `provider_webhook_events` table defined in `lib/db.ts` and migration route
   - `lib/provider-events.ts` helpers: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`
-  - `reverseVelocity()` implemented in `lib/auth.ts` — creates compensating negative velocity records, non-blocking, audit logged
+  - ⚠️ `reverseVelocity()` **no longer exists** — deleted as a critical financial-control defect; its claim-bounded replacement is unmerged (PR #77). This line described it as implemented infrastructure, which was the opposite of the status recorded earlier in this file
   - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection
   - Webhook event deduplication ready for use by live providers
   - All SQL uses postgres.js tagged templates
