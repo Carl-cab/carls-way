@@ -4053,3 +4053,72 @@ schema or financial behaviour.
 model. Owner decisions outstanding: merging #75 into #74, the intent-route
 cross-domain gate, the finalized-claim capacity window, and the numbers for
 `0010`, `0011` and `0013`.
+
+---
+
+## 2026-11-09 — Owner numbers recorded for 0010, 0011 and 0013
+
+**Purpose and scope.** The owner supplied the parameters all three records
+deliberately left blank. Updated on `sec/claim-bounded-velocity-release`:
+`docs/decisions/0010`, `0011`, `0013` and `CLAUDE.md`. Documentation only; no
+code changed and nothing here is implemented.
+
+**0010 — funding and withdrawal limits: DECIDED, and the decision is zero.**
+Live funding DISABLED, effective permitted throughput zero. Live withdrawals
+DISABLED, zero. No positive live limit approved. §3's table is explicitly
+re-labelled as the provider-imposed outer bound, not approved ceilings, with
+four rules carried: provider testing limits are **not** commercial approval;
+future limits are **configuration**, not constants; funding and withdrawal
+counters stay independent; nothing here activates a rail. The
+FINTRAC/FinCEN applicability question is recorded as **still open** and
+required before any positive limit — setting the ceiling to zero removes
+today's exposure without answering it.
+
+**0011 — realized loss: DECIDED, zero-tolerance.** Any positive unrecovered
+account loss suspends that account's funding and opens a manual risk review.
+Two returned funding transactions inside the applicable risk window suspend
+funding **even where immediate realized loss is zero**. Any positive aggregate
+unrecovered loss halts platform funding pending authorized investigation. Per
+currency, no hidden conversions. **No automatic collections and no automatic
+write-offs**, so §4 step 4 is "none" for the pilot and step 6 stays manual and
+audited. Escalation owner: the project owner acting as **interim** Risk
+Operations Lead until a role is formally assigned. Controls must be
+configurable, auditable and exercised by **simulated** tests.
+The record now states plainly what the shape implies: with zero-tolerance
+triggers, the first unrecovered dollar is a stopping event, so the pilot's
+expected failure mode is a halt rather than a loss. That is a deliberate
+availability-for-exposure trade and should be re-derived, not relaxed by habit,
+once a base rate exists. The superseded tier table is kept, because its two
+findings are why the owner's rules take this shape.
+
+**0013 — sandbox funding: APPROVED with numbers.** CA$100 and US$100
+**cumulative** funding capacity per user per sandbox test cycle — cumulative,
+not a rolling window, so capacity does not return on its own. Sandbox cash-out
+disabled. A test cycle may be reset only by an authorized, audited
+administrative operation; no public or customer-controlled reset, and no reset
+as a side effect of another action. The record now calls the reset out as the
+one operation in the mechanism that **creates** capacity, and therefore the one
+most worth pinning. Claims stay independent of `velocity_checks`; claim,
+balance and ledger commit atomically; duplicate confirmation creates neither a
+duplicate claim nor a duplicate movement; the sandbox mechanism stays
+explicitly separate from the live-rail architecture.
+
+**Financial or security behaviour affected.** None today. All three records
+remain unimplemented, and `0013` remains **blocked on** independent validation
+of `0012`'s accounting model — the owner's approval of the sandbox mechanism
+does not lift that block.
+
+**Tests run and their results.** No code changed by this entry. The branch's
+last measurement stands at `b8d406f`: 67 files / 965 tests pass, typecheck 0,
+audit clean, four required checks green via `integration/reversal-refreshed`.
+
+**Migration impact.** None.
+
+**Unresolved findings.** FINTRAC/FinCEN applicability. The interim escalation
+owner is interim. `0012`'s model still needs independent validation before
+`0013` can be built on it.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Independent validation of `0012`, then implement
+`0013` in a focused PR against the approved numbers.

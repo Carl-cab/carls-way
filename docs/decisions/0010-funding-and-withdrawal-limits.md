@@ -1,7 +1,7 @@
 # 0010 — Funding and withdrawal exposure limits
 
-- **Status:** **Proposed — awaiting owner approval. Not implemented. No limit is enforced anywhere in the tree.**
-- **Date:** 2026-11-08
+- **Status:** **DECIDED 2026-11-09 — live funding and live withdrawals are DISABLED, effective permitted throughput ZERO. Not implemented; no limit is enforced anywhere in the tree, because no positive limit is approved to enforce.**
+- **Date:** 2026-11-08, decided 2026-11-09
 - **Required by:** `0009-transfer-rail-velocity-admission.md` (Accepted), which specifies separate funding and withdrawal budgets and deliberately proposes no numbers.
 
 The owner's instruction was explicit: limits "must be proposed separately based on provider restrictions, fraud exposure, available safeguards, applicable compliance requirements, and operational recovery capability. Do not invent final production amounts."
@@ -94,9 +94,57 @@ The $100/$500/$1,000 figures stop being the binding constraint once Plaid raises
 
 It sets no final production amount. It does not approve enabling either rail. It does not assert any compliance obligation. The only numbers it states as binding are Plaid's own, quoted from Plaid.
 
-## Decisions required from the owner
+## 5. Owner decision, 2026-11-09
 
-1. Approve the funding ceilings as **"at or below Plaid's current testing ceiling, strictly below whatever the provider permits"**, or supply different figures.
-2. Confirm withdrawal stays at zero until cash-out has its own architecture and record.
-3. Answer, or route to compliance, the question in §3.4 — whether FINTRAC EFT reporting and FinCEN MSB recordkeeping apply to Manna, and at what thresholds.
-4. Confirm that limits are re-derived, not scaled, after Plaid's checklist approval.
+**Live funding: DISABLED. Effective permitted throughput zero.**
+**Live withdrawals: DISABLED. Effective permitted throughput zero.**
+
+No positive live limit is approved at this stage. §3's table is therefore
+**not** a set of approved ceilings; it is the provider-imposed outer bound that
+any future proposal must sit strictly inside. Read every figure there as "the
+most a provider would currently permit", never as "the amount Manna may move".
+
+Four rules carried with the decision:
+
+1. **Provider testing limits are not commercial approval.** Plaid's
+   unapproved-checklist ceiling of $100/$500/$1,000 is what the rail will
+   accept from an unapproved integration. It says nothing about whether Manna
+   is approved to operate, and it must not be cited as though it did. The same
+   applies to any Stripe sandbox figure.
+2. **Prepare limits as configuration, not constants.** The future controlled
+   pilot needs funding limits that are set and changed through an authorized,
+   audited mechanism — so that the approved value is a deployment decision with
+   a record, not a number compiled into a release. Zero is the current value,
+   not the absence of a mechanism.
+3. **Funding and withdrawal counters stay independent.** Not two readings of
+   one counter, and not one counter with a sign convention. This is the same
+   rule the release defect broke twice: a domain's exposure must be derivable
+   without reference to another domain's volume.
+4. **No live rail is activated by this decision**, and nothing in this record
+   authorizes inferring otherwise.
+
+### Still outstanding, and not resolved by the above
+
+The compliance question in §3.4 — whether FINTRAC's international
+electronic-funds-transfer reporting obligation and FinCEN's MSB funds-transfer
+recordkeeping rules apply to Manna, and at what thresholds — **remains open and
+is not answered here.** It is deliberately unaffected by setting the ceilings
+to zero: a zero ceiling removes the exposure for now, but the question must be
+answered before any positive limit is approved, because a limit above a
+reporting threshold creates an obligation rather than merely a risk.
+
+Likewise §3's requirement that limits be **re-derived rather than scaled** after
+provider approval stands, and the five inputs it names — three of which are not
+in this repository — are still the inputs.
+
+## Decisions required from the owner — status
+
+1. ~~Approve the funding ceilings, or supply different figures.~~
+   **Answered: zero.** No positive live limit approved; prepare configurable
+   limits for a future controlled pilot.
+2. ~~Confirm withdrawal stays at zero.~~ **Confirmed.** Withdrawals remain
+   disabled until separately implemented and authorized, with their own record.
+3. **Still open** — the FINTRAC / FinCEN applicability question in §3.4. Needs
+   a compliance answer or a routing decision before any positive limit.
+4. ~~Confirm limits are re-derived, not scaled.~~ **Confirmed** by the decision
+   that provider testing limits do not constitute commercial approval.

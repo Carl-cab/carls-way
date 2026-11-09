@@ -612,9 +612,31 @@ arbitrary end user.
   reserve at confirm, finalize at verified settlement, release only the matching
   claim, idempotent reconciliation, no DB transaction held open across a
   provider call, and **separate funding and withdrawal budgets**. Accepted is
-  not implemented, and is explicitly not approval to enable a rail or to use
-  unapproved limits — `0010` (limits) and `0011` (realized loss) are still
-  Proposed, and neither carries a production number.
+  not implemented, and is explicitly not approval to enable a rail. Its
+  parameters were set on 2026-11-09: the finalized-claim capacity window is
+  **60 calendar days** for US ACH consumer funding anchored to
+  provider-confirmed settlement time, **90 calendar days** for Canadian
+  personal-account PAD anchored to the provider-confirmed debit date, with the
+  verified settlement date as a recorded conservative fallback. Expiry is
+  **timestamp-driven**, evaluated in the capacity query, never by a cleanup
+  job. Those are funding-capacity windows, **not liability horizons** — longer
+  statutory, network, warranty and contractual exposures stay identifiable and
+  need provider and legal review.
+  **`0010` and `0011` are now Decided, and both decide against activity.**
+  `0010`: live funding and live withdrawals are **DISABLED, effective
+  permitted throughput zero**; no positive live limit is approved; provider
+  testing ceilings are **not** commercial approval; funding and withdrawal
+  counters stay independent; future limits are configuration, not constants.
+  Its FINTRAC/FinCEN applicability question stays **open** and must be
+  answered before any positive limit. `0011`: provisional pilot rules are
+  **zero-tolerance** — any positive unrecovered account loss suspends that
+  account's funding, **two returns inside the risk window suspend it even at
+  zero realized loss**, and any positive aggregate unrecovered loss halts
+  platform funding; per currency with no conversions; **no automatic
+  collections or write-offs**; escalation owner is the project owner acting as
+  **interim** Risk Operations Lead. Decided is still not implemented, and
+  neither may be activated on a live rail without separate launch
+  authorization and policy review.
   **0009's own sandbox step 2 was wrong and is marked so in the record.** It
   said to admit at `settleSandboxTransfer()` "with `admitVelocity()` exactly as
   the P2P paths use it", which would have made a simulated `add_money` consume
@@ -622,7 +644,17 @@ arbitrary end user.
   release defect, in the charge direction. `docs/decisions/0013` replaces it
   with a funding claim created inside the settlement transaction, and carries
   the acceptance criteria and regression tests to write **before**
-  implementation. Two further findings are worth carrying here. On the live rail
+  implementation. **`0013` is approved (owner, 2026-11-09) and not yet
+  implemented**: **CA$100 / US$100 cumulative funding capacity per user per
+  sandbox test cycle** — cumulative, *not* a rolling window, so capacity does
+  not return on its own — with **sandbox cash-out disabled**, a test-cycle
+  reset available only as an **authorized, audited administrative operation**
+  (no public or customer-controlled reset), claims independent of
+  `velocity_checks`, claim/balance/ledger committed atomically, duplicate
+  confirmation creating neither a duplicate claim nor a duplicate movement,
+  and the sandbox mechanism kept **explicitly separate** from the live-rail
+  architecture. It remains blocked on `0012`'s model being independently
+  validated. Two further findings are worth carrying here. On the live rail
   **settlement is too late to refuse**: the provider has already moved the money
   at the bank, so a control that first speaks at settlement can record but not
   say no. And because a transaction must never be held open across a provider

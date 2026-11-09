@@ -35,7 +35,30 @@ Exposure per domain is **derived** by `claimedExposure(userId, claimKind, curren
 
 Deliberately **not** the figures in `0010`. Those are derived from Plaid's and Stripe's ceilings and belong to a rail that moves real money; a sandbox balance is simulated, so a provider ceiling is not the binding constraint.
 
-Proposed instead: **the sandbox funding ceiling is a constant in the code, set low, and distinct from every P2P limit.** A simplified limit is explicitly acceptable here — the control's purpose in the sandbox is to prove the *mechanism* (domains stay separate, refusal rolls back, duplicates do not double-count), not to price risk. One number per currency, owner-set, with no tiering.
+**Set by the owner, 2026-11-09:**
+
+| Currency | Cumulative sandbox funding capacity, per user per test cycle |
+|---|---|
+| CAD | **CA$100** |
+| USD | **US$100** |
+
+**Sandbox cash-out: disabled.**
+
+Note the shape: **cumulative per test cycle**, not a rolling window. It is not
+a velocity limit with a different number in it — there is no hourly, daily or
+weekly boundary, and capacity does not come back on its own. A user who funds
+CA$100 in a sandbox cycle has no funding capacity left until the cycle is reset.
+
+**A test cycle may be reset only by an authorized, audited administrative
+operation.** No public route, no customer-controlled reset, and no reset as a
+side effect of any other action. That makes the reset itself a privileged
+operation needing its own permission check and audit row — it is the one thing
+in this mechanism that creates capacity, so it is the one thing most worth
+pinning.
+
+The control's purpose in the sandbox is to prove the *mechanism* — domains stay
+separate, refusal rolls back, duplicates do not double-count — not to price
+risk. One number per currency, no tiering.
 
 What must **not** happen is the sandbox ceiling being read from `VELOCITY_LIMITS`. Sharing the constant would make a later change to P2P limits silently change funding behaviour, which is the same coupling as sharing the counter, one level up.
 
@@ -99,9 +122,33 @@ A new `lib/__tests__/sandbox-funding-admission.test.ts` against real PostgreSQL 
 - Remove the unique index reliance (check-then-insert). The duplicate and concurrent cases must fail.
 - Move the admission after the balance update. Criterion 7 must fail.
 
-## Decisions required from the owner
+## Decisions required from the owner — all answered 2026-11-09
 
-1. Approve this corrected approach, replacing 0009 step 2.
-2. Set the sandbox funding ceiling per currency — one number, deliberately low, explicitly **not** the `0010` figures and **not** `VELOCITY_LIMITS`.
-3. Confirm withdrawal stays uncreated in the sandbox: the claim kind exists, no route makes one.
-4. Confirm that the reserve→finalize→release lifecycle stays unexercised here, so this cannot be mistaken for Option C.
+1. ~~Approve this corrected approach, replacing 0009 step 2.~~ **Approved** —
+   the corrected domain-separated sandbox funding mechanism.
+2. ~~Set the sandbox funding ceiling per currency.~~ **CA$100 / US$100
+   cumulative per user per test cycle**, reset only by an authorized, audited
+   administrative operation.
+3. ~~Confirm withdrawal stays uncreated in the sandbox.~~ **Confirmed —
+   sandbox cash-out disabled.**
+4. ~~Confirm the reserve→finalize→release lifecycle stays unexercised here.~~
+   **Confirmed**, and reinforced: the sandbox implementation must remain
+   **explicitly separate** from the future live-rail architecture, so this can
+   never be mistaken for option C having been built.
+
+### Requirements the decision adds to the acceptance criteria above
+
+- **Claims stay independent of `velocity_checks`.** Already criterion 1 here
+  and already statically guarded by
+  `lib/__tests__/velocity-admission-callers.test.ts`; restated because it is
+  the invariant two previous implementations broke.
+- **A successful sandbox funding operation commits the claim, the balance and
+  the ledger changes atomically.** One transaction, or none of it.
+- **Duplicate confirmation creates neither a duplicate claim nor a duplicate
+  balance movement.**
+- **Reset is privileged and audited**, per the table above.
+
+**Status after this decision: approved, specified, and NOT YET IMPLEMENTED.**
+It is also still **blocked on** `0012`'s corrected accounting model being
+independently validated, which the owner made a precondition — the approval
+above does not lift that block.

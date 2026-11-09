@@ -1,7 +1,7 @@
 # 0011 — Realized-loss accounting and repeated funding returns
 
-- **Status:** **Proposed — awaiting owner approval. Not implemented.** The threshold, escalation path and recovery policy below are for review; no number in this record is in force.
-- **Date:** 2026-11-08
+- **Status:** **DECIDED 2026-11-09 — provisional rules for a future controlled pilot. NOT IMPLEMENTED, and not to be activated on a live rail without a separate launch authorization and policy review.**
+- **Date:** 2026-11-08, decided 2026-11-09
 - **Decided by the owner, as direction:** separate realized-loss accounting, rather than accepting repeated NSF returns as harmless. This record works that direction out; it does not revisit it.
 - **Follows from:** `0009-transfer-rail-velocity-admission.md` (Accepted) §"In-flight exposure is not realized loss", and `0010-funding-and-withdrawal-limits.md` (Proposed) Finding 2.
 
@@ -40,7 +40,53 @@ A user who funded $100, spent nothing, and whose transfer returns has cost the p
 
 **Partial recovery must be representable.** A user who spent $60 of a returned $100 leaves $40 recoverable and $60 realized. A boolean "returned" flag cannot express that, which is a second reason the counter is separate from the reservation.
 
-## 3. Proposed threshold and escalation — for review, not in force
+## 3a. Owner decision, 2026-11-09 — the rules in force for the pilot
+
+The owner supplied the rules rather than the money figures, and the shape they
+chose does not need money figures: **the thresholds are zero-tolerance.** This
+is what §3 below asked for and could not derive, answered in a way that sidesteps
+the undefined base rate.
+
+| Trigger | Action |
+|---|---|
+| **Any positive unrecovered funding loss** on an account | Suspend that account's funding; open a manual risk review |
+| **Two returned funding transactions within the applicable risk window**, *even where immediate realized loss is zero* | Suspend that account's funding |
+| **Any positive aggregate unrecovered loss** across the platform | Halt all further funding, pending authorized investigation |
+
+Four rules carried with them:
+
+1. **All thresholds are per currency, with no hidden CAD/USD conversions.** A
+   CAD loss and a USD loss are separate obligations against separate balances.
+   No comparison may route through an FX rate.
+2. **No automatic collections and no automatic write-offs are authorized.**
+   §4's step 4 is therefore "none" for the pilot, and step 6 stays a manual,
+   audited action. A counter that nothing collects against is the intended
+   state, not an omission.
+3. **Configurable and auditable**, with **simulated** tests. Not compiled
+   constants, and not exercised against a live rail.
+4. **Not active without separate authorization.** This record being decided is
+   not a launch approval, and `0010` holds live funding at zero regardless.
+
+**What the zero-tolerance shape means in practice, stated because it is easy to
+miss.** Since any positive unrecovered loss suspends funding and any positive
+aggregate loss halts the platform's funding rail, the first unrecovered dollar
+is a stopping event. That is a deliberate choice for a pilot with no observed
+return rate — it trades availability for bounded exposure, and it means the
+pilot's expected mode of failure is a halt, not a loss. It should be
+re-derived, not relaxed by habit, once a base rate exists.
+
+**Escalation owner:** the **project owner, acting as interim Risk Operations
+Lead**, until a responsible role is formally assigned. That closes the Tier 4
+naming gap in §3 below, and it is explicitly interim — the same unowned-alert
+weakness recorded against rate-limit degradation applies until the role is
+assigned for real.
+
+The analysis that produced the question follows. Its tier table is superseded
+by the three rules above; it is kept because §3's two findings — that a count
+trigger needs no money figure, and that per-account limits cannot bound
+platform loss — are the reasons the owner's rules take the shape they do.
+
+## 3. Proposed threshold and escalation — superseded by §3a
 
 The owner's instruction was "Do not invent a financial loss threshold." I have not, and I want to be plain about why I cannot derive one: a loss threshold is a statement of risk appetite measured against capital, and **nothing in this repository carries either quantity**. There is no treasury balance, no reserve figure, no observed return rate — Manna has processed zero live transfers, so the base rate is undefined rather than small.
 
@@ -96,10 +142,30 @@ Minimum requirements:
 8. Thresholds evaluated per currency, with no FX conversion.
 9. Asserted against real PostgreSQL with concurrent and out-of-order webhook delivery, as `0008`'s tests are — a returned webhook arriving **before** the settled webhook must not produce a negative or double-counted loss.
 
-## Decisions required from the owner
+## Decisions required from the owner — all answered 2026-11-09
 
-1. Approve the two-counter structure and the one-event-does-both rule.
-2. Supply `FUNDING_LOSS_REVIEW`, `FUNDING_LOSS_SUSPEND` and `PLATFORM_LOSS_HALT`, per currency — or state that Tier 2's **count** trigger alone is adopted for beta and the money tiers wait for an observed return rate.
-3. Name the escalation owner for Tier 4, which is the same gap as the unowned rate-limit degradation alert.
-4. State what collections route exists for step 4, if any; if none, step 4 is "none" and realized loss is written off rather than recovered, which changes the threshold calculus.
-5. Confirm that nothing in this record is read as readiness to enable a rail.
+1. ~~Approve the two-counter structure and the one-event-does-both rule.~~
+   **Approved** in substance: separate realized-loss accounting, with release
+   closing the reservation and the same event opening the loss.
+2. ~~Supply the three thresholds per currency.~~ **Answered, and they are
+   zero-tolerance** — see §3a. Any positive unrecovered account loss suspends
+   that account's funding; two returns inside the risk window suspend it even
+   at zero realized loss; any positive aggregate unrecovered loss halts
+   platform funding. Per currency, no conversions.
+3. ~~Name the escalation owner.~~ **The project owner, acting as interim Risk
+   Operations Lead**, until a responsible role is formally assigned.
+   Interim by the owner's own wording.
+4. ~~State what collections route exists.~~ **None, and none authorized.** No
+   automatic collections and no automatic write-offs. §4 step 4 is "none" for
+   the pilot and step 6 remains a manual audited action.
+5. ~~Confirm nothing here is readiness to enable a rail.~~ **Confirmed.** This
+   record is decided and unimplemented; `0010` holds live funding and
+   withdrawals at zero; activation needs a separate launch authorization and
+   policy review.
+
+### Added by the decision, and still open
+
+The acceptance criteria in §6 are unchanged and unimplemented. Two further
+requirements come from the decision itself: the controls must be
+**configurable and auditable** rather than compiled constants, and they must be
+exercised by **simulated** tests — never against a live rail.
