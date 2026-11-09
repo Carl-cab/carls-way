@@ -4643,3 +4643,27 @@ validation verdict; FINTRAC/FinCEN applicability; the interim escalation owner.
 
 **Next recommended action.** Unchanged — a reviewer's verdict on the accounting
 model itself.
+
+---
+
+## 2026-11-09 — Addendum: the measured commits for the two entries above
+
+Appended rather than edited, per this file's append-only rule, and because a
+review of PR #77 pointed out that the entry recording the outside-diff review
+findings did not name the commit its results were measured on.
+
+- **"The two findings GitHub could not post inline"** — the 67 files / 965
+  tests, typecheck 0 and lint 0 errors / 29 warnings recorded there were
+  measured at **`bb75327`**, which was that branch's head when the entry was
+  written.
+- **"Independent review of PR #77 found two real defects in decision 0013"** —
+  its 67 / 965 figure was measured at **`4f696fc`**.
+
+Both are superseded by the current measurement at **`78b80cf`**: **68 files /
+977 tests**, typecheck 0 errors, lint 0 errors / 29 warnings, and all four
+required checks green on that commit as a `pull_request` run now that #77
+targets `master` rather than a feature branch.
+
+The general rule this enforces, already a learning in this repository: a test
+result names the commit it was measured on, and a branch name is not a
+substitute, because a branch moves and the number does not follow it.

@@ -80,7 +80,7 @@ exposure.
 | Requirement | How it holds |
 |---|---|
 | A release identifies the original claim | The claim is looked up by `(provider, reference)`; there is no code path that releases without one |
-| Never exceeds the original claimed amount | Exposure is a `SUM` over the reserved subset; releasing removes exactly one claim's own `amount` |
+| Never exceeds the original claimed amount | Exposure is a `SUM` over the reserved subset, so a release can remove at most that one claim's own `amount` — and **only when the claim is actually in the queried subset**. Qualified after review of PR #77: releasing a claim that is already `finalized`, or one whose recorded window has rolled out of the queried window, removes **nothing**, because it was not in the sum to begin with. Measured — the adversarial probe observes `reserved=10000 → finalized=0 → released=0`. That is the finalized-claim capacity window gap, decided in `0009` and unimplemented, not a defect in the release |
 | A funding claim cannot reduce P2P velocity consumption | The module makes **no write to `velocity_checks`**, enforced by a static guard in `velocity-admission-callers.test.ts` |
 | A withdrawal claim cannot reduce funding exposure | `claimedExposure()` filters on `claim_kind`, so the two domains are different sums |
 | A release without an original charge cannot create negative usage or capacity | Exposure sums the **positive** `amount` of a subset of rows, so it cannot go below zero. A property of the model, not a clamp |

@@ -110,7 +110,26 @@ read-then-write mutation in `0008`'s work, and that lesson is recorded in
 
 **Refusal.** Over the funding ceiling, the admission throws and the transaction aborts, so no balance moves. Same write-then-verify ordering as `admitVelocity()`: claim first, verify exposure after, throw to roll back. The ordering matters for the same reason — a read-then-write check admits two concurrent confirmations on one pre-confirmation total.
 
-**Withdrawal stays disabled.** `cash_out` is blocked on separate grounds already recorded in `CLAUDE.md`, and the settlement executor skips `cash_out` balance updates. The `withdrawal` claim kind exists and is tested so the domain is not retrofitted later, but **no route creates one**.
+**Withdrawal needs an explicit guard — it is NOT blocked today.** Corrected
+after review of PR #77, and this correction matters because the earlier wording
+stated a requirement as if it described current behaviour.
+
+What is true: no route creates a **withdrawal claim**, and the `withdrawal`
+claim kind exists and is tested so the domain is not retrofitted later.
+
+What is **not** true, and the earlier text implied it: that sandbox `cash_out`
+is unreachable. Verified against the tree at `78b80cf` —
+`app/api/transfers/intent/route.ts` accepts `cash_out` as a valid `type`
+(`['add_money', 'cash_out'].includes(type)`), and
+`lib/providers/sandbox-settlement.ts` **debits the user's platform balance**
+for it (`intent.type === 'cash_out' ? amount : 0`). So a sandbox cash-out moves
+a real balance today, with no funding or withdrawal control of any kind.
+
+The owner's "sandbox cash-out disabled" is therefore a **requirement on the
+implementation**, not a description of the current state. The implementation
+must add an explicit refusal and an acceptance test that a sandbox `cash_out`
+intent cannot be created or confirmed — not merely omit a withdrawal claim and
+describe the path as disabled.
 
 ## Limits for the sandbox
 
@@ -123,7 +142,9 @@ Deliberately **not** the figures in `0010`. Those are derived from Plaid's and S
 | CAD | **CA$100** |
 | USD | **US$100** |
 
-**Sandbox cash-out: disabled.**
+**Sandbox cash-out: must be disabled by an explicit guard.** Not a statement
+of current behaviour — see the withdrawal note above: `cash_out` is reachable
+today and debits a balance.
 
 Note the shape: **cumulative per test cycle**, not a rolling window. It is not
 a velocity limit with a different number in it — there is no hourly, daily or
@@ -201,7 +222,14 @@ A new `lib/__tests__/sandbox-funding-admission.test.ts` against real PostgreSQL 
 - Swap the claim write for `admitVelocity()` — the original wrong sketch. Criteria 1–3 must fail.
 - Drop the `tx` argument. The concurrency test must hang or fail, and the static guard must fail.
 - Remove the unique index reliance (check-then-insert). The duplicate and concurrent cases must fail.
-- Move the admission after the balance update. Criterion 7 must fail.
+- Move the admission **outside** the settlement transaction, so the balance
+  commits before the ceiling is consulted. Criterion 7 must fail.
+  *(Corrected after review of PR #77. This read "move the admission after the
+  balance update", which is NOT a valid mutation: so long as it stays in the
+  same transaction, a refusal still rolls the balance update back, so
+  criterion 7 remains satisfied and the mutation cannot fail. A mutation that
+  cannot fail is exactly the kind of false assurance this list exists to
+  prevent — the same error as a test that passes under the bug.)*
 
 ## Decisions required from the owner — all answered 2026-11-09
 
@@ -211,7 +239,8 @@ A new `lib/__tests__/sandbox-funding-admission.test.ts` against real PostgreSQL 
    cumulative per user per test cycle**, reset only by an authorized, audited
    administrative operation.
 3. ~~Confirm withdrawal stays uncreated in the sandbox.~~ **Confirmed —
-   sandbox cash-out disabled.**
+   sandbox cash-out disabled **by an explicit guard that does not exist yet**
+   (the path is reachable today — see the withdrawal note).**
 4. ~~Confirm the reserve→finalize→release lifecycle stays unexercised here.~~
    **Confirmed**, and reinforced: the sandbox implementation must remain
    **explicitly separate** from the future live-rail architecture, so this can

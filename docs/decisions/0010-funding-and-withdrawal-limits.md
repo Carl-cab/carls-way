@@ -1,6 +1,7 @@
 # 0010 — Funding and withdrawal exposure limits
 
-- **Status:** **DECIDED 2026-11-09 — live funding and live withdrawals are DISABLED, effective permitted throughput ZERO. Not implemented; no limit is enforced anywhere in the tree, because no positive limit is approved to enforce.**
+- **Status:** **DECIDED 2026-11-09 — live funding and live withdrawals are DISABLED, effective permitted throughput ZERO as a matter of POLICY. Not implemented: no limit, including the zero, is enforced anywhere in the tree.**
+- **What actually prevents live money movement is the FLAGS, not this policy.** Raised in review of PR #77 and verified at `78b80cf`: `app/api/transfers/[id]/execute/route.ts` carries a rate limit (`money:transfer-execute`) and **no amount ceiling at all**, and what stops a live submit is `execution_mode = 'live'` plus `getTransferProvider()` re-reading `PLAID_TRANSFER_LIVE` / `CA_EFT_LIVE`. Setting a flag selects the live provider **without** any zero-ceiling check standing in the way. So this record's "zero" removes no exposure by itself; do not cite it as a control.
 - **Date:** 2026-11-08, decided 2026-11-09
 - **Required by:** `0009-transfer-rail-velocity-admission.md` (Accepted), which specifies separate funding and withdrawal budgets and deliberately proposes no numbers.
 
@@ -83,6 +84,22 @@ So the 55–85 day gap is covered by the finalized-claim window, which is exactl
 | Margin below provider ceilings | **Manna's limit strictly below the provider's**, not equal | Finding 1 — equal limits admit transfers the provider declines, and each such decline exercises the release path |
 | Reservation window | **settlement**, not a fixed duration | Finding 2 |
 | First live window | **US$1 / CA$1**, one rail at a time | Already the stated go-live condition in `CLAUDE.md`; a $1 transfer tests the rail without testing the limit |
+
+**Finding 4 — a limit on OUR window does not bound the PROVIDER's window.**
+Raised in review of PR #77. Daily ceilings above are expressed in local
+calendar days; the provider enforces its own, on its own boundary and in its
+own timezone. The two do not align, so a limit that looks strictly smaller can
+still be exceeded inside the provider's day: with a $400 local-day limit under
+a $500 provider-day limit, three $100 transfers just before local midnight and
+three just after total **$600 in one provider day** — over the provider's
+ceiling while never breaching ours.
+
+Being strictly below the provider's number is therefore necessary and **not
+sufficient**. Any positive limit needs either a check against the provider's
+own window, or a ceiling derived for the worst-case overlap of the two windows
+rather than compared against the provider's figure directly. Not exploitable
+today, because the live ceilings are zero — it is a constraint on the
+derivation, for whoever sets the first positive number.
 
 ### Withdrawal (`cash_out`)
 
