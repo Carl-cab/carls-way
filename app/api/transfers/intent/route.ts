@@ -69,7 +69,20 @@ export async function POST(req: Request) {
     // logic below.
     const amountMinor = parsePositiveMoney(amount, currency);
 
-    // Velocity check — not recorded here; recorded only at confirm step
+    // Advisory velocity preview, NOT an admission. Creating an intent is a
+    // draft: it moves no balance, so it consumes no budget and holds no
+    // claim. Its purpose is to refuse an obviously over-limit intent early
+    // rather than at the step that moves money. Because it is only a preview,
+    // the TOCTOU that admitVelocity() closes does not apply — nothing is
+    // granted on the strength of this answer.
+    //
+    // Known gap, deliberately left open by this change: the transfer rail has
+    // no admission anywhere. This route previously said velocity was
+    // "recorded only at confirm step" and no confirm or execute route has
+    // ever called a velocity write, so a transfer consumes no budget at all.
+    // Sandbox confirm does move the platform balance. Closing that belongs
+    // with the rail work, not with this fix; it is recorded in CLAUDE.md
+    // under the open gaps rather than quietly papered over here.
     const velocityResult = await checkVelocityLimit(user.userId, amountMinor, currency);
     if (!velocityResult.allowed) {
       await auditLog(user.userId, 'transfer_intent_blocked', {

@@ -24,7 +24,10 @@ const mocks = vi.hoisted(() => ({
   sqlTag: vi.fn(),
 }));
 
-vi.mock('@/lib/auth', () => ({
+// The real VelocityLimitError, so the route's `instanceof` check behaves as
+// it does in production; only the two functions the route calls are replaced.
+vi.mock('@/lib/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/auth')>()),
   getAuthUser: mocks.getAuthUser,
   auditLog: mocks.auditLog,
 }));
@@ -43,6 +46,7 @@ vi.mock('@/lib/splits', async (importOriginal) => {
 });
 
 const { SplitPaymentError } = await import('../splits');
+const { VelocityLimitError } = await import('../auth');
 const { POST } = await import('@/app/api/splits/[id]/pay/route');
 
 function request() {
@@ -63,9 +67,14 @@ beforeEach(() => {
 });
 
 describe('POST /api/splits/[id]/pay status contract', () => {
-  it('maps VELOCITY_EXCEEDED to 429, as every other money path does', async () => {
+  it('maps a velocity refusal to 429, as every other money path does', async () => {
+    // A refusal travels as VelocityLimitError, not as a SplitPaymentError
+    // code: one error type for one condition across all three money paths.
+    // That also means the route must match it BEFORE the generic non-
+    // SplitPaymentError branch, which would otherwise report 500 — telling
+    // the caller the system is broken when they have simply hit a ceiling.
     mocks.paySplitPortion.mockRejectedValue(
-      new SplitPaymentError('VELOCITY_EXCEEDED', 'Hourly limit of CAD 5,000 exceeded'),
+      new VelocityLimitError('Hourly limit of CAD 5,000 exceeded'),
     );
 
     const res = await POST(request(), { params });

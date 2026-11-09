@@ -16,13 +16,25 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on the **PR #74 tree, not the `e0f3f0d` baseline this header names**,
+Measured on **commit `f520e22`** — PR #75's head *at the time of measurement*,
+not the `e0f3f0d` baseline this header names —
 on a database created fresh for the run and with
-the CI fixture applied: **63 files / 922 tests** pass, typecheck 0 errors, lint 0
-errors / 28 warnings. Earlier baselines on this file: 55 / 778 at `4e63bb9`,
-56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`, 57 / 832 at `6927ebd`,
-and **61 / 907 at `e0f3f0d`** — which is the figure that belongs to this
-header's commit. The 915 above becomes a baseline fact only when #74 merges.
+the CI fixture applied: **66 files / 943 tests** pass, typecheck 0 errors, lint 0
+errors / 28 warnings, and `pnpm run build` succeeds. The phrasing is deliberate
+and was itself a review finding: an earlier revision read "commit `37e2a43`,
+the head of PR #75", which named the right commit and then made a claim about
+it that the very next push falsified. A measurement belongs to the commit it
+was taken on; whether that commit is still anyone's head is a separate fact
+with a shorter life. Earlier baselines on this
+file: 55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at
+`6d8861c`, 57 / 832 at `6927ebd`, and **61 / 907 at `e0f3f0d`** — which is the
+figure that belongs to this header's commit. 943 becomes a baseline fact only
+when **both** stacked branches merge: PR #74 (`docs/sprint1-owner-confirmations`)
+and PR #75 (`claude/cool-cerf-ErxD3`), which targets #74's branch rather than
+`master` so the known check-then-record concurrency defect in #74 is never
+deployed on its own. All of that is **code verification**; none of it is
+production operational verification, and no part of either branch has run
+against the production database.
 
 **An earlier header claimed verification against `6d8861c` and "57 files /
 821 tests" while `master` had moved on three times (`1d4d783`, `c2859f6`,
@@ -149,7 +161,18 @@ misleading of the two failure modes.
   - `transfer_intents` table live in production (migration applied) ✅
   - No balance changes after intent creation ✅
   - `POST /api/transfers/intent` creates `status='draft'`, `provider=NULL` ✅
-  - Velocity limit gate in place (sandbox intents do NOT consume real velocity budget) ✅
+  - Velocity **preview** at intent creation — non-binding, consumes nothing ✅
+  - ⚠️ **No velocity claim anywhere on this rail.** Sandbox confirm moves a real
+    platform balance with no durable volume control; no confirm, execute or
+    settlement path has ever written `velocity_checks`. An earlier line here
+    read "sandbox intents do NOT consume real velocity budget" as though that
+    were the intended design — it is a gap, and `docs/decisions/0009` (Proposed,
+    awaiting approval) sets out the architecture
+  - ⚠️ **`reverseVelocity()` on a returned transfer releases budget the rail
+    never consumed**, bounded only by the user's window total across all paths,
+    so it frees budget other money paths genuinely spent. Latent (needs a
+    provider webhook; both live flags off) and a prerequisite for enabling any
+    rail
   - Audit logging on intent creation and blocked attempts ✅
 - **Passive audit ledger** (Phase A1): Non-blocking audit log of all financial events
   - `ledger_entries` table: user_id, transaction_id (nullable), currency, account_type, entry_type, debit/credit, provider, description

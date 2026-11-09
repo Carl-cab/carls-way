@@ -250,7 +250,14 @@ VALUES
   -- split-pay-velocity.test.ts. A separate pair from 9101-9104 so the two
   -- files cannot contend for the same rows or the same velocity windows.
   (9111, 'Velocity Creator', 'velcreator', 'velcreator@example.test', 'x', 'CA', 'verified', 0),
-  (9112, 'Velocity Payer',   'velpayer',   'velpayer@example.test',   'x', 'CA', 'verified', 500)
+  (9112, 'Velocity Payer',   'velpayer',   'velpayer@example.test',   'x', 'CA', 'verified', 500),
+  -- velocity-admission.test.ts exercises admitVelocity() directly. Its own
+  -- user again, because vitest runs files in parallel and this one deliberately
+  -- drives a payer up to a velocity ceiling: sharing 9112 with
+  -- split-pay-velocity.test.ts would make each file's budget depend on the
+  -- other's timing. 'pending' KYC on purpose — the new_user ceilings (500
+  -- hourly / 5 daily count) are small enough to reach without large amounts.
+  (9121, 'Admission Payer', 'admitpayer', 'admitpayer@example.test', 'x', 'CA', 'pending', 0)
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
