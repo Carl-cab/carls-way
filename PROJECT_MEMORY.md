@@ -3793,3 +3793,96 @@ dependency audit red on the pre-existing follow-redirects advisory; any later
 commit on the branch is documentation only — a branch name cannot identify the tree after a later push, which is
 why the governance rule asks for the SHA. Also prepared and pushed separately,
 not part of #75: `sec/follow-redirects-1-16-2` at `ca2c4fd`.
+
+---
+
+## 2026-11-09 — Corrections to the two entries above, and a confirmed cross-domain gate
+
+Appended rather than edited, per this file's append-only rule. Five findings
+from the re-review of PR #75 at `eddcffb`; all five verified against the tree
+and all five valid.
+
+**Correction 1 — the 2026-11-07 entry overstated its scope.** It says the
+change altered "a financial control on **every** path that moves a balance".
+That is false as written: **sandbox transfer confirmation also moves a balance
+and has no admission**, which the same entry acknowledges further down. The
+claim covers the **three P2P paths only** — `money:send`, request-accept and
+`money:split-pay`. Read it that way. This is the same scope-overstatement
+pattern already corrected in `readiness.json` (a `VERIFIED` row named "every
+money path") and in `CLAUDE.md`; it is now four occurrences of one habit —
+a true statement with its boundary drawn wider than the evidence.
+
+**Correction 2 — that entry's "unresolved findings" omitted a decision it
+should have named.** Decision 0009 records that releasing a returned funding
+claim restores headroom **even when the platform has realized a loss**, and
+leaves to the owner whether to accept that or add a separate loss counter. The
+entry describes the funding ceiling as protection against return fraud without
+naming that limitation, which reads as stronger protection than exists. The
+owner chose separate realized-loss accounting on 2026-11-08; the thresholds
+remain unset, so the limitation is still live. See `0011`.
+
+**Correction 3 — the 2026-11-08 entry's commit provenance was wrong.** It says
+"any later commit on the branch is documentation only". `eddcffb` is later and
+is **not** documentation: it is a merge commit bringing in the base branch,
+changing `package.json` and `pnpm-lock.yaml` (+6/−6, the `follow-redirects`
+override bump from #76). And the dependency-audit result recorded there is
+superseded: that entry records the audit **red** on `f520e22`, which was true;
+on `eddcffb` it is **green**, 0 critical / 0 high, because #76 merged as
+`4495f13`. Both results stand for their own commits — this is the fourth
+correction in this family (a stale commit, a moving branch reference, a commit
+attributed to the wrong branch, and now a commit characterised wrongly), which
+is why the rule is that a measurement belongs to the commit it was taken on.
+
+**A confirmed defect, not merely a documentation gap.**
+`app/api/transfers/intent/route.ts` gates **both** transfer directions on
+`checkVelocityLimit()`, which sums `velocity_checks` — the **P2P outbound**
+pool — and returns **429**, refusing the intent, when it is exceeded. So a
+user who has spent their P2P outbound budget **cannot create a funding
+intent**, even though funding is inbound value with its own budget under 0009.
+Inbound value gated on an outbound ceiling.
+
+This is the mirror of the defect `0012` fixed, in the **read/gate** direction
+rather than the write direction, and my own domain rule did not catch it: I
+wrote "`velocity_checks` is the P2P outbound domain and **nothing else may
+write to it**" without asking what *reads* it to decide another domain's
+outcome. The rule was one-sided. `CLAUDE.md` now states both halves.
+
+The route's comment calls the call "Advisory velocity preview, NOT an
+admission … nothing is granted on the strength of this answer." True about
+granting, **false about refusing** — a 429 is returned and no intent is
+created, so it is binding in the refusal direction.
+
+**Deliberately not changed here.** Removing or narrowing that gate *removes a
+refusal that exists today*, with no funding budget yet implemented to replace
+it. That is a financial-behaviour change and needs owner authorization, so it
+is recorded as an open decision rather than made. Options for the owner are in
+`0010`.
+
+**A second Major finding, also valid and also unresolved.** `0009`/`0013` do
+not say how long a **finalized** funding claim consumes capacity.
+`claimedExposure()` counts `state='reserved'` only, so finalizing at settlement
+restores headroom while the funds remain returnable for 60 calendar days (US
+unauthorized debit) or 90 (CA PAD personal dispute). Bounding "unsettled
+in-flight value" may therefore be bounding the wrong quantity: the exposure
+ends at the return window, not at settlement. Recorded in `0010` as an owner
+decision with both boundary cases named for testing.
+
+**Tests run and their results.** No code changed by this entry. #75 at
+`eddcffb`: 66 files / 943 tests pass, typecheck 0, `pnpm audit --prod` clean at
+every severity, and all four required checks green via
+`integration/pr75-refreshed`. #74 at `24a24ec`: 63 files / 922 tests pass,
+typecheck 0, audit clean, all four required checks green via
+`integration/pr74-refreshed`.
+
+**Unresolved findings.** The intent-route cross-domain gate, above — owner
+decision. The finalized-claim capacity window — owner decision. The accounting
+model on `sec/claim-bounded-velocity-release` still needs independent
+validation. `0010`, `0011` and `0013` are Proposed and need owner numbers.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Owner: decide the intent-route gate and the
+finalized-claim window. Both are financial-behaviour calls.
+
+**Commit / PR.** PR #75 at `eddcffb` (base `docs/sprint1-owner-confirmations`
+at `24a24ec`). #76 merged to `master` as `4495f13`.

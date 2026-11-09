@@ -558,6 +558,26 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
+- **The transfer-intent route refuses funding on the P2P outbound budget.**
+  `app/api/transfers/intent/route.ts` gates **both** `add_money` and
+  `cash_out` on `checkVelocityLimit()`, which sums `velocity_checks` — the P2P
+  **outbound** pool — and returns **429**, so the intent is not created. A
+  user who has spent their P2P budget therefore cannot top up their wallet,
+  even though funding is **inbound** value that decision 0009 gives its own
+  budget. Inbound value refused by an outbound ceiling.
+  That route's comment says the call is "Advisory velocity preview, NOT an
+  admission … nothing is granted on the strength of this answer" — true about
+  *granting*, **false about refusing**. A 429 is returned and nothing is
+  created, so it is binding in the refusal direction.
+  **Unresolved on purpose.** Narrowing or removing that gate *removes a
+  refusal that exists today*, and no funding budget is implemented to replace
+  it, so it is a financial-behaviour decision for the owner rather than a fix
+  to make. Three options and the acceptance case each needs are recorded in
+  `docs/decisions/0010`. Found by review of PR #75; the general lesson is that
+  a domain rule has two halves — what may **write** a counter, and what may
+  **decide another domain's outcome by reading** it. The first version of that
+  rule had only the first half, which is why this survived it.
+
 - **`reverseVelocity()` can release budget the rail never consumed — and that
   another path did.** `SettlementExecutor` calls it when a transfer is
   `returned`. The rail holds no claim (next item), and the function releases
