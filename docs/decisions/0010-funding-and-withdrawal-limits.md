@@ -54,7 +54,19 @@ Manna's velocity windows are **hourly / daily / weekly**, anchored to the local 
 | CA PAD, business account | up to 5 business days | **10 business days** | ~2× |
 | CA PAD, personal account | up to 5 business days | **90 calendar days** | ~18× |
 
-An in-flight reservation cannot be held for 60–90 days; that is not a policy choice, it is arithmetic about a control that is supposed to bound *concurrent* exposure. So the reservation must close at settlement, and something else must carry the remaining 55–85 days of return exposure. That something is 0011's realized-loss counter.
+An in-flight reservation cannot be held for 60–90 days; that is not a policy choice, it is arithmetic about a control that is supposed to bound *concurrent* exposure. So the reservation must close at settlement, and something else must carry the remaining 55–85 days of return exposure.
+
+**Corrected after review of PR #77 — that something is NOT `0011`'s realized-loss counter.** This paragraph previously said it was, and that was wrong in a way that made an uncontrolled period look covered. `0011`'s counter measures **realized** loss: it stays at zero until a return actually produces an unrecovered shortfall. *Potential* return exposure on money that settled and has not been returned is not realized loss, so that counter carries none of it.
+
+Two distinct quantities, and this record needed both named:
+
+| Quantity | What carries it | Status |
+|---|---|---|
+| In-flight, unsettled value | the funding reservation (`0009` option C) | specified, unimplemented |
+| **Settled but still returnable** value | the **finalized-claim capacity window** — 60 days US ACH from provider-confirmed settlement, 90 days CA PAD from the provider-confirmed debit date (`0009`) | specified, unimplemented |
+| Realized unrecovered loss after a return | `0011`'s non-releasing counter | decided, unimplemented |
+
+So the 55–85 day gap is covered by the finalized-claim window, which is exactly why that window had to be decided before a limit could mean anything — and all three are unimplemented today, which is survivable only because the live ceilings are zero.
 
 **Finding 3 — withdrawal exposure cannot be limited yet, because withdrawal is not built.** `cash_out` is blocked on separate grounds already recorded in `CLAUDE.md`: recipient-owned destination, disbursement accounting, ownership validation, provider capability and return/reversal architecture are all design-only, and the settlement executor explicitly skips `cash_out` balance updates. A withdrawal *limit* presupposes a withdrawal *path*. Proposing a number for one would imply a readiness that does not exist.
 

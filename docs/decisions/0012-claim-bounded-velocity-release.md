@@ -86,9 +86,9 @@ exposure.
 | A release without an original charge cannot create negative usage or capacity | Exposure sums the **positive** `amount` of a subset of rows, so it cannot go below zero. A property of the model, not a clamp |
 | Late returns cannot increase P2P headroom | No credit is ever written to `velocity_checks`, so there is nothing to mis-date |
 | Duplicate webhook cannot double-release | `SELECT ... FOR UPDATE` serialises, and a conditional `UPDATE ... WHERE state <> 'released'` decides. Idempotency is keyed on the **claim**, not the event id — keying on the event would let two distinct deliveries each take the amount once |
-| Late returns do not credit unrelated current windows | The claim records its **own** `hourly/daily/weekly_window_start` at claim time. A release credits those, not the windows current when the return arrives |
-| Database errors do not silently create extra budget | Claim state and all three compensating rows are **one transaction**, and the function deliberately has **no `try/catch`** |
-| Historical adjustments remain auditable | Compensating rows are appended, never mutated; the claim keeps `released_amount`, `released_at` and `release_event_id` |
+| Late returns do not credit unrelated current windows | **Nothing is credited anywhere.** The claim records its own `hourly/daily/weekly_window_start` at claim time, so its exposure was only ever attributed to the windows that carried it; a release moves the claim out of the `reserved` set and writes no row to any window, current or past |
+| Database errors do not silently create extra budget | The claim-state change and its audit row are **one transaction** on the caller's executor, and the function deliberately has **no `try/catch`**. There are no compensating rows to leave half-written — that was the failure mode of the rejected revision |
+| Historical adjustments remain auditable | The claim keeps `released_amount`, `released_at` and `release_event_id`, and the audit row is written in the same transaction. No row is ever mutated |
 | Reconciliation can identify mismatched claims | `findVelocityClaimsNeedingReconciliation()` reports claims stuck in `reserved` past an age, and counts `velocity_claim_release_mismatch` audit rows |
 
 ### Why a return with no claim releases nothing

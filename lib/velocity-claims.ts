@@ -10,7 +10,9 @@
  *
  * The fix is to give a release an identity. A webhook names an **intent**, not
  * a window, so a claim is keyed by `(provider, reference)` and a release can
- * only ever return that claim's own amount, to that claim's own windows.
+ * only ever retire that claim's own amount, by moving that one claim out of
+ * the reserved set. Nothing is "returned" to a window: no credit is ever
+ * written anywhere.
  *
  * Three properties are structural rather than conventional, which is the
  * point — each is enforced by the database or by control flow, not by a
@@ -28,10 +30,11 @@
  *   - **Idempotent.** The release is a conditional `UPDATE ... WHERE state <>
  *     'released'`. A redelivered webhook updates zero rows and the function
  *     returns `already_released` without changing any exposure.
- *   - **Atomic.** Claim state and compensating rows commit together. The old
- *     implementation wrote three window rows in three separate statements with
- *     no transaction, so a failure part-way left a partial release committed
- *     and still reported success.
+ *   - **Atomic.** The claim-state change and its audit row commit together,
+ *     on the caller's executor. No compensating rows exist to commit: the
+ *     revision that wrote three window rows in three separate statements with
+ *     no transaction — so a failure part-way left a partial release committed
+ *     and still reported success — is the model this file rejects.
  */
 
 import type postgres from 'postgres';
@@ -203,6 +206,28 @@ export async function claimedExposure(
   // one, so a claim made in a past window has already rolled out of exposure
   // without any compensating write. A late return therefore cannot credit a
   // current window, because no credit is ever written.
+  //
+  // THAT MAKES THIS A ROLLING-WINDOW MEASURE, AND IT IS THE WRONG INPUT FOR
+  // TWO CONTROLS THAT ARE SPECIFIED BUT NOT YET BUILT. Found by review of
+  // PR #77; recorded here because the mistake is invisible at the call site.
+  //
+  //   - `0009`'s **in-flight** funding exposure is a property of claim
+  //     STATE, not of a calendar window. A claim still `reserved` and
+  //     unsettled is in flight whether it was made this hour or last week,
+  //     and this function stops counting it at the boundary — so it
+  //     understates in-flight value for any transfer older than its window.
+  //   - `0013`'s sandbox ceiling is **cumulative per test cycle**, resettable
+  //     only by an authorized audited operation. Wiring it to this function
+  //     would hand every user fresh capacity at each calendar boundary,
+  //     which is precisely the "capacity does not come back on its own"
+  //     property the owner's decision requires.
+  //
+  // Both need an UNWINDOWED total over the reserved set (and, for 0013, a
+  // per-cycle consumption row that a release does not decrement). That
+  // measure is deliberately NOT added here as an unused export: it is
+  // specified in `0013` and belongs with the admission that consumes it.
+  // Until then, treat this function as answering only "how much of this
+  // domain's value did this user put in flight inside this window".
   const rows = await sql`
     SELECT COALESCE(SUM(amount), 0) AS total
     FROM velocity_claims
@@ -261,10 +286,10 @@ export async function finalizeVelocityClaim(
 /**
  * Release a claim's velocity budget, and only that claim's.
  *
- * Runs as one transaction containing the claim-state change and the
- * compensating `velocity_checks` rows, so a database error part-way through
- * leaves neither — the old implementation could leave one window released and
- * two not, and reported success. `eventId`, when given, is recorded on the
+ * Runs as one transaction containing the claim-state change and its audit
+ * row, so a database error part-way through leaves neither. It writes no
+ * `velocity_checks` rows at all; the rejected revision could leave one window
+ * released and two not, and reported success. `eventId`, when given, is recorded on the
  * claim so a reconciliation pass can tell which delivery released it.
  *
  * Deliberately has **no `try/catch`**. A failure here must reach the caller:
@@ -356,7 +381,7 @@ async function releaseWithin(
   // SUM over positive amounts of a subset, so it cannot go negative and
   // cannot create capacity, by construction rather than by a clamp.
   //
-  // `lib/__tests__/velocity-claim-domains.test.ts` pins each invariant, and
+  // `lib/__tests__/velocity-claim-release.test.ts` pins each invariant, and
   // `velocity-admission-callers.test.ts` fails if this file ever gains an
   // INSERT into velocity_checks again.
 

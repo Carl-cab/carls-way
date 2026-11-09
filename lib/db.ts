@@ -500,9 +500,12 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
-  // Partial uniqueness: exactly one accumulating row per window, while the
-  // compensating rows reverseVelocity() appends (transaction_count < 0) stay
-  // append-only. recordVelocity()'s upsert targets this index explicitly.
+  // Partial uniqueness: exactly one accumulating row per window. The
+  // predicate excludes transaction_count < 0, which existed for the
+  // compensating rows the now-deleted reverseVelocity() appended; nothing
+  // writes such a row any more, and the predicate stays only so that any
+  // legacy row still present does not collide. recordVelocity()'s upsert
+  // targets this index explicitly.
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
       ON velocity_checks (user_id, window_type, window_start, currency)
@@ -518,12 +521,21 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
   // volume from EVERY path — so a returned transfer freed budget money:send
   // and money:split-pay had genuinely consumed. See decision 0012.
   //
-  // window_start columns are recorded AT CLAIM TIME on purpose: a release
-  // credits the windows the claim was made in, not the windows current when
-  // the return arrives. A US unauthorized-debit return may land 60 calendar
-  // days later and a CA PAD dispute 90 days later, by which point the
-  // original hourly and daily windows are long gone — crediting the current
-  // ones would hand back headroom in a window that never carried the charge.
+  // window_start columns are recorded AT CLAIM TIME on purpose, so exposure
+  // is attributed to the window that actually carried the claim. A release
+  // credits nothing anywhere -- it only moves the claim out of the reserved
+  // set -- and recording the original windows is what makes a late return
+  // incapable of touching a current one. A US unauthorized-debit return may
+  // land 60 calendar days later and a CA PAD dispute 90 days later, by which
+  // point the original hourly and daily windows are long gone; crediting the
+  // current ones would have handed back headroom in a window that never
+  // carried the charge.
+  //
+  // NOTE: because these columns are compared against the CURRENT window,
+  // claimedExposure() is a rolling-window measure. See its comment in
+  // lib/velocity-claims.ts -- it is the wrong input for 0009's in-flight
+  // exposure and for 0013's cumulative sandbox ceiling, both of which need an
+  // unwindowed total over the reserved set.
   await sql`
     CREATE TABLE IF NOT EXISTS velocity_claims (
       id SERIAL PRIMARY KEY,

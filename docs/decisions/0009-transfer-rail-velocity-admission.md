@@ -358,10 +358,13 @@ realized *loss*, and one counter cannot be both. The options:
   rather than regaining it.
 
 **The owner chose separate realized-loss accounting on 2026-11-08**, rejecting
-"accept it". Worked out in `0011-realized-loss-and-repeated-returns.md`
-(Proposed), which still needs the thresholds — a loss-tolerance question, not
-an engineering one, and nothing in this repository carries either the capital
-or an observed return rate to derive them from.
+"accept it", and **set the rules on 2026-11-09**. Worked out in
+`0011-realized-loss-and-repeated-returns.md`, now **Decided and unimplemented**
+— so do not read this paragraph as sending you to obtain a decision that
+already exists. The thresholds are **zero-tolerance**, which is how the owner
+answered a loss-tolerance question that no quantity in this repository could
+have derived: there is no capital figure and no observed return rate, and the
+answer sidesteps both by stopping on the first unrecovered amount.
 It is listed below as a decision rather than folded into C, because C is
 implementable without it and this is the part that stops C from being a
 complete answer to funding abuse.

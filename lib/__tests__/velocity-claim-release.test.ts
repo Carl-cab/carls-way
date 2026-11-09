@@ -312,8 +312,10 @@ describe('late returns and adversarial ordering', () => {
     await admitVelocity(PAYER, cad('450.00'), 'CAD');
     await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'claim-test-late');
 
-    // The current hourly window still holds the full 450: the compensating
-    // row landed 40 days back, where the claim was made.
+    // The current hourly window still holds the full 450. Not because a
+    // compensating row landed 40 days back -- no row is written anywhere --
+    // but because the release only moves the claim out of the reserved set,
+    // and velocity_checks is a different domain the release never touches.
     const current = await sql`
       SELECT COALESCE(SUM(total_amount), 0) AS total FROM velocity_checks
       WHERE user_id = ${PAYER} AND window_type = 'hourly'
@@ -374,8 +376,9 @@ describe('a database error does not silently create budget', () => {
    * non-existent user — which cannot work, because `velocity_claims.user_id`
    * has a foreign key, so the *setup* threw rather than the release. Proxying
    * the executor is both honest and closer to the real hazard: it fails after
-   * the first compensating insert has already been written, which is exactly
-   * the old implementation's failure mode.
+   * the claim-state change has been written but before its audit row lands,
+   * which is the shape of the old implementation's failure mode -- that one
+   * could leave one window released and two not, and still report success.
    */
   function failOnNthVelocityInsert(tx: unknown, n: number) {
     let seen = 0;

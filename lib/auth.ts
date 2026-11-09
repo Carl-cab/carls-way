@@ -325,10 +325,13 @@ export async function checkVelocityLimit(
  * Reading cannot be folded into the writing statement: a data-modifying CTE's
  * effects are not visible to sibling CTEs in the same statement, so a single
  * `INSERT ... RETURNING` + `SELECT SUM(...)` statement would verify against
- * the pre-write snapshot. And `RETURNING` alone is not the window total —
- * `releaseVelocityClaim()` appends compensating rows with `transaction_count < 0`
- * (which the partial unique index deliberately excludes), so a window is the
- * sum of its rows, not one row. Hence two statements, in one transaction, in
+ * the pre-write snapshot. And `RETURNING` alone is not guaranteed to be the
+ * window total: the partial unique index excludes rows with
+ * `transaction_count < 0`, so any legacy compensating row left behind by the
+ * deleted `reverseVelocity()` is an additional row in the same window. Summing
+ * stays correct whether or not such rows remain, where `RETURNING` would not.
+ * Nothing writes them any more — `releaseVelocityClaim()` writes to
+ * `velocity_checks` not at all. Hence two statements, in one transaction, in
  * this order.
  *
  * Pass `executor` whenever the caller is already inside `sql.begin`, and do
@@ -494,7 +497,9 @@ export async function auditLog(userId: number | null, action: string, metadata?:
 // classified that as a critical financial-control defect. A function that can
 // do it must not remain reachable, so there is no compatibility shim: the
 // callers moved to `releaseVelocityClaim()` in `lib/velocity-claims.ts`, which
-// can only return a claim's own recorded amount to the claim's own windows.
+// can only retire its own claim, by moving that one row out of the reserved
+// set. It returns nothing to any window: it writes to `velocity_checks` not at
+// all, which is the domain rule rather than a bound on the amount.
 //
 // Two further defects died with it, both of which the owner's requirements
 // name independently. Its three window inserts ran in no transaction, so a

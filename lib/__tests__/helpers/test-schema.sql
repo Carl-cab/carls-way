@@ -328,10 +328,12 @@ CREATE TABLE IF NOT EXISTS velocity_checks (
 );
 
 -- Partial uniqueness, not a plain UNIQUE constraint: exactly one accumulating
--- row per window, while the compensating rows reverseVelocity() appends
--- (transaction_count < 0) stay append-only. recordVelocity()'s upsert names
--- this index explicitly, so a test database without it fails the upsert
--- outright rather than merely losing the constraint.
+-- row per window. The transaction_count >= 0 predicate existed for the
+-- compensating rows the now-deleted reverseVelocity() appended; nothing writes
+-- such a row any more, and the predicate stays only so a legacy row does not
+-- collide. recordVelocity()'s upsert names this index explicitly, so a test
+-- database without it fails the upsert outright rather than merely losing the
+-- constraint.
 CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
   ON velocity_checks (user_id, window_type, window_start, currency)
   WHERE transaction_count >= 0;

@@ -1,9 +1,9 @@
 # 0013 — Sandbox funding/withdrawal admission stopgap
 
-- **Status:** **Proposed — awaiting owner approval. Not implemented.** This record is the corrected acceptance criteria and regression-test specification the owner asked for *before* implementation.
+- **Status:** **APPROVED by the owner 2026-11-09 (mechanism and limits). NOT IMPLEMENTED.** Two defects in this record's own mechanism were found by review of PR #77 and corrected on the same day — see the two "corrected after review of PR #77" sections below; the approval predates those corrections, and neither changes the approved limits.
+- **Blocked on:** independent validation of `0012`'s accounting model, which the owner made a precondition. The approval above does not lift it.
 - **Date:** 2026-11-08
 - **Supersedes the sketch in** `0009-transfer-rail-velocity-admission.md` §"Sequencing" step 2, which said "admit at `settleSandboxTransfer()` … with `admitVelocity()` exactly as the P2P paths use it". **That instruction was wrong and must not be followed.**
-- **Blocked on:** `0012-claim-bounded-velocity-release.md`'s corrected accounting model, which must be independently validated first.
 
 ## Why the earlier sketch was wrong
 
@@ -23,7 +23,88 @@ Three domains, three independent budgets, no shared counter:
 | **Funding** (`add_money`) | `velocity_claims` where `claim_kind = 'funding'` | `createVelocityClaim()` | unsettled value being pulled in |
 | **Withdrawal** (`cash_out`) | `velocity_claims` where `claim_kind = 'withdrawal'` | `createVelocityClaim()` | value being pushed out to a bank |
 
-Exposure per domain is **derived** by `claimedExposure(userId, claimKind, currency)` — a `SUM` over the positive `amount` of `reserved` claims. Nothing mirrors a claim into `velocity_checks`, so cross-domain contamination is impossible by construction rather than by a guard.
+Nothing mirrors a claim into `velocity_checks`, so cross-domain contamination is impossible by construction rather than by a guard.
+
+### The ceiling is NOT `claimedExposure()` — corrected after review of PR #77
+
+An earlier revision of this record said exposure per domain is derived by
+`claimedExposure(userId, claimKind, currency)`. **That function is the wrong
+input for this ceiling, and using it would defeat the owner's decision.**
+
+`claimedExposure()` is a **rolling-window** measure: it sums `reserved` claims
+whose recorded `hourly_`/`daily_`/`weekly_window_start` is at or after the
+*current* window's boundary. The owner's approved sandbox cap is **cumulative
+per test cycle**, resettable only by an authorized audited operation. Wire the
+cap to that function and yesterday's funding drops out of the sum at midnight,
+so the same user funds another CA$100 with no reset — the exact opposite of
+"capacity does not come back on its own". The two statements sat four
+paragraphs apart in this record and contradicted each other.
+
+What the admission must read instead:
+
+1. **A per-user, per-currency, per-cycle consumption total** that only an
+   authorized reset clears. Two shapes work and the implementation picks one:
+   a dedicated `sandbox_funding_cycles` row carrying `consumed` and a
+   `cycle_id`, incremented in the settlement transaction; or an unwindowed
+   `SUM(amount)` over funding claims tagged with the current `cycle_id`.
+   Either way the cycle, not the calendar, bounds the sum.
+2. **A release must NOT decrement it.** The cap bounds how much simulated
+   funding a user has exercised in a cycle, which is a cumulative fact. This
+   is the same distinction `0011` draws between an in-flight reservation and a
+   realized total, and it is why the cap cannot be read off the reserved set
+   at all: `reserved` is a state claims leave.
+
+`claimedExposure()` keeps its own meaning — in-window in-flight exposure per
+domain — and its limitation is now documented at the function itself.
+
+### Serializing the aggregate decision — corrected after review of PR #77
+
+The earlier revision said: *"Same write-then-verify ordering as
+`admitVelocity()`: claim first, verify exposure after, throw to roll back."*
+**That ordering does not work here, and the reason generalizes.**
+
+Write-then-verify closes the TOCTOU in `admitVelocity()` because the rows it
+writes are **shared**: one row per `(user, window_type, window_start,
+currency)`. A second concurrent admission by the same payer upserts the *same*
+row, blocks on the first transaction's lock, and only then reads a total that
+includes the first claim. The lock is what makes the verify meaningful.
+
+`velocity_claims` rows are **per-intent** — `ON CONFLICT (provider,
+reference) DO NOTHING`, and two different intents are two different
+references. So two concurrent confirmations insert two *different* rows,
+contend on nothing, and at `READ COMMITTED` each verifies against a snapshot
+that cannot see the other. Two CA$60 confirmations both pass a CA$100 check.
+There is no `FOR UPDATE` and no advisory lock anywhere in the claim-creation
+path — verified against `lib/velocity-claims.ts` at `eee2656`.
+
+**This is the same CWE-367 defect decision 0008 exists to close**, reproduced
+on the funding path by copying a mechanism without its precondition. Which is
+the third time in this program that a control was carried from one path to
+another and lost the property that made it work.
+
+The admission must therefore hold a lock that is shared across *distinct*
+intents of one user and currency, for the whole span from reading consumption
+to committing the claim. Either:
+
+- **`pg_advisory_xact_lock(hashtext('sandbox_funding:' || user_id || ':' || currency))`**
+  taken inside the settlement transaction before the read — released at commit
+  by the transaction, so no unlock path can be forgotten; or
+- **a `SELECT ... FOR UPDATE` on the per-cycle consumption row** from option 1
+  above, which serializes on a row that every one of that user's funding
+  confirmations must touch. Preferred, because the lock and the counter are the
+  same object and cannot drift apart.
+
+Serializable isolation with retries also works, but it imports a retry policy
+into a money path for no benefit over a row lock on a row that already has to
+exist.
+
+**Required test, which the earlier criteria did not have:** two concurrent
+confirmations of **distinct** intents by one user, each fitting the cap singly
+but not together — exactly one admitted. Asserted as a **lock** observation,
+not a scheduling race: hold one transaction open and require the second to be
+unable to reach a decision. The obvious version of this test passed under the
+read-then-write mutation in `0008`'s work, and that lesson is recorded in
+`CLAUDE.md` precisely so it is not re-learned here.
 
 **Where the admission goes.** `settleSandboxTransfer()` (`lib/providers/sandbox-settlement.ts`) already locks the intent row and moves the platform balance in one transaction. The claim is created **inside that transaction, on its `tx`** — so the balance change and the claim commit together or not at all, and no second pool connection is requested (`lib/db.ts` sets `max: 5`; the deadlock this avoids is documented in `CLAUDE.md` and was re-demonstrated in 0012's mutation testing).
 
