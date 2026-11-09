@@ -97,6 +97,14 @@ afterAll(async () => {
             (SELECT id FROM users WHERE username LIKE 'ledg_%')`;
   await sql`DELETE FROM splits WHERE creator_id IN
             (SELECT id FROM users WHERE username LIKE 'ledg_%')`;
+  // Paying a split portion records velocity as of 2026-10-26, and
+  // velocity_checks.user_id references users — so these rows must go before
+  // the users they cite or the DELETE below fails on
+  // `velocity_checks_user_id_fkey`. This file pays splits, so it is one of
+  // exactly three that write those rows; the other two are splits.test.ts and
+  // split-pay-velocity.test.ts, and both clear them too.
+  await sql`DELETE FROM velocity_checks WHERE user_id IN
+            (SELECT id FROM users WHERE username LIKE 'ledg_%')`;
   await sql`DELETE FROM users WHERE username LIKE 'ledg_%'`;
 });
 

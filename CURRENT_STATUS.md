@@ -16,10 +16,25 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on the merged tree, on a database created fresh for the run and with
-the CI fixture applied: **61 files / 907 tests** pass, typecheck 0 errors, lint 0
-errors / 28 warnings. Earlier baselines on this file: 55 / 778 at `4e63bb9`,
-56 / 788 at `42dbba6`, 57 / 821 claimed at `6d8861c`, 57 / 832 at `6927ebd`.
+Measured on **commit `f520e22`** — PR #75's head *at the time of measurement*,
+not the `e0f3f0d` baseline this header names —
+on a database created fresh for the run and with
+the CI fixture applied: **66 files / 943 tests** pass, typecheck 0 errors, lint 0
+errors / 28 warnings, and `pnpm run build` succeeds. The phrasing is deliberate
+and was itself a review finding: an earlier revision read "commit `37e2a43`,
+the head of PR #75", which named the right commit and then made a claim about
+it that the very next push falsified. A measurement belongs to the commit it
+was taken on; whether that commit is still anyone's head is a separate fact
+with a shorter life. Earlier baselines on this
+file: 55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at
+`6d8861c`, 57 / 832 at `6927ebd`, and **61 / 907 at `e0f3f0d`** — which is the
+figure that belongs to this header's commit. 943 becomes a baseline fact only
+when **both** stacked branches merge: PR #74 (`docs/sprint1-owner-confirmations`)
+and PR #75 (`claude/cool-cerf-ErxD3`), which targets #74's branch rather than
+`master` so the known check-then-record concurrency defect in #74 is never
+deployed on its own. All of that is **code verification**; none of it is
+production operational verification, and no part of either branch has run
+against the production database.
 
 **An earlier header claimed verification against `6d8861c` and "57 files /
 821 tests" while `master` had moved on three times (`1d4d783`, `c2859f6`,
@@ -31,9 +46,12 @@ Sprint 1: this header read `6927ebd` / 832 after five merges had moved
 
 ## ⚠ Two things on this list are worse than "unverified"
 
-(Item 1 was partly resolved on 2026-10-26: `master` is fixed, the running
-deployment is not yet confirmed. Item 2 is unchanged and is now the
-first-order gap.)
+(Both are now resolved, and this parenthetical is kept rather than deleted so
+the sequence stays legible. Item 1: `master` was fixed on 2026-10-26 and the
+running deployment was **confirmed** later the same day — see below. Item 2:
+Dependabot is **enabled**, owner-reported 2026-10-26. What is still unverified
+is listed under "What is NOT verified" further down, which has been narrowed
+accordingly.)
 
 **1. `master` CARRIED two unauthenticated remote-code-execution advisories.**
 `next@16.3.8` is inside the vulnerable range of three advisories — two
@@ -43,26 +61,56 @@ GHSA-673q-mjm6-r5xr) and one DoS (GHSA-p3m5-59mp-jv5r) — all patched in
 `package.json` and `pnpm-lock.yaml` now both pin `16.4.3` — verified by reading
 the merged tree. So `master` is fixed.
 
-**The running deployment is a separate fact and is NOT yet verified.** It serves
-whatever its last build produced, and the deployed version cannot be read from
-this environment (`403 CONNECT` to both `api.vercel.com` and the deployment
-host). Until the Vercel production rebuild from `1bc81df` or later is
-confirmed, treat the two unauthenticated RCEs as potentially live on the public
-deployment. The same bump also rides on #68, #70, #71 and #72, whose dependency
-diff against `master` is now empty.
+**The running deployment is now CONFIRMED, and the advisories are cleared in
+production.** This paragraph said the deployment was "NOT yet verified" and
+instructed the reader to treat the two unauthenticated RCEs as potentially
+live. That is resolved as of 2026-10-26, from **two independent sources that
+agree**:
 
-**2. Nothing watches an unchanged tree.** Both that advisory set and the
-`follow-redirects` one five days earlier reached `master` *after* its last
-green CI run, and both were found only because an unrelated PR happened to
-re-run the audit. Dependabot alerts are named in `ci.yml` as the durable
-backstop but have never been confirmed enabled.
+- **GitHub deployments API**, readable from this environment even though
+  Vercel's is not: deployment `7344985889`, `environment: Production`,
+  sha `403acf1`, status `state: success`, 2026-10-26T22:19:15Z — and the most
+  recent Production record for the repository.
+- **Owner-supplied Vercel detail**: deployment `dpl_BZgDHuZxjbG2NHgg12b218eoQT3q`,
+  status `READY`, production SHA `403acf1823358b4100e7898a1c89ba8b753786c5`,
+  branch `master`, live alias `carloscab74.vercel.app`.
+
+`1bc81df` (the `next` 16.4.3 bump) is an **ancestor** of `403acf1`, verified
+with `git merge-base --is-ancestor`, and `package.json` at `403acf1` declares
+`next: 16.4.3`. So the serving deployment contains the fix for all three
+advisories — the two unauthenticated RCEs and the DoS.
+
+Each source closes the other's gap, which is why this is stated as confirmed
+rather than probable: the GitHub record proves Vercel reported a successful
+Production deploy of that exact SHA but says nothing about which deployment the
+domain alias points at; the owner detail supplies the alias and `READY` status
+but is a report rather than something this session measured. **The method is
+worth keeping:** the GitHub deployments API answers "what SHA is deployed to
+Production" without any Vercel access, and that was treated as unanswerable for
+the whole of Sprint 1.
+
+**2. Nothing watched an unchanged tree. Dependabot is now enabled.** Both that
+advisory set and the `follow-redirects` one five days earlier reached `master`
+*after* its last green CI run, and both were found only because an unrelated PR
+happened to re-run the audit — CI cannot detect an advisory disclosed against a
+tree that has not changed. The durable backstop `ci.yml` names is now on:
+owner-reported 2026-10-26, with Dependabot alerts, security updates, grouped
+security updates and malware alerts all enabled. This line read "have never
+been confirmed enabled". **One thing is still not claimed:** the alert *list*
+has not been read from this environment — both `/dependabot/alerts` and
+`/vulnerability-alerts` answer `403` to this session, which is a token-scope
+limit that enabling alerts does not change, so the 403 is not evidence either
+way about whether any advisory is currently open.
 
 **What is NOT verified, stated here because the rest of this file reads as
-confirmation:** nothing about the deployment. `api.vercel.com` and the
-production host both return `403 CONNECT` from this environment's egress proxy
-— re-confirmed 2026-10-26 — so the production SHA, whether `REDIS_URL` or
-`CRON_SECRET` is set, whether the cron fires, and deployment health are all
-unverified rather than passing.
+confirmation.** This paragraph said "nothing about the deployment", which is no
+longer true: **the production SHA IS confirmed** (`403acf1`, from the GitHub
+deployments API plus owner-supplied Vercel detail — see above). `api.vercel.com`
+and the production host still return `403 CONNECT` from this environment's
+egress proxy, re-confirmed 2026-10-27, so what remains unverified is narrower
+and specific: whether `REDIS_URL` and `CRON_SECRET` are actually set, whether
+the cron fires, deployment health, and the Redis backend's live behaviour. The
+deployed commit is no longer on that list.
 
 **Branch protection has since moved to VERIFIED, and this file previously said
 the opposite.** It read "`master` is also still `protected: false` with no
@@ -113,7 +161,18 @@ misleading of the two failure modes.
   - `transfer_intents` table live in production (migration applied) ✅
   - No balance changes after intent creation ✅
   - `POST /api/transfers/intent` creates `status='draft'`, `provider=NULL` ✅
-  - Velocity limit gate in place (sandbox intents do NOT consume real velocity budget) ✅
+  - Velocity **preview** at intent creation — non-binding, consumes nothing ✅
+  - ⚠️ **No velocity claim anywhere on this rail.** Sandbox confirm moves a real
+    platform balance with no durable volume control; no confirm, execute or
+    settlement path has ever written `velocity_checks`. An earlier line here
+    read "sandbox intents do NOT consume real velocity budget" as though that
+    were the intended design — it is a gap, and `docs/decisions/0009` (Proposed,
+    awaiting approval) sets out the architecture
+  - ⚠️ **`reverseVelocity()` on a returned transfer releases budget the rail
+    never consumed**, bounded only by the user's window total across all paths,
+    so it frees budget other money paths genuinely spent. Latent (needs a
+    provider webhook; both live flags off) and a prerequisite for enabling any
+    rail
   - Audit logging on intent creation and blocked attempts ✅
 - **Passive audit ledger** (Phase A1): Non-blocking audit log of all financial events
   - `ledger_entries` table: user_id, transaction_id (nullable), currency, account_type, entry_type, debit/credit, provider, description

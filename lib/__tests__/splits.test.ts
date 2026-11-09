@@ -72,6 +72,14 @@ async function cleanup() {
             WHERE user_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})`;
   await sql`DELETE FROM transactions WHERE sender_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})
                                         OR receiver_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})`;
+  // Paying a portion now records velocity (decision 0007 relies on it), so
+  // these rows are test state like the ledger rows above. Left behind they
+  // accumulate against `daily_max_count` — 25 for a verified user, and these
+  // four are verified — so a later run would fail on a ceiling rather than on
+  // anything it asserts. That failure would look like a regression in
+  // splitting and would not be one.
+  await sql`DELETE FROM velocity_checks
+            WHERE user_id IN (${CREATOR}, ${PAYER_A}, ${PAYER_B}, ${BROKE})`;
 }
 
 beforeEach(async () => {

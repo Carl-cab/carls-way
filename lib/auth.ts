@@ -167,31 +167,101 @@ export async function resetFailedLogins(userId: number): Promise<void> {
 }
 
 // ─── Velocity check ──────────────────────────────────────────────────────────
-export async function checkVelocityLimit(
-  userId: number,
-  amount: MinorUnits,
-  currency: string
-): Promise<{ allowed: boolean; reason?: string }> {
-  if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Velocity amount must be positive integer minor units.');
-  // Validates currency without ever interpreting cents as major units.
-  parsePositiveMoney(toDatabaseDecimal(amount), currency);
-  const sql = getSql();
-  const userRows = await sql`SELECT kyc_status FROM users WHERE id = ${userId}`;
-  const kycStatus = userRows[0]?.kyc_status as string;
-  const limits = kycStatus === 'verified'
-    ? VELOCITY_LIMITS.verified_user
-    : VELOCITY_LIMITS.new_user;
+/**
+ * A caller's transaction, when the velocity read or write must run on the
+ * connection the caller already holds. Same shape and purpose as
+ * `LedgerExecutor` in lib/ledger.ts.
+ *
+ * This is not a convenience. `lib/db.ts` configures `max: 5`, so a caller that
+ * holds a pool connection inside `sql.begin` and then lets this module call
+ * `getSql()` is asking the same 5-connection pool for a second connection
+ * while holding one. Five such callers in flight hold all five connections and
+ * every one of them waits for a sixth, so none can finish and release — the
+ * pool deadlocks and stalls every other query on that instance, not only the
+ * money path. `paySplitPortion()` had exactly that shape for one commit.
+ */
+export type VelocityExecutor = postgres.ISql;
 
-  const now = new Date();
+/**
+ * Raised when an admission is refused because it would carry the payer past a
+ * velocity ceiling.
+ *
+ * `admitVelocity()` signals refusal by throwing rather than returning, and
+ * that is deliberate. Admission writes the increments BEFORE it verifies them
+ * (see `admitVelocity()`), so a refusal has already consumed budget in the
+ * open transaction; only a rollback releases it. A thrown error aborts the
+ * caller's transaction by construction, which makes "a refused payment
+ * consumes no budget" a property of control flow instead of a convention a
+ * caller has to remember. A returned `{ admitted: false }` would leave the
+ * increments committed by any caller that forgot to roll back.
+ */
+export class VelocityLimitError extends Error {
+  readonly code = 'VELOCITY_EXCEEDED' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'VelocityLimitError';
+  }
+}
+
+/** The three rolling windows velocity is accounted in, normalized to their boundaries. */
+function velocityWindows(now: Date = new Date()): ReadonlyArray<{ type: 'hourly' | 'daily' | 'weekly'; start: Date }> {
   const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
   const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
   const weekStart = new Date(now);
   weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
+  // Fixed order. Each window is a distinct row and admission takes a row lock
+  // on all three; a consistent order across callers is what keeps two payers'
+  // concurrent admissions from deadlocking against each other.
+  return [
+    { type: 'hourly', start: hourStart },
+    { type: 'daily', start: dayStart },
+    { type: 'weekly', start: weekStart },
+  ];
+}
+
+async function velocityLimitsFor(sql: VelocityExecutor, userId: number) {
+  const userRows = await sql`SELECT kyc_status FROM users WHERE id = ${userId}`;
+  const kycStatus = userRows[0]?.kyc_status as string;
+  return kycStatus === 'verified' ? VELOCITY_LIMITS.verified_user : VELOCITY_LIMITS.new_user;
+}
+
+/**
+ * Read-only velocity preview. **This is not an admission control.**
+ *
+ * It answers "would this amount be allowed if it were attempted now", which is
+ * useful for a draft or quote step that moves no money. It must never be used
+ * to gate a balance movement, and must never be paired with
+ * `recordVelocity()` to do so: the read and the write are separate statements
+ * on separate snapshots, so two concurrent payers both observe headroom that
+ * only one of them can have (CWE-367). Every money path admits through
+ * `admitVelocity()` instead, and
+ * `lib/__tests__/velocity-admission-callers.test.ts` fails if one does not.
+ *
+ * Deliberately has no `try/catch`, and no caller may add one: decision 0007
+ * requires a money path to refuse when velocity cannot be evaluated, and the
+ * error propagating is what implements that.
+ */
+export async function checkVelocityLimit(
+  userId: number,
+  amount: MinorUnits,
+  currency: string,
+  executor?: VelocityExecutor
+): Promise<{ allowed: boolean; reason?: string }> {
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Velocity amount must be positive integer minor units.');
+  // Validates currency without ever interpreting cents as major units.
+  parsePositiveMoney(toDatabaseDecimal(amount), currency);
+  const sql = executor ?? getSql();
+  const limits = await velocityLimitsFor(sql, userId);
+  // Shared with admitVelocity() rather than recomputed. These boundaries must
+  // agree across preview, admission and reversal: a reversal computed on a
+  // different boundary stops matching the rows admission wrote, so it releases
+  // nothing. Four copies of this definition existed before PR #75.
+  const [hourly, daily, weekly] = velocityWindows();
 
   const hourlyRows = await sql`
     SELECT COALESCE(SUM(total_amount), 0) as total FROM velocity_checks
     WHERE user_id = ${userId} AND window_type = 'hourly'
-      AND window_start >= ${hourStart.toISOString()} AND currency = ${currency}
+      AND window_start >= ${hourly.start.toISOString()} AND currency = ${currency}
   `;
   if (parseSignedDatabaseMoney(String(hourlyRows[0]?.total ?? '0'), currency) + amount > limits.hourly_max_amount * 100) {
     return { allowed: false, reason: `Hourly limit of ${currency} ${limits.hourly_max_amount.toLocaleString()} exceeded` };
@@ -201,7 +271,7 @@ export async function checkVelocityLimit(
     SELECT COALESCE(SUM(total_amount), 0) as total, COALESCE(SUM(transaction_count), 0) as count
     FROM velocity_checks
     WHERE user_id = ${userId} AND window_type = 'daily'
-      AND window_start >= ${dayStart.toISOString()} AND currency = ${currency}
+      AND window_start >= ${daily.start.toISOString()} AND currency = ${currency}
   `;
   if (parseSignedDatabaseMoney(String(dailyRows[0]?.total ?? '0'), currency) + amount > limits.daily_max_amount * 100) {
     return { allowed: false, reason: `Daily limit of ${currency} ${limits.daily_max_amount.toLocaleString()} exceeded` };
@@ -213,7 +283,7 @@ export async function checkVelocityLimit(
   const weeklyRows = await sql`
     SELECT COALESCE(SUM(total_amount), 0) as total FROM velocity_checks
     WHERE user_id = ${userId} AND window_type = 'weekly'
-      AND window_start >= ${weekStart.toISOString()} AND currency = ${currency}
+      AND window_start >= ${weekly.start.toISOString()} AND currency = ${currency}
   `;
   if (parseSignedDatabaseMoney(String(weeklyRows[0]?.total ?? '0'), currency) + amount > limits.weekly_max_amount * 100) {
     return { allowed: false, reason: `Weekly limit of ${currency} ${limits.weekly_max_amount.toLocaleString()} exceeded` };
@@ -222,22 +292,160 @@ export async function checkVelocityLimit(
   return { allowed: true };
 }
 
-export async function recordVelocity(userId: number, amount: MinorUnits, currency: string): Promise<void> {
+/**
+ * Atomically admit `amount` against the payer's rolling velocity budget.
+ *
+ * Replaces the `checkVelocityLimit()` → move money → `recordVelocity()`
+ * sequence every money path used to run. That sequence read the totals on one
+ * snapshot and wrote them later, with nothing holding the payer's rows in
+ * between, so two concurrent payments by one payer each saw the pre-payment
+ * total and both were admitted — a time-of-check/time-of-use race (CWE-367)
+ * on the control that bounds how much an account can move. The ceiling was
+ * enforced per request, not per account.
+ *
+ * The fix is ordering plus a lock that outlives the decision: **write first,
+ * then verify.**
+ *
+ *   1. Upsert the three window rows, incrementing count and amount. Each
+ *      upsert takes a row lock that PostgreSQL holds until the transaction
+ *      ends — not until the statement ends.
+ *   2. Re-read the window totals. Being after the write and in the same
+ *      transaction, this read sees this admission's own increments plus every
+ *      committed one.
+ *   3. Over budget → throw, which rolls the increments back with the payment.
+ *
+ * A concurrent admission for the same payer blocks at step 1 on the row this
+ * one holds, and resumes only once this transaction commits or aborts — so it
+ * increments on top of a settled total and step 2 refuses it if that puts the
+ * payer over. There is no window in which both observe the same headroom,
+ * because the total is published by the same commit that releases the lock.
+ * The previous design's lock, had one been added around the check alone, would
+ * have been released before `recordVelocity()` ran and protected nothing.
+ *
+ * Reading cannot be folded into the writing statement: a data-modifying CTE's
+ * effects are not visible to sibling CTEs in the same statement, so a single
+ * `INSERT ... RETURNING` + `SELECT SUM(...)` statement would verify against
+ * the pre-write snapshot. And `RETURNING` alone is not the window total —
+ * `reverseVelocity()` appends compensating rows with `transaction_count < 0`
+ * (which the partial unique index deliberately excludes), so a window is the
+ * sum of its rows, not one row. Hence two statements, in one transaction, in
+ * this order.
+ *
+ * Pass `executor` whenever the caller is already inside `sql.begin`, and do
+ * pass it on a money path: it is what makes consumption commit with the
+ * money — a rollback consumes no budget, and a commit cannot leave the money
+ * moved with the budget unconsumed. It is also required to avoid pool
+ * exhaustion; see `VelocityExecutor`. Without it, this opens its own
+ * transaction, which is atomic but commits consumption independently of
+ * whatever the caller does next.
+ *
+ * Deliberately has no `try/catch`, and no caller may add one — see decision
+ * 0007. If velocity cannot be evaluated, the money path must refuse.
+ *
+ * @throws {VelocityLimitError} if the admission would breach a ceiling.
+ */
+export async function admitVelocity(
+  userId: number,
+  amount: MinorUnits,
+  currency: string,
+  executor?: VelocityExecutor
+): Promise<void> {
   if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Velocity amount must be positive integer minor units.');
   parsePositiveMoney(toDatabaseDecimal(amount), currency);
-  const sql = getSql();
-  const amountDecimal = toDatabaseDecimal(amount);
-  const now = new Date();
-  const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
-  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
+  if (executor) return admitVelocityWithin(executor, userId, amount, currency);
+  return getSql().begin((tx) => admitVelocityWithin(tx as unknown as VelocityExecutor, userId, amount, currency)) as Promise<void>;
+}
 
-  for (const [windowType, windowStart] of [
-    ['hourly', hourStart] as const,
-    ['daily', dayStart] as const,
-    ['weekly', weekStart] as const,
-  ]) {
+async function admitVelocityWithin(
+  sql: VelocityExecutor,
+  userId: number,
+  amount: MinorUnits,
+  currency: string,
+): Promise<void> {
+  const limits = await velocityLimitsFor(sql, userId);
+  const amountDecimal = toDatabaseDecimal(amount);
+  const windows = velocityWindows();
+
+  // Step 1 — claim. Row locks taken here are held to transaction end.
+  for (const { type, start } of windows) {
+    await sql`
+      INSERT INTO velocity_checks (user_id, window_start, window_type, transaction_count, total_amount, currency)
+      VALUES (${userId}, ${start.toISOString()}, ${type}, 1, ${amountDecimal}, ${currency})
+      ON CONFLICT (user_id, window_type, window_start, currency) WHERE transaction_count >= 0
+      DO UPDATE SET
+        transaction_count = velocity_checks.transaction_count + 1,
+        total_amount = velocity_checks.total_amount + EXCLUDED.total_amount,
+        updated_at = NOW()
+    `;
+  }
+
+  // Step 2 — verify the post-claim totals, including this claim.
+  const [hourly, daily, weekly] = windows;
+  const rows = await sql`
+    SELECT window_type,
+           COALESCE(SUM(total_amount), 0) AS total,
+           COALESCE(SUM(transaction_count), 0) AS count
+    FROM velocity_checks
+    WHERE user_id = ${userId} AND currency = ${currency}
+      AND (
+        (window_type = 'hourly' AND window_start >= ${hourly.start.toISOString()})
+        OR (window_type = 'daily' AND window_start >= ${daily.start.toISOString()})
+        OR (window_type = 'weekly' AND window_start >= ${weekly.start.toISOString()})
+      )
+    GROUP BY window_type
+  `;
+  const totals = new Map<string, { total: MinorUnits; count: number }>();
+  for (const row of rows) {
+    totals.set(String(row.window_type), {
+      total: parseSignedDatabaseMoney(String(row.total ?? '0'), currency),
+      count: parseInt(String(row.count ?? '0'), 10),
+    });
+  }
+  const windowOf = (type: string) => totals.get(type) ?? { total: 0, count: 0 };
+
+  // Step 3 — refuse by throwing, so the claim above rolls back.
+  if (windowOf('hourly').total > limits.hourly_max_amount * 100) {
+    throw new VelocityLimitError(`Hourly limit of ${currency} ${limits.hourly_max_amount.toLocaleString()} exceeded`);
+  }
+  if (windowOf('daily').total > limits.daily_max_amount * 100) {
+    throw new VelocityLimitError(`Daily limit of ${currency} ${limits.daily_max_amount.toLocaleString()} exceeded`);
+  }
+  if (windowOf('daily').count > limits.daily_max_count) {
+    throw new VelocityLimitError(`Daily transaction count limit of ${limits.daily_max_count} exceeded`);
+  }
+  if (windowOf('weekly').total > limits.weekly_max_amount * 100) {
+    throw new VelocityLimitError(`Weekly limit of ${currency} ${limits.weekly_max_amount.toLocaleString()} exceeded`);
+  }
+}
+
+/**
+ * Low-level, unconditional velocity write.
+ *
+ * **Not for a money path.** Writing without verifying is half of the race
+ * `admitVelocity()` exists to close; pairing this with
+ * `checkVelocityLimit()` reproduces it exactly. It remains exported because
+ * `reverseVelocity()` is its counterpart and the pair is covered by
+ * `velocity.test.ts`, and because a future non-money accounting caller may
+ * legitimately want to record volume it has already authorized by other
+ * means. `lib/__tests__/velocity-admission-callers.test.ts` fails if a money
+ * path calls it.
+ */
+export async function recordVelocity(
+  userId: number,
+  amount: MinorUnits,
+  currency: string,
+  executor?: VelocityExecutor
+): Promise<void> {
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new MoneyValidationError('Velocity amount must be positive integer minor units.');
+  parsePositiveMoney(toDatabaseDecimal(amount), currency);
+  // Passing the caller's transaction makes the record commit WITH the payment:
+  // a rollback leaves no consumed budget, and a successful commit cannot leave
+  // the payment recorded but the budget unconsumed. Without it the two land
+  // separately and a failure here reports 500 for a payment that succeeded.
+  const sql = executor ?? getSql();
+  const amountDecimal = toDatabaseDecimal(amount);
+
+  for (const { type: windowType, start: windowStart } of velocityWindows()) {
     // Single atomic upsert. This was previously an INSERT ... ON CONFLICT DO
     // NOTHING followed by an unconditional UPDATE, which counted the first
     // transaction of every window twice: the INSERT seeded the row with
@@ -317,18 +525,9 @@ export async function reverseVelocity(
   // original transaction timestamp, which this signature does not carry; the
   // clamp below keeps the effect conservative in the meantime.
   const reversalAmount = Math.min(amount, MAX_SINGLE_TRANSFER_AMOUNT * 100);
-  const now = new Date();
-  const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
-  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay()); weekStart.setHours(0, 0, 0, 0);
 
   try {
-    for (const [windowType, windowStart] of [
-      ['hourly', hourStart] as const,
-      ['daily', dayStart] as const,
-      ['weekly', weekStart] as const,
-    ]) {
+    for (const { type: windowType, start: windowStart } of velocityWindows()) {
       // A window's recorded volume can never be driven below zero: a reversal
       // releases at most what that window currently holds.
       const recorded = await sql`

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser, auditLog } from '@/lib/auth';
+import { getAuthUser, auditLog, VelocityLimitError } from '@/lib/auth';
 import { createNotification } from '@/lib/notifications';
 import { paySplitPortion, SplitPaymentError } from '@/lib/splits';
 import { getSql } from '@/lib/db';
@@ -71,6 +71,13 @@ export async function POST(
 
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
+    // 429 matches what every other money path returns when the velocity
+    // ceiling is hit, so a client sees one status for one meaning. The
+    // admission inside paySplitPortion() has already rolled back, so no
+    // balance moved and the portion is still owed.
+    if (err instanceof VelocityLimitError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 429 });
+    }
     if (err instanceof SplitPaymentError) {
       const status =
         err.code === 'NOT_PARTICIPANT' ? 403

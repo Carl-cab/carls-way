@@ -29,13 +29,34 @@ async function ensureTable() {
   `;
 }
 
+// Only the ids this file creates. Everything below was `TRUNCATE
+// provider_webhook_events`, which is two isolation faults in one statement on
+// a suite that shares one database: it destroyed rows belonging to other test
+// files, and it left this file's own rows behind for whoever ran next.
+//
+// The second fault is the one that bit. `external-settlement-replay.test.ts`
+// counts stripe events in scope and expects the one it seeded; with
+// `evt_dupe_3` still present it saw two and three of its assertions failed.
+// On `master` that was invisible because `stripe-settlement.test.ts` deletes
+// `provider_event_id LIKE 'evt_%'` for its own reasons and happened to run in
+// between — one file's unrelated cleanup masking another file's leak, which
+// holds only as long as nobody changes the file order. Adding two test files
+// changed it.
+//
+// A scoped delete gives this file exactly what it needs — its own ids absent
+// before each test — without touching a row it did not write.
+const OWN_IDS = ['evt_dupe_1', 'evt_dupe_2', 'evt_dupe_3'];
+
+async function removeOwnRows() {
+  const sql = getSql();
+  await sql`DELETE FROM provider_webhook_events WHERE provider_event_id IN ${sql(OWN_IDS)}`;
+}
+
 describe('recordProviderEvent duplicate detection', () => {
   beforeAll(ensureTable);
 
-  beforeEach(async () => {
-    const sql = getSql();
-    await sql`TRUNCATE provider_webhook_events`;
-  });
+  beforeEach(removeOwnRows);
+  afterAll(removeOwnRows);
 
   it('returns true on first delivery', async () => {
     await expect(

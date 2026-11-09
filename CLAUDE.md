@@ -77,6 +77,13 @@ Client (React 19)
 | `scripts/reconciliation-check.sql` | The same reconciliation query `lib/internal-reconciliation.ts` runs, as a psql-runnable file, because that module has no CLI entry point and its cron route must not be pointed at a restore target. A **second source of one query**, so `lib/__tests__/reconciliation-sql-parity.test.ts` requires both to produce identical names, counts and statuses. Edit the two together. All seven rows must report `PASS` — and note `completed_internal_payments_in_scope` is a scope counter hardcoded `'PASS'`, not an invariant |
 | `.gitleaks.toml` | Secret-scanning config. The allowlist is keyed on the exact synthetic literal, never a path — a path exemption would also hide a real credential pasted into that file later |
 | `.github/workflows/codeql.yml` | CodeQL SAST, kept separate from `ci.yml` so `security-events: write` is not granted to the job running the test suite |
+| `lib/splits.ts` | Bill splitting. `paySplitPortion()` is a **money-moving path**: it debits the payer, credits the creator, writes a ledger pair, and gates on `admitVelocity()`. Two rules, both learned by getting them wrong: the admission call must stay **unwrapped** (fail-closed, decision 0007 — and a `catch` would also swallow `VelocityLimitError`, turning a refusal into an admission), and it must be passed **`tx`** — see the `max: 5` pool note below |
+| `lib/__tests__/split-pay-velocity.test.ts` | Pins the split-pay volume control against a real database: consumes budget, admits on the transaction, refuses over the ceiling, **fails closed when velocity cannot be evaluated**, **releases the claim when a later step of the payment fails**, and **does not exhaust the 5-connection pool under concurrent payments**. Mutation-checked; the pool case *hangs* rather than fails when the `tx` argument is dropped |
+| `lib/__tests__/velocity-admission.test.ts` | Pins `admitVelocity()` itself. Its central case asserts the **lock**, not a race: it holds one admission's transaction open and requires the second to be unable to reach a decision. The obvious version — two concurrent admissions, assert one wins — was written first and **passed under the read-then-write mutation**, because whether they interleave is up to the scheduler. Do not replace it with that. Also covers CAD/USD budget isolation, window rollover (a previous hour is out of scope hourly and still counted daily), the daily-count, daily-amount and weekly-amount ceilings, and that `reverseVelocity()`'s compensating rows actually **release headroom** — which they do only because admission sums all rows in a window instead of reading the row it upserted |
+| `lib/__tests__/money-path-velocity-status.test.ts` | `money:send` and request-accept answer **429**, not 500, when admission refuses — and admission is called with the transaction's own executor, so a refusal reaches no later statement. These catch branches are new with decision 0008 on paths that had no route test; dropping either makes three cases fail with "expected 500 to be 429". Also pins 400 for `INSUFFICIENT_BALANCE`, 409 for `ALREADY_PROCESSED` and 500 for an unexpected fault, since all of them share one `catch` |
+| `lib/__tests__/velocity-admission-callers.test.ts` | Static guard, in the manner of the workflow-pinning test: no money path may call `checkVelocityLimit()` (one allowlisted preview call site) or `recordVelocity()`, and every `admitVelocity()` call must pass an executor. It strips comments **and quoted strings** before grepping — `app/api/migrate/route.ts` names `recordVelocity()` in an operator error message |
+| `lib/__tests__/split-pay-route-status.test.ts` | Pins the route's status contract, which the file above cannot: it calls `paySplitPortion()` directly, so a regression mapping `VELOCITY_EXCEEDED` to 400 instead of **429** would have stayed green. Also pins 403/409/409/400 for the other codes and **500 for a non-`SplitPaymentError`**, so a velocity-evaluation failure is never reported as the caller's fault |
+| `lib/__tests__/provider-event-duplicates.test.ts` | Duplicate-webhook detection. Its `beforeEach` was `TRUNCATE provider_webhook_events` — on a **shared** table, which destroyed other files' rows *and* left its own behind. Now a delete scoped to its own ids. Keep it scoped: the leak was invisible only because another file's unrelated cleanup happened to run in between |
 | `lib/__tests__/workflow-action-pinning.test.ts` | Asserts every action in `.github/workflows/` is pinned to a 40-hex commit SHA. Nothing else in typecheck, lint or the build reads a YAML file, so an unpinned action would reach `master` with six green checks |
 
 ---
@@ -226,6 +233,28 @@ yarn lockfile back.
 
 **Branching:** Feature branches off `master`. The `documentation/handoff-package` branch contains all handoff docs. Vercel auto-deploys on every push to `master`.
 
+**A stacked PR gets no CI, and the PR page does not say so.** Both `ci.yml` and
+`codeql.yml` trigger on `branches: [master, 'integration/**']`, which filters
+the **base** of a `pull_request`. A PR targeting another feature branch — as
+PR #75 targets #74's branch, on purpose, so a known defect is never deployed
+alone — therefore runs no tests, no dependency audit, no secret scan and no
+CodeQL. **CodeRabbit's automatic review is skipped too**, in its own words:
+"Auto reviews are disabled on base/target branches other than the default
+branch." So a stacked PR loses *both* safety nets, and its checks list shows
+only Vercel plus a skipped CodeRabbit run — which looks like a short list
+rather than an absent one. This is the same failure mode as reading
+"ALL GREEN 1/1" as green: **nothing pending is not the same as something
+passed.** The review has to be asked for explicitly with
+`@coderabbitai review`, and **do not push while it runs** — a push aborts it
+with "Head commit changed", which has now happened twice in this repo.
+
+Those workflows also fire on **push** to `integration/**`, so the way to get
+real evidence for a stacked head is to push that exact commit to an
+`integration/<topic>` branch and read the run. It uses a pattern the workflows
+already bless, needs no change to CI permissions, and creates no second merge
+path into `master`. Name the SHA when reporting the result, because the
+evidence belongs to the commit and not to the PR.
+
 **Schema changes:** When adding a table or column, update **three** places:
 1. `lib/db.ts` → `initializeSchema()` — so fresh environments get it on first boot.
 2. `app/api/migrate/route.ts` → `ALTER TABLE … ADD COLUMN IF NOT EXISTS` or
@@ -247,10 +276,22 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **61 files /
-907 tests** — measured on `master` at `e0f3f0d`, the tip after Sprint 1's five
-PRs, on a database created fresh for the run with the CI fixture applied; all
-907 pass. Not carried over from either side of a merge: the branches had
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **66 files /
+943 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 943 pass. The baseline on `master` at `403acf1` is
+**61 / 907**, and the difference belongs to this branch, which is **not yet
+merged to `master`**: `split-pay-velocity.test.ts` (9) and
+`split-pay-route-status.test.ts` (6) when `money:split-pay` was brought under
+the velocity control, plus `velocity-admission.test.ts` (12),
+`velocity-admission-callers.test.ts` (3) and
+`money-path-velocity-status.test.ts` (7) from **PR #75, merged into this
+branch as `3d6769a`**, which also rewrote the first of the other two.
+A further **67 / 965** is measured on `sec/claim-bounded-velocity-release`
+(PR #77, stacked on this branch and *not* validated yet), which adds
+`velocity-claim-release.test.ts` (26) and three domain guards while deleting
+the eight-case `reverseVelocity` block — so do not read 965 as this branch's
+number. Several of all of these exist for defects the first implementations
+shipped. Not carried over from either side of a merge: the branches had
 written 844 and 836 here and the merge conflicted on exactly this sentence,
 and resolving it by measuring is the only way the number means anything. It
 then read 901 for one more change, which was itself six tests stale — the same
@@ -323,6 +364,7 @@ them is how a session ends up acting on a stale claim:
 | `CURRENT_STATUS.md` | Verified state of the application and remaining blockers | Carries the commit it was verified against |
 | `PROJECT_MEMORY.md` | Chronological progress, decisions, merges, lessons learned | Append-only. Correct an old entry by appending, never by editing history |
 | `PRODUCTION_READINESS_BACKLOG.md` | Prioritized tasks, each with an **owner** and **acceptance criteria** | Re-mark an item only when a change verifies it, naming the evidence |
+| `scripts/status/readiness.json` | Current state per requirement: a `name`, a `status`, and an evidence body | Holds **current** state, so it is rewritten when behaviour changes rather than extended with contradictory history. **A row's name and status must be true on their own**, because `scripts/status/report.mjs` renders them into a table and the evidence body is what a reader skips. **Render the report and read it** before claiming the file is correct — editing fields in isolation misses the two things that actually mislead: a name whose scope its own evidence contradicts, and a *neighbouring* row left asserting what this change just made false |
 | `GO_LIVE_RUNBOOK.md` | The current operational go/no-go procedure | Carries the commit and date it was verified against. **Every unchecked box must be genuinely unchecked**, and a checked box names its evidence. Re-anchor on every revision |
 | `docs/decisions/NNNN-<slug>.md` | Architectural decision records | One decision per file, numbered. Supersede by adding a new record, not by rewriting one |
 | `docs/audits/<date>-<topic>.md` | Dated, command-level audit evidence with commit SHAs and test results | **Immutable.** A later finding goes in a new audit or an explicitly marked addendum, never over the original |
@@ -393,7 +435,55 @@ made only in `lib/providers/TransferProviderFactory.ts`.
 **Rules:**
 - Both sandbox providers are execution_mode='sandbox' — no real bank/external API calls
 - `executeTransfer()` throws on both sandbox providers — prevents accidental live calls
-- Velocity is checked at intent creation but only recorded at confirm (future: at execute)
+- Velocity is **previewed** at intent creation and admitted nowhere on this
+  rail. The line here used to say "recorded at confirm"; that was never true —
+  no confirm or execute route has ever written velocity, so a transfer
+  consumes no budget at all, while sandbox confirm does move the platform
+  balance. Open gap, listed below; deliberately not fixed by decision 0008,
+  which was scoped to the three paths that had the TOCTOU
+- **Every balance-moving path must call `admitVelocity()` inside its money
+  transaction, passing `tx`.** It is one atomic operation, not a check now and
+  a record later. That older shape — `checkVelocityLimit()`, move money,
+  `recordVelocity()` — is the TOCTOU (CWE-367) decision 0008 closed: the read
+  and the write sat on separate snapshots with nothing holding the payer's
+  rows between them, so two concurrent payments by one payer both saw the
+  pre-payment total and both were admitted. The ceiling bounded a request, not
+  an account. `admitVelocity()` claims first and verifies after, under row
+  locks held to commit; a refusal **throws** `VelocityLimitError`, which rolls
+  the claim back, and every money route maps that to **429**.
+  `checkVelocityLimit()` survives only as a non-binding preview with exactly
+  one permitted caller (`POST /api/transfers/intent`, which moves no money);
+  `recordVelocity()` must not be called from a money path at all.
+  `lib/__tests__/velocity-admission-callers.test.ts` fails if either rule is
+  broken, because the defect was a *shape* copied from path to path rather
+  than a bug in one function.
+  `money:split-pay` had no velocity control of any kind until 2026-10-26 — it
+  moved money with no durable volume control, and its volume was invisible to
+  every other path's budget. The lesson is where the control lives: velocity
+  was enforced in *routes*, so a path whose money movement sat in a library
+  function (`paySplitPortion()`) was simply missed. Put the gate next to the
+  movement, so a new caller inherits it
+- **A velocity call made from inside `sql.begin` MUST be passed the
+  transaction (`tx`).** `lib/db.ts` sets **`max: 5`**. A caller holding a pool
+  connection inside a transaction that lets `checkVelocityLimit()` or
+  `recordVelocity()` fall back to `getSql()` is asking the same 5-connection
+  pool for a second connection while holding one; five such requests in flight
+  hold all five and each waits for a sixth, so none finishes and releases.
+  **The pool deadlocks and every query on that instance stalls**, not only the
+  money path. `paySplitPortion()` shipped that shape for one commit on this
+  branch; reverting the `tx` argument makes
+  `split-pay-velocity.test.ts`'s concurrency case hang rather than fail an
+  assertion, which is what the bug does to a request. Both functions take an
+  optional `executor` (`VelocityExecutor`, the same `postgres.ISql` shape as
+  `LedgerExecutor`), so passing `tx` is always available.
+  Passing `tx` to `admitVelocity()` also makes consumption commit **with** the
+  payment: a rollback consumes no budget, and a commit cannot leave the money
+  moved with the budget unconsumed. The old post-commit `recordVelocity()`
+  form had its own failure mode — its writes ran after the money moved, so a
+  failure returned 500 for a payment that had succeeded, with no recovery
+  path. **All three balance-moving paths now admit inside their transaction,
+  so that window is closed** (it was open on `money:send` and request-accept
+  until decision 0008)
 - Sandbox `confirmTransfer()` settles the platform balance atomically via `lib/providers/sandbox-settlement.ts` — the ONLY transfer path allowed to mutate a balance, and only while `execution_mode='sandbox'`. Live providers will move balances through the settlement engine instead.
 - CA users see "Canadian transfer simulation" language — never ACH language
 - US users see "US transfer simulation" language
@@ -473,6 +563,80 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
+- **The transfer-intent route refuses funding on the P2P outbound budget.**
+  `app/api/transfers/intent/route.ts` gates **both** `add_money` and
+  `cash_out` on `checkVelocityLimit()`, which sums `velocity_checks` — the P2P
+  **outbound** pool — and returns **429**, so the intent is not created. A
+  user who has spent their P2P budget therefore cannot top up their wallet,
+  even though funding is **inbound** value that decision 0009 gives its own
+  budget. Inbound value refused by an outbound ceiling.
+  That route's comment says the call is "Advisory velocity preview, NOT an
+  admission … nothing is granted on the strength of this answer" — true about
+  *granting*, **false about refusing**. A 429 is returned and nothing is
+  created, so it is binding in the refusal direction.
+  **DECIDED 2026-11-09 — option C, and the gate stays until its replacement
+  exists.** The owner chose separate budgets for funding, P2P outbound and
+  withdrawals, and an exhausted P2P budget must not stop a legitimate funding
+  intent. But the refusal is **not** removed first: it operates today, and
+  deleting it before a verified funding-specific control exists would replace a
+  control with nothing. The required order, in the implementation PR, is in
+  `docs/decisions/0009` under "The cross-domain intent gate" — introduce the
+  funding admission, validate it against real balance movement and claim
+  creation, *then* remove this gate, then test funding with P2P exhausted and
+  P2P with funding exhausted, and confirm no live route was enabled.
+  Withdrawals stay disabled, so `cash_out` keeps its refusal.
+  **So this gate is still in the tree, and still refuses.** Do not read the
+  decision as a description of current behaviour.
+  Found by review of PR #75; the general lesson is that
+  a domain rule has two halves — what may **write** a counter, and what may
+  **decide another domain's outcome by reading** it. The first version of that
+  rule had only the first half, which is why this survived it.
+
+- **`reverseVelocity()` can release budget the rail never consumed — and that
+  another path did.** `SettlementExecutor` calls it when a transfer is
+  `returned`. The rail holds no claim (next item), and the function releases
+  `min(amount, current window total)` where that total is the user's volume
+  from **every** path. So a returned transfer frees budget `money:send` or
+  `money:split-pay` genuinely spent. The abuse shape is plain: fund by
+  `add_money`, spend the credit through P2P, let the funding transfer return
+  NSF, recover outbound budget that was actually used. **Latent, not
+  reachable:** a `returned` status needs a provider webhook and both live flags
+  are off. It is a **prerequisite for enabling any rail**, independent of how
+  the next item is resolved — a release must be bounded by the claim being
+  released, identified by intent id, never by a window total. See
+  `docs/decisions/0009`.
+- **The transfer rail consumes no velocity budget.** `POST
+  /api/transfers/intent` runs a non-binding preview; no confirm or execute
+  route has ever written velocity, despite a comment in the intent route that
+  claimed it was "recorded at confirm". Sandbox confirm does move the platform
+  balance, so this is a balance-moving path with no durable volume control —
+  the same gap `money:split-pay` had until 2026-10-26, on a different rail.
+  Deliberately out of scope for decision 0008, which fixed the ordering defect
+  on the three paths that already had a control; adding one here is a
+  financial-behaviour change (it decides whether a transfer consumes budget at
+  intent, confirm or execute) and belongs with the rail work.
+  `docs/decisions/0009` is the architecture — reserve at confirm, finalize at
+  verified settlement, release only the matching claim, with **separate funding
+  and withdrawal budgets**. **Accepted as architecture only** (owner,
+  2026-11-08), with its parameters set 2026-11-09: the finalized-claim capacity
+  window is **60 calendar days** for US ACH consumer funding anchored to
+  provider-confirmed settlement time, and **90 calendar days** for Canadian
+  personal-account PAD anchored to the provider-confirmed debit date, with the
+  verified settlement date as a conservative fallback. Expiry is
+  **timestamp-driven**, evaluated in the capacity query, never by a cleanup
+  job. Those are funding-capacity windows and **not** liability horizons —
+  longer statutory, network, warranty and contractual exposures remain
+  identifiable and need provider and legal review before live activation.
+  **Accepted and parameterised is still not implemented**: no code in any
+  branch creates, finalizes or releases a transfer-rail claim, and live funding
+  and withdrawal ceilings are **zero** (`0010`). Two findings from it are worth
+  carrying here. On the live rail
+  **settlement is too late to refuse**: the provider has already moved the money
+  at the bank, so a control that first speaks at settlement can record but not
+  say no. And because a transaction must never be held open across a provider
+  call, the live rail's invariant cannot be "the claim commits with the money"
+  — it is "reserved before the external call, reconciled after", which makes
+  reconciliation part of the control rather than a net beside it.
 - `AdminAuditService.verifyImmutability()` returns a hardcoded
   `verification_status: 'clean'` with `total_logs_checked: 0`. Nothing calls
   it, so no path trusts the false answer. A real implementation exists at
@@ -560,8 +724,44 @@ arbitrary end user.
   PostgreSQL — which this endpoint always has, since it cannot run without
   `DATABASE_URL` — is the real fix, and needs a counter table created ahead of
   the migration that it limits, so it belongs with Phase 2.
-- **Fail-closed by risk class is an open owner decision, with a
-  recommendation.** When shared rate limiting is lost — Redis unreachable, or
+- **Fail-closed by risk class — DECIDED 2026-10-26 for the money buckets,
+  still open for the rest.** The owner **accepted** keeping all three money
+  buckets **fail-open** on Redis loss (`docs/decisions/0007`, status Accepted),
+  with a fail-closed requirement in the other direction: **if `velocity_checks`
+  cannot be evaluated atomically, the money path must refuse.**
+
+  **That requirement is now implemented and pinned on all three
+  balance-moving paths (decision 0008, 2026-11-07).** `admitVelocity()` has no
+  `try/catch`, no caller wraps it, and a refusal throws rather than returning,
+  so an evaluation failure and a breached ceiling both abort the transaction
+  before any balance moves. A `catch` added "to be resilient" would now invert
+  the requirement *and* swallow `VelocityLimitError`, turning a refusal into
+  an admission. `lib/__tests__/split-pay-velocity.test.ts` and
+  `lib/__tests__/velocity-admission.test.ts` fail on exactly that mutation.
+  This paragraph read "holds in effect today only *incidentally*… with no
+  explicit branch" and listed `money:send` and request-accept as unpinned;
+  both are now routed through the same admission and covered by the same
+  tests.
+
+  **The remaining path is the transfer rail**, which consumes no budget
+  anywhere: `POST /api/transfers/intent` previews, and no confirm or execute
+  route has ever written velocity. That is an absent control, not an unpinned
+  one, and it is listed separately below.
+
+  **One premise of the 0007 decision was false for one bucket, and is fixed.**
+  `lib/splits.ts` contained **zero** velocity references: `paySplitPortion()`
+  debited the payer and credited the creator calling no velocity function at
+  all, so `money:split-pay` had no durable volume control behind the rate
+  limit and its volume never entered `velocity_checks` to consume any other
+  path's budget. **Resolved 2026-10-26 (owner-authorized option A):** the gate
+  lives *inside* `paySplitPortion()`, not in the route — the amount is read
+  from `split_participants` under `FOR UPDATE`, so the amount checked is
+  exactly the amount about to move, and any future caller inherits the
+  control. A velocity refusal maps to **429**, as on every other money path.
+  The first implementation shipped the same check-then-record shape as the
+  rest; decision 0008 replaced it on all three paths.
+
+  When shared rate limiting is lost — Redis unreachable, or
   no usable client header — every bucket currently fails *open*: the request is
   served under a weaker or collapsed limit. Whether that is right depends on
   the bucket, and the two failure modes are not symmetrical:
@@ -575,13 +775,22 @@ arbitrary end user.
   | `schema:migrate-operator` | admin id | `6 × instances` | unaffected | leave fail-open — see the Release 1.0 lockout note above |
   | `schema:bootstrap` | client | `N × instances` | **global** — any anonymous caller can exhaust the break-glass for everyone | leave fail-open; refusing recreates the lockout this path exists to break |
 
-  The money buckets are the only genuine dilemma, and it is a business
-  judgement, not an engineering one: silently losing shared velocity protection
-  versus refusing legitimate payments during a Redis outage. **Not implemented
-  either way** — doing so unilaterally would either weaken a financial control
-  or interrupt customers. The buckets keyed on an authenticated user id are
-  unaffected by header loss, which narrows the question to Redis availability
-  alone.
+  The money buckets were the only genuine dilemma, and it was a business
+  judgement rather than an engineering one: silently losing shared velocity
+  protection versus refusing legitimate payments during a Redis outage.
+  **DECIDED — the owner accepted fail-open for all three on 2026-10-26**, so
+  the "Recommended" column above is now the policy, not a proposal. This
+  paragraph read "**Not implemented either way**" until then, two paragraphs
+  below the line recording the acceptance, which is exactly the drift this
+  file's governance rule exists to stop.
+
+  What remains open is **observability, not policy**: nothing scrapes
+  `rateLimitBackendHealth()`, so a silent demotion to per-instance counting is
+  still indistinguishable from normal operation; sustained degradation has no
+  alert and no named owner; and moving the three money counters to PostgreSQL
+  would remove the dilemma rather than settle it. The buckets keyed on an
+  authenticated user id are unaffected by header loss, which narrowed the
+  question to Redis availability alone.
 
 - Historical `provider_webhook_events.raw_payload` rows hold string scalars.
   **Both current writers are correct** (`recordProviderEvent` and
@@ -655,7 +864,7 @@ curl -s -X POST https://carloscab74.vercel.app/api/plaid/create-link-token \
 | `webhook_dead_letters` | Payloads of webhook events that exhausted their retries, for operator review and requeue |
 | `plaid_transfer_event_cursors` | Sync position for `TRANSFER_EVENTS_UPDATE`. Missing means the Plaid Transfer webhook cannot persist its position and answers 500 |
 | `transfer_recovery_flags` | Marks intents needing reconciliation |
-| `splits` / `split_participants` | Split payments and each participant's portion |
+| `splits` / `split_participants` | Split payments and each participant's portion. Paying a portion moves real balances, writes a ledger pair, **and since 2026-10-26 checks and records velocity** |
 | `admin_users` / `admin_roles` / `admin_permissions` / `role_permissions` / `admin_sessions` / `admin_audit_logs` | Admin RBAC. A separate auth context from `users`, not a flag on a customer row |
 
 The authoritative list is whatever `initializeSchema()` builds; `scripts/verify-migrate.sql` checks a live database against it.
@@ -687,7 +896,17 @@ which a balance-rewriting migration gets applied twice.
 
 ## Deployment Notes
 
-**Platform:** Vercel (Hobby plan). Serverless functions for API routes, Edge Middleware for `proxy.ts`.
+**Platform:** Vercel, **Pro** plan — team `cocopiuf-laa-projects1`, project
+`carlos_cab74`, with **Fluid Compute enabled**. Serverless functions for API
+routes, Edge Middleware for `proxy.ts`. This line read "Hobby plan" until
+2026-10-26, which was wrong and had been reasoned from: a withdrawn claim in
+`docs/decisions/0007` argued the rate-limit fallback multiplier was small
+"on Vercel's Hobby plan". The plan was wrong *and* the inference was invalid.
+Documented concurrency is **30,000 concurrent function executions** (Hobby and
+Pro alike), with a burst limit of 1,000 per 10 seconds per region. That is an
+**execution** ceiling and **not** an instance count — Fluid Compute lets
+invocations share an instance — so it must not be used to derive the
+in-process counter multiplier.
 
 **Auto-deploy:** Every push to `master` triggers a Vercel build and deployment automatically.
 

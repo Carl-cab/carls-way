@@ -1,4 +1,5 @@
 import { getSql } from '@/lib/db';
+import { admitVelocity } from '@/lib/auth';
 import { createLedgerPair } from '@/lib/ledger';
 import {
   type MinorUnits,
@@ -135,7 +136,17 @@ export function divideEvenly(totalAmount: MinorUnits, count: number): MinorUnits
 }
 
 export class SplitPaymentError extends Error {
-  readonly code: 'NOT_PARTICIPANT' | 'ALREADY_PAID' | 'SPLIT_CLOSED' | 'INSUFFICIENT_BALANCE';
+  readonly code:
+    | 'NOT_PARTICIPANT'
+    | 'ALREADY_PAID'
+    | 'SPLIT_CLOSED'
+    | 'INSUFFICIENT_BALANCE';
+  // There is no 'VELOCITY_EXCEEDED' member. A velocity refusal travels as
+  // `VelocityLimitError` from lib/auth.ts, which every money path's route maps
+  // to 429 — one error type for one condition across all of them, rather than
+  // each path re-encoding it. Translating it here would need a catch around
+  // the admission call, which decision 0007 forbids on this path.
+
   constructor(code: SplitPaymentError['code'], message: string) {
     super(message);
     this.name = 'SplitPaymentError';
@@ -168,7 +179,7 @@ export async function paySplitPortion(
 }> {
   const sql = getSql();
 
-  return (await sql.begin(async (tx) => {
+  const result = (await sql.begin(async (tx) => {
     const participantRows = await tx`
       SELECT sp.id, sp.amount_owed, sp.status, s.creator_id, s.currency, s.status AS split_status,
              s.description
@@ -202,6 +213,53 @@ export async function paySplitPortion(
     const amount = parsePositiveMoney(participant.amount_owed, participant.currency);
     const amountDecimal = toNarrowDatabaseDecimal(amount);
     const isUsd = participant.currency === 'USD';
+
+    // Durable volume control. Until 2026-10-26 this path had none: it moved
+    // money calling no velocity function at all, so
+    // `money:split-pay` was guarded only by the Redis rate limit, and its
+    // volume never entered `velocity_checks` to consume any other path's
+    // budget either. Decision 0007 assumed velocity_checks covered all three
+    // money buckets; this is what makes that true.
+    //
+    // The gate lives HERE and not in the route, deliberately, unlike the other
+    // money paths which check before opening their transaction. Two reasons.
+    // The amount is not supplied by the caller — it is read from
+    // `split_participants` under `FOR UPDATE OF sp` above — so checking it
+    // here means the amount checked is exactly the amount about to move, with
+    // no second read and no window between them. And putting the control next
+    // to the movement means a future caller of paySplitPortion() inherits it;
+    // the control living in routes is precisely why this path was missed.
+    //
+    // Admission is ONE atomic operation, not a check now and a record later.
+    // The first implementation here checked with checkVelocityLimit() and
+    // recorded with recordVelocity() after the move, which is the shape every
+    // money path had: two statements on two snapshots with nothing holding the
+    // payer's rows between them, so two concurrent portion payments by one
+    // payer both read the pre-payment total and both were admitted. The
+    // ceiling bounded a request, not an account. admitVelocity() claims first
+    // and verifies after, under row locks it holds to commit — see its
+    // doc comment. A refusal throws, which rolls the claim back with the
+    // payment.
+    //
+    // `tx` is passed deliberately, and an earlier commit got this wrong by
+    // letting the velocity read call getSql() for its own connection. That
+    // reasoned only about row locks — the velocity reads touch `users` and
+    // `velocity_checks`, which this transaction does not lock, so no lock
+    // conflict exists — and missed the pool entirely. `lib/db.ts` sets
+    // `max: 5`, so five concurrent portion payments hold all five connections
+    // inside `sql.begin` and then each wait for a sixth for the velocity read.
+    // None can finish and release. The pool deadlocks and stalls every query
+    // on the instance, not just this path. Running the read on `tx` uses the
+    // connection already held, so the second acquisition never happens.
+    //
+    // It is deliberately NOT wrapped in try/catch: decision 0007 requires the
+    // money path to FAIL CLOSED when velocity cannot be evaluated. A throw
+    // here aborts the transaction before any balance is touched. Wrapping this
+    // to "be resilient" would silently convert a required fail-closed into
+    // fail-open — and would also catch VelocityLimitError, turning a refusal
+    // into an admission. The route maps that error to 429; it does not travel
+    // as a SplitPaymentError, so no catch is needed here to translate it.
+    await admitVelocity(payerId, amount, participant.currency, tx);
 
     // Balance guard lives in the UPDATE itself: two simultaneous debits cannot
     // both pass a separate check-then-write.
@@ -286,6 +344,16 @@ export async function paySplitPortion(
       splitStatus = 'settled';
     }
 
+    // No velocity write here. Consumption happened at admission, above, on
+    // `tx` — so it commits with the payment it belongs to: a rollback leaves
+    // no consumed budget, and a commit cannot leave the payment written with
+    // the budget unconsumed. Two earlier versions of this path wrote here
+    // instead. The first wrote after `sql.begin` returned, matching the other
+    // money paths, which meant three uncaught writes running after the money
+    // had already moved — a failure there returned 500 for a payment that had
+    // succeeded, with no recovery path and the payer's budget unconsumed. The
+    // second moved the write onto `tx`, which fixed that but still left the
+    // claim after the decision, so the race remained.
     return { transactionId, amountPaid: minorUnitsToMajorNumber(amount), splitStatus, remainingParticipants };
   })) as unknown as {
     transactionId: number;
@@ -293,6 +361,8 @@ export async function paySplitPortion(
     splitStatus: SplitStatus;
     remainingParticipants: number;
   };
+
+  return result;
 }
 
 export interface SplitWithParticipants extends SplitRecord {

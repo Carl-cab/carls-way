@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
-import { getAuthUser, checkVelocityLimit, recordVelocity, auditLog, sanitizeString } from '@/lib/auth';
+import { getAuthUser, admitVelocity, VelocityLimitError, auditLog, sanitizeString } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
@@ -107,11 +107,9 @@ export async function POST(req: NextRequest) {
     const amountDecimal = toDatabaseDecimal(amountMinor);
 
     if (type === 'pay') {
-      // Velocity check
-      const velocityCheck = await checkVelocityLimit(user.userId, amountMinor, senderCurrency);
-      if (!velocityCheck.allowed) {
-        return NextResponse.json({ error: velocityCheck.reason }, { status: 429 });
-      }
+      // Velocity is admitted inside the money transaction below, not here.
+      // Checking here and recording after the commit was the race this moved
+      // to fix; see the admission call site.
 
       // Balance check
       const senderBalance = parseDatabaseMoney(
@@ -145,6 +143,25 @@ export async function POST(req: NextRequest) {
       let txId: number;
       try {
         txId = await sql.begin(async (tx) => {
+          // Atomic velocity admission, inside the money transaction and on
+          // `tx`. This used to be a checkVelocityLimit() here-ish (before the
+          // transaction opened) and a recordVelocity() after it committed —
+          // two statements on two snapshots with nothing holding the payer's
+          // rows between them, so two concurrent sends by one payer both read
+          // the pre-send total and both were admitted. Claiming inside the
+          // transaction makes consumption commit with the money and rollback
+          // release it, and removes the post-commit write that returned 500
+          // for a payment that had already succeeded.
+          //
+          // `tx` is required, not an optimization: `lib/db.ts` sets `max: 5`,
+          // so letting this acquire its own connection while holding one
+          // deadlocks the pool under concurrency.
+          //
+          // Deliberately not wrapped in try/catch — decision 0007 requires
+          // this path to refuse when velocity cannot be evaluated, and
+          // VelocityLimitError must reach the handler below to become a 429.
+          await admitVelocity(user.userId, amountMinor, senderCurrency, tx);
+
           const debited = senderCurrency === 'USD'
             ? await tx`UPDATE users SET balance_usd = balance_usd - ${amountDecimal}
                        WHERE id = ${user.userId} AND balance_usd >= ${amountDecimal} RETURNING id`
@@ -222,10 +239,14 @@ export async function POST(req: NextRequest) {
         if (txErr instanceof Error && txErr.message === 'INSUFFICIENT_BALANCE') {
           return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
         }
+        // The admission rolled back with the transaction, so the refused send
+        // consumed no budget and moved no money.
+        if (txErr instanceof VelocityLimitError) {
+          return NextResponse.json({ error: txErr.message }, { status: 429 });
+        }
         throw txErr;
       }
 
-      await recordVelocity(user.userId, amountMinor, senderCurrency);
       await auditLog(user.userId, 'payment_sent', {
         receiverId: receiver.id,
         amount: minorUnitsToMajorNumber(amountMinor),
