@@ -108,6 +108,42 @@ describe('accounting domains stay separate', () => {
     expect(exposure).toMatch(/state\s*=\s*'reserved'/);
   });
 
+  it('the release keeps all THREE idempotency mechanisms, none of which any behavioural test pins', () => {
+    // Found by mutation testing during the validation of PR #77, and this is
+    // the reason the guard is static rather than behavioural.
+    //
+    // releaseVelocityClaim() is idempotent by three mechanisms:
+    //   1. SELECT ... FOR UPDATE, which serialises concurrent deliveries;
+    //   2. an early return when the locked row already reads 'released';
+    //   3. a conditional UPDATE ... WHERE state <> 'released'.
+    //
+    // They are genuinely 3-WAY REDUNDANT: any ONE of them alone makes a
+    // double release impossible. Measured — removing (1), (2) or (3)
+    // individually leaves all 73 cases in the velocity files GREEN, because
+    // the suite asserts the idempotent OUTCOME and the surviving mechanisms
+    // still deliver it.
+    //
+    // That redundancy is good design and a coverage hole at the same time.
+    // The realistic failure is a sequence, not a single edit: someone removes
+    // the conditional UPDATE as "redundant given FOR UPDATE", a later change
+    // removes FOR UPDATE as "redundant given the early return", and each step
+    // is individually green. Only the third removal breaks anything, and by
+    // then two reviews have blessed the direction.
+    //
+    // So assert the presence of all three. RAW source, not code(): the
+    // stripper blanks quoted strings, which would turn state <> 'released'
+    // into state <> '' — the same trap the claim_kind guard above records.
+    const raw = read('lib/velocity-claims.ts');
+    const release = raw.slice(raw.indexOf('async function releaseWithin'));
+    expect(release).not.toBe('');
+
+    expect(release, 'mechanism 1: the row lock').toMatch(/FOR UPDATE/);
+    expect(release, 'mechanism 2: the early already-released return')
+      .toMatch(/claim\.state\s*===\s*'released'/);
+    expect(release, 'mechanism 3: the conditional update predicate')
+      .toMatch(/state\s*<>\s*'released'/);
+  });
+
   it('the claim module does not call auditLog(), which takes its own connection', () => {
     // auditLog() uses getSql() and swallows its errors. Called from inside a
     // release transaction it risks the max:5 pool deadlock documented in

@@ -278,16 +278,17 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **67 files /
-965 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 965 pass. That is the number **on `master`** once this
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **68 files /
+977 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 977 pass. That is the number **on `master`** once this
 change lands: master ran **66 / 943** at `10f96507`, and this change adds
-**22**. The composition is worth writing out because it is not a single
-number: `velocity-claim-release.test.ts` (**+26**), three domain guards in
-`velocity-admission-callers.test.ts` (**+3**), one assertion split into two in
-`settlement-b3.3.test.ts` (**+1**), and the eight-case `reverseVelocity` block
-deleted from `velocity.test.ts` (**−8**). 26 + 3 + 1 − 8 = 22, and
-943 + 22 = 965.
+**34**. The composition is worth writing out because it is not a single
+number: `velocity-claim-release.test.ts` (**+26**), four guards in
+`velocity-admission-callers.test.ts` (**+4**), the new adversarial file
+`velocity-claim-adversarial.test.ts` (**+11**), one assertion split into two
+in `settlement-b3.3.test.ts` (**+1**), and the eight-case `reverseVelocity`
+block deleted from `velocity.test.ts` (**−8**). 26 + 4 + 11 + 1 − 8 = 34, and
+943 + 34 = 977.
 The earlier baseline was **61 / 907** on `master` at `403acf1`; the 943 came
 from PR #74 (`split-pay-velocity.test.ts` 9 and
 `split-pay-route-status.test.ts` 6) together with PR #75, merged into #74's
