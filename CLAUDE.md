@@ -583,6 +583,35 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
+- **The transfer-intent route refuses funding on the P2P outbound budget.**
+  `app/api/transfers/intent/route.ts` gates **both** `add_money` and
+  `cash_out` on `checkVelocityLimit()`, which sums `velocity_checks` — the P2P
+  **outbound** pool — and returns **429**, so the intent is not created. A
+  user who has spent their P2P budget therefore cannot top up their wallet,
+  even though funding is **inbound** value that decision 0009 gives its own
+  budget. Inbound value refused by an outbound ceiling.
+  That route's comment says the call is "Advisory velocity preview, NOT an
+  admission … nothing is granted on the strength of this answer" — true about
+  *granting*, **false about refusing**. A 429 is returned and nothing is
+  created, so it is binding in the refusal direction.
+  **DECIDED 2026-11-09 — option C, and the gate stays until its replacement
+  exists.** The owner chose separate budgets for funding, P2P outbound and
+  withdrawals, and an exhausted P2P budget must not stop a legitimate funding
+  intent. But the refusal is **not** removed first: it operates today, and
+  deleting it before a verified funding-specific control exists would replace a
+  control with nothing. The required order, in the implementation PR, is in
+  `docs/decisions/0009` under "The cross-domain intent gate" — introduce the
+  funding admission, validate it against real balance movement and claim
+  creation, *then* remove this gate, then test funding with P2P exhausted and
+  P2P with funding exhausted, and confirm no live route was enabled.
+  Withdrawals stay disabled, so `cash_out` keeps its refusal.
+  **So this gate is still in the tree, and still refuses.** Do not read the
+  decision as a description of current behaviour.
+  Found by review of PR #75; the general lesson is that
+  a domain rule has two halves — what may **write** a counter, and what may
+  **decide another domain's outcome by reading** it. The first version of that
+  rule had only the first half, which is why this survived it.
+
 - **`reverseVelocity()` is deleted; its replacement is on an unmerged branch
   awaiting independent validation.** The defect: it released
   `min(amount, current window total)`, and that total spans every money path,
