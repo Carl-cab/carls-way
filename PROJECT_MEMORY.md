@@ -3926,3 +3926,66 @@ PR #75 is still unmerged, awaiting owner authorization to merge into #74.
 
 **Next recommended action.** Owner: set the anchor and horizon, or record that
 the ceiling deliberately bounds unsettled value only.
+
+---
+
+## 2026-11-09 — Owner decisions recorded: intent gate (option C) and the funding-capacity window
+
+**Purpose and scope.** The owner answered the two findings PR #75's review left
+open, plus the parameters `0009` deliberately left blank. Records updated on
+#75's branch: `docs/decisions/0009` and `CLAUDE.md`. Documentation only — no
+code changed, and nothing in this entry is an implementation.
+
+**What was decided.**
+
+1. **Cross-domain intent gate — option C.** Funding, P2P outbound and
+   withdrawals get separate budgets; an exhausted P2P budget must not stop a
+   legitimate funding intent. **With an ordering constraint the record now
+   carries explicitly: the existing refusal is not removed first.** The
+   implementation PR must introduce the funding admission, validate it against
+   real balance movement and claim creation, *then* remove the P2P gate from
+   `app/api/transfers/intent/route.ts`, then test funding with P2P exhausted
+   and P2P with funding exhausted, and confirm no live route was enabled.
+   Withdrawals stay disabled, so `cash_out` keeps its refusal.
+2. **Finalized funding claim window.** US ACH consumer funding: anchor to
+   provider-confirmed settlement time, count finalized claims for **60
+   calendar days**. Canadian personal-account PAD: anchor to the
+   provider-confirmed **debit date**, count for **90 calendar days**, with the
+   verified settlement date as a conservative fallback where the debit date
+   cannot be established — and the claim records which of the two it holds.
+   Expiry is **timestamp-driven**, a property of the capacity query, never a
+   cleanup job. Six required tests are listed in the record, to be written
+   before the implementation.
+
+**Financial or security behaviour affected.** None today. `0009`'s status moved
+from "Proposed — awaiting owner approval" to "Accepted as architecture only,
+parameters decided, NOT IMPLEMENTED", and both `0009` and `CLAUDE.md` now say
+in terms that no branch creates, finalizes or releases a transfer-rail claim
+and that the live funding and withdrawal ceilings are zero. The intent-route
+gate **is still in the tree and still refuses**; the record says so, because
+the risk in writing down a decision is that a later reader takes it for a
+description of behaviour.
+
+**A correction this change also makes.** `0009`'s own Status line still read
+"Proposed — awaiting owner approval" while `CLAUDE.md` already recorded the
+2026-11-08 acceptance. That is the drift the governance rule exists to catch,
+and it existed for a day.
+
+**Explicitly not claimed.** The 60- and 90-day windows are funding-capacity
+parameters, not statements that liability expires. The record carries the
+owner's wording on that, because an unqualified form of this number is exactly
+the kind of claim that gets quoted elsewhere.
+
+**Tests run and their results.** No code changed. Revalidation of the combined
+tree follows in the next entry.
+
+**Migration impact.** None.
+
+**Unresolved findings.** Both of #75's review findings are now owner-decided
+and recorded; neither is implemented. The accounting model on
+`sec/claim-bounded-velocity-release` still needs independent validation.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Validate and merge #75 into #74 per the owner's
+Decision 1 preconditions, then report #74's final head for merge authorization.

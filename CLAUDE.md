@@ -569,11 +569,20 @@ arbitrary end user.
   admission … nothing is granted on the strength of this answer" — true about
   *granting*, **false about refusing**. A 429 is returned and nothing is
   created, so it is binding in the refusal direction.
-  **Unresolved on purpose.** Narrowing or removing that gate *removes a
-  refusal that exists today*, and no funding budget is implemented to replace
-  it, so it is a financial-behaviour decision for the owner rather than a fix
-  to make. Three options and the acceptance case each needs are recorded in
-  `docs/decisions/0010`. Found by review of PR #75; the general lesson is that
+  **DECIDED 2026-11-09 — option C, and the gate stays until its replacement
+  exists.** The owner chose separate budgets for funding, P2P outbound and
+  withdrawals, and an exhausted P2P budget must not stop a legitimate funding
+  intent. But the refusal is **not** removed first: it operates today, and
+  deleting it before a verified funding-specific control exists would replace a
+  control with nothing. The required order, in the implementation PR, is in
+  `docs/decisions/0009` under "The cross-domain intent gate" — introduce the
+  funding admission, validate it against real balance movement and claim
+  creation, *then* remove this gate, then test funding with P2P exhausted and
+  P2P with funding exhausted, and confirm no live route was enabled.
+  Withdrawals stay disabled, so `cash_out` keeps its refusal.
+  **So this gate is still in the tree, and still refuses.** Do not read the
+  decision as a description of current behaviour.
+  Found by review of PR #75; the general lesson is that
   a domain rule has two halves — what may **write** a counter, and what may
   **decide another domain's outcome by reading** it. The first version of that
   rule had only the first half, which is why this survived it.
@@ -601,10 +610,22 @@ arbitrary end user.
   on the three paths that already had a control; adding one here is a
   financial-behaviour change (it decides whether a transfer consumes budget at
   intent, confirm or execute) and belongs with the rail work.
-  `docs/decisions/0009` is the **Proposed** architecture — reserve at confirm,
-  finalize at settlement, release on failure, with **separate funding and
-  withdrawal budgets** — and it is awaiting owner approval, so nothing in it is
-  implemented. Two findings from it are worth carrying here. On the live rail
+  `docs/decisions/0009` is the architecture — reserve at confirm, finalize at
+  verified settlement, release only the matching claim, with **separate funding
+  and withdrawal budgets**. **Accepted as architecture only** (owner,
+  2026-11-08), with its parameters set 2026-11-09: the finalized-claim capacity
+  window is **60 calendar days** for US ACH consumer funding anchored to
+  provider-confirmed settlement time, and **90 calendar days** for Canadian
+  personal-account PAD anchored to the provider-confirmed debit date, with the
+  verified settlement date as a conservative fallback. Expiry is
+  **timestamp-driven**, evaluated in the capacity query, never by a cleanup
+  job. Those are funding-capacity windows and **not** liability horizons —
+  longer statutory, network, warranty and contractual exposures remain
+  identifiable and need provider and legal review before live activation.
+  **Accepted and parameterised is still not implemented**: no code in any
+  branch creates, finalizes or releases a transfer-rail claim, and live funding
+  and withdrawal ceilings are **zero** (`0010`). Two findings from it are worth
+  carrying here. On the live rail
   **settlement is too late to refuse**: the provider has already moved the money
   at the bank, so a control that first speaks at settlement can record but not
   say no. And because a transaction must never be held open across a provider

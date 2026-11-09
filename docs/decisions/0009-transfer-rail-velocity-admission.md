@@ -1,15 +1,22 @@
 # 0009 — Transfer-rail velocity admission
 
-- **Status:** **Proposed — awaiting owner approval. Not implemented.**
-- **Date:** 2026-11-08
+- **Status:** **Accepted as architecture only (owner, 2026-11-08). Parameters
+  decided 2026-11-09. NOT IMPLEMENTED — no code in any branch creates a
+  transfer-rail claim.**
+- **Date:** 2026-11-08, amended 2026-11-09
 - **Relates to:** `0008-atomic-velocity-admission.md` (which closed the same
   class of defect on the three P2P paths and deliberately left this rail out),
   `0007-money-bucket-policy-on-redis-loss.md`.
 
-This record proposes an architecture and acceptance criteria. It changes no
-code and sets no limits. The numbers a funding or withdrawal ceiling should
-carry are a business decision, not an engineering one, and are deliberately
-left blank.
+This record proposed an architecture and acceptance criteria. It changes no
+code. The owner has since accepted option C as the architecture and set the
+parameters recorded below; **acceptance is not implementation**, and nothing in
+this repository creates, finalizes or releases a transfer-rail claim today. The
+live funding and withdrawal ceilings remain **zero** by the owner's decision of
+2026-11-09 — see `0010`, which records live funding and live withdrawals as
+DISABLED with effective permitted throughput zero. The windows below are
+funding-capacity parameters for a future controlled pilot, not an authorization
+to carry money.
 
 ## Where money actually moves on this rail
 
@@ -206,7 +213,58 @@ Operational — and distinct from the above, which is all code verification:
     reconciliation job runs.
 12. Stranded reservations have a named owner and an alert.
 
-## Unresolved: how long a finalized funding claim consumes capacity
+## How long a finalized funding claim consumes capacity — DECIDED 2026-11-09
+
+The question below was raised in review of PR #75 and is now answered by the
+owner. **The decision is recorded; it is not implemented.** No code reads or
+enforces these windows, because no code creates a transfer-rail claim at all.
+
+| Rail | Anchor | Window |
+|---|---|---|
+| US ACH consumer funding | provider-confirmed settlement time | **60 calendar days** |
+| CA personal-account PAD | provider-confirmed **debit date**; verified settlement date as a conservative fallback where the debit date cannot be established | **90 calendar days** |
+
+Five rules the implementation carries with the numbers:
+
+1. **Expiry is timestamp-driven, not cleanup-job-driven.** It is a property of
+   the capacity *query*, comparing the stored anchor against the time of the
+   read. No background job mutates claim state to expire it, so a stalled or
+   unscheduled worker cannot silently restore headroom.
+2. **The anchor is the provider's assertion, not our observation.** Webhook
+   receipt time is not the anchor. A redelivery of the same settlement event
+   must not move, extend or restart it.
+3. **The fallback is explicit and recorded.** Where a PAD debit date cannot be
+   established, the verified settlement date is used and the claim records
+   *which* of the two it holds, so a later audit can tell a conservative
+   fallback from a confirmed anchor.
+4. **These are funding-capacity windows, not liability horizons.** The owner's
+   decision says so explicitly: longer statutory, network, warranty and
+   contractual exposures remain identifiable and need provider and legal review
+   before live activation. Nothing here may be quoted as "liability expires
+   after 60 or 90 days."
+5. **A late return generates no capacity.** A return arriving inside the window
+   releases the claim's own reserved exposure and nothing more; realized loss
+   is tracked separately under `0011`, by a counter that nothing decrements.
+
+Required tests, to be written **before** the implementation:
+
+- Just before expiry: capacity still consumed.
+- Exactly at expiry: capacity no longer consumed — the boundary's inclusivity
+  pinned, not incidental.
+- Just after expiry: capacity available, subject to every other restriction.
+- Duplicate settlement webhooks do not change the anchor.
+- A late return produces no free capacity.
+- Unresolved disputes and realized losses remain separately tracked and are not
+  reduced by expiry.
+
+Each asserted against a real PostgreSQL instance with the anchor set
+explicitly rather than taken from `now()`, so the boundary cases are
+deterministic.
+
+The analysis that led to the question follows, kept because it records why
+neither obvious answer was safe.
+
+### The question as it was raised
 
 Raised in review of PR #75 against criterion 2 above, and the criteria as
 written do not answer it.
@@ -260,11 +318,11 @@ Acceptance cases either answer needs, in the manner of criteria 6–10:
 - The expiry is a property of the **query**, not a background job that mutates
   state, so a stalled worker cannot silently restore headroom.
 
-**Not resolved here.** Both the anchor and the horizon are financial-policy
-numbers, and this program's standing constraint is not to invent them. Until
-they are set, read criterion 2 as finalizing the claim's *state* only, with its
-capacity treatment undefined — which is a gap in the proposal, not a decision
-already taken.
+**Resolved by the owner on 2026-11-09**, in the table above. It was left open
+here deliberately until then: both the anchor and the horizon are
+financial-policy numbers and this program's standing constraint is not to
+invent them. Criterion 2 should now be read together with that table — and
+with the fact that neither is implemented.
 
 ## In-flight exposure is not realized loss
 
@@ -297,15 +355,54 @@ It is listed below as a decision rather than folded into C, because C is
 implementable without it and this is the part that stops C from being a
 complete answer to funding abuse.
 
-## Decisions required from the owner
+## The cross-domain intent gate — DECIDED 2026-11-09
 
-1. Approve or reject C as the architecture.
-2. Approve step 2 (the sandbox stopgap) separately — it is a small change but
-   it is a financial control, and it would make a sandbox transfer consume the
-   same budget a P2P send does.
-3. Set the funding and withdrawal ceilings, and the funding window. These are
-   business numbers; this record deliberately proposes none.
-4. Decide the **repeated-return** question above: accept that releasing a
-   returned claim restores headroom while the loss stands, or add a separate
-   non-releasing counter for realized returns — and if the latter, set its
-   ceiling.
+`app/api/transfers/intent/route.ts` gates **both** `add_money` and `cash_out`
+on `checkVelocityLimit()`, which sums `velocity_checks` — the P2P **outbound**
+pool — and returns 429, so the intent is not created. Inbound value refused by
+an outbound ceiling. Recorded as an open gap in `CLAUDE.md` and in `0010`
+(findings A/B) since PR #75's review.
+
+**Owner decision: option C.** Funding, P2P outbound payments and withdrawals
+get separate budgets, and an exhausted P2P budget must not stop a user creating
+a legitimate funding intent.
+
+**With an explicit ordering constraint: the refusal is not removed first.** The
+gate stays exactly as it is until a funding-specific control exists and is
+verified. Removing it first would delete a refusal that operates today and
+replace it with nothing — which is why this was never a "fix" to apply while
+the question was open. In the implementation PR, in this order:
+
+1. Introduce the domain-specific admission (funding claims, per `0013` for
+   sandbox and this record for the live rail).
+2. Validate it against **actual balance movement and claim creation**, not
+   against a stub.
+3. Only then remove the P2P gate from the intent route.
+4. Test funding succeeding while P2P capacity is exhausted.
+5. Test P2P refusing while funding capacity is exhausted.
+6. Confirm no live transfer route is inadvertently enabled by the change —
+   both rail flags stay off and the factory still returns sandbox.
+
+**Withdrawals remain disabled** until separately implemented and authorized, so
+step 1 covers funding only; `cash_out` keeps whatever refusal it has.
+
+## Decisions required from the owner — all answered
+
+1. ~~Approve or reject C as the architecture.~~ **Accepted 2026-11-08**,
+   architecture only.
+2. ~~Approve step 2 (the sandbox stopgap) separately.~~ **Superseded.** Step 2
+   as written here was wrong — it would have made a simulated `add_money`
+   consume the payer's real P2P outbound budget, the same cross-domain error as
+   the release defect in the charge direction. `0013` replaces it with a
+   funding claim created inside the settlement transaction, and the owner
+   approved that corrected mechanism on 2026-11-09 with a CA$100 / US$100
+   cumulative sandbox ceiling per user per test cycle.
+3. ~~Set the funding and withdrawal ceilings, and the funding window.~~
+   **Answered 2026-11-09.** The window is in the table above. The live
+   ceilings are **zero** — live funding and live withdrawals are DISABLED
+   (`0010`); configurable limits are to be prepared for a future controlled
+   pilot, and no positive live limit is approved.
+4. ~~Decide the repeated-return question.~~ **Answered 2026-11-09:** separate
+   realized-loss accounting, with the provisional pilot rules in `0011`. A
+   returned claim's release frees only its own reserved exposure; realized loss
+   is a counter nothing decrements.
