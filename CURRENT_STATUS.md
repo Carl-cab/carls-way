@@ -16,16 +16,19 @@ Command-level evidence for the preceding baseline:
 `docs/audits/2026-10-17-baseline.md`. Sprint 1's restore-rehearsal evidence:
 `docs/audits/2026-10-25-restore-rehearsal-synthetic.md`.
 
-Measured on **commit `f520e22`** — PR #75's head *at the time of measurement*,
-not the `e0f3f0d` baseline this header names —
-on a database created fresh for the run and with
-the CI fixture applied: **66 files / 943 tests** pass, typecheck 0 errors, lint 0
-errors / 28 warnings, and `pnpm run build` succeeds. The phrasing is deliberate
-and was itself a review finding: an earlier revision read "commit `37e2a43`,
-the head of PR #75", which named the right commit and then made a claim about
-it that the very next push falsified. A measurement belongs to the commit it
-was taken on; whether that commit is still anyone's head is a separate fact
-with a shorter life. Earlier baselines on this
+Measured on **commit `6b0ceb8`** — the head of branch
+`sec/claim-bounded-velocity-release` *at the time of measurement*, which is
+stacked on PR #75 which is stacked on PR #74. Not the `e0f3f0d` baseline this
+header names, and **not** PR #75's head: an earlier revision of this paragraph
+said "PR #75's head" while naming a SHA that belonged to a different branch,
+which is the same mislabel this file has now been corrected for three times in
+different forms — first a stale commit, then a moving branch reference, then a
+commit attributed to the wrong branch. The measurement belongs to the commit;
+which branch's head that commit happens to be is a separate fact with a
+shorter life.
+Measured on a database created fresh for the run and with
+the CI fixture applied: **67 files / 965 tests** pass, typecheck 0 errors, lint 0
+errors / 30 warnings, and `pnpm run build` succeeds. Earlier baselines on this
 file: 55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at
 `6d8861c`, 57 / 832 at `6927ebd`, and **61 / 907 at `e0f3f0d`** — which is the
 figure that belongs to this header's commit. 943 becomes a baseline fact only
@@ -166,13 +169,18 @@ misleading of the two failure modes.
     platform balance with no durable volume control; no confirm, execute or
     settlement path has ever written `velocity_checks`. An earlier line here
     read "sandbox intents do NOT consume real velocity budget" as though that
-    were the intended design — it is a gap, and `docs/decisions/0009` (Proposed,
-    awaiting approval) sets out the architecture
-  - ⚠️ **`reverseVelocity()` on a returned transfer releases budget the rail
-    never consumed**, bounded only by the user's window total across all paths,
-    so it frees budget other money paths genuinely spent. Latent (needs a
-    provider webhook; both live flags off) and a prerequisite for enabling any
-    rail
+    were the intended design — it is a gap, and `docs/decisions/0009`
+    (**Accepted as architecture only**, owner 2026-11-08, with its parameters set
+    2026-11-09; **not implemented**) sets out the architecture
+  - ⚠️ **`reverseVelocity()` deleted; replacement unmerged and awaiting
+    independent validation.** It released budget bounded only by the user's
+    window total across all paths, so it freed budget other money paths
+    genuinely spent. Replaced on `sec/claim-bounded-velocity-release` by a
+    claim-bounded, domain-separated release (`docs/decisions/0012`) — but the
+    FIRST version of that replacement reproduced the same cross-domain error
+    in the opposite direction and its own tests asserted it, so the owner
+    requires independent validation of the accounting model before it merges.
+    Still a prerequisite for enabling any rail
   - Audit logging on intent creation and blocked attempts ✅
 - **Passive audit ledger** (Phase A1): Non-blocking audit log of all financial events
   - `ledger_entries` table: user_id, transaction_id (nullable), currency, account_type, entry_type, debit/credit, provider, description
@@ -186,7 +194,7 @@ misleading of the two failure modes.
 - **Phase A2 Infrastructure**: Webhook event deduplication and velocity reversal (not yet wired to live providers)
   - `provider_webhook_events` table: id, provider, provider_event_id, event_type, related_provider_reference, raw_payload JSONB, processing_status, processing_error, processed_at, created_at
   - `lib/provider-events.ts`: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`, `getProviderEvent()`
-  - `reverseVelocity()` in `lib/auth.ts`: creates compensating negative velocity records (immutable audit trail), calls `auditLog()`, non-blocking
+  - ⚠️ **`reverseVelocity()` is DELETED** — see the warning above. It used to live in `lib/auth.ts` and wrote compensating negative velocity records, which is the accounting model that was rejected: the release freed budget other money paths had genuinely spent. Its replacement, `releaseVelocityClaim()` in `lib/velocity-claims.ts`, is a claim-state transition plus one transaction-bound audit row and writes to `velocity_checks` not at all. It is on `sec/claim-bounded-velocity-release` (PR #77), **unmerged and awaiting independent validation**, so the returned-transfer path has no release on `master` today
   - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection — creates opening_balance ledger entries for users with seed balances
   - All functions marked "Future Use Only" — infrastructure ready for live provider integration
 - ✅ **Phase A3 Provider Execution Framework**: Complete provider abstraction and factory pattern
@@ -360,7 +368,7 @@ analysis in `docs/decisions/0005-migration-privilege-separation.md`.
 - ✅ **Phase A2 Infrastructure** (webhook events + velocity reversal)
   - `provider_webhook_events` table defined in `lib/db.ts` and migration route
   - `lib/provider-events.ts` helpers: `recordProviderEvent()`, `hasProcessedProviderEvent()`, `markProviderEventProcessed()`, `markProviderEventFailed()`
-  - `reverseVelocity()` implemented in `lib/auth.ts` — creates compensating negative velocity records, non-blocking, audit logged
+  - ⚠️ `reverseVelocity()` **no longer exists** — deleted as a critical financial-control defect; its claim-bounded replacement is unmerged (PR #77). This line described it as implemented infrastructure, which was the opposite of the status recorded earlier in this file
   - Admin endpoint: `POST /api/admin/ledger/backfill-opening-balances` with BACKFILL_SECRET protection
   - Webhook event deduplication ready for use by live providers
   - All SQL uses postgres.js tagged templates

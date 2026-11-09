@@ -204,7 +204,7 @@ export class VelocityLimitError extends Error {
 }
 
 /** The three rolling windows velocity is accounted in, normalized to their boundaries. */
-function velocityWindows(now: Date = new Date()): ReadonlyArray<{ type: 'hourly' | 'daily' | 'weekly'; start: Date }> {
+export function velocityWindows(now: Date = new Date()): ReadonlyArray<{ type: 'hourly' | 'daily' | 'weekly'; start: Date }> {
   const hourStart = new Date(now); hourStart.setMinutes(0, 0, 0);
   const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
   const weekStart = new Date(now);
@@ -325,10 +325,13 @@ export async function checkVelocityLimit(
  * Reading cannot be folded into the writing statement: a data-modifying CTE's
  * effects are not visible to sibling CTEs in the same statement, so a single
  * `INSERT ... RETURNING` + `SELECT SUM(...)` statement would verify against
- * the pre-write snapshot. And `RETURNING` alone is not the window total —
- * `reverseVelocity()` appends compensating rows with `transaction_count < 0`
- * (which the partial unique index deliberately excludes), so a window is the
- * sum of its rows, not one row. Hence two statements, in one transaction, in
+ * the pre-write snapshot. And `RETURNING` alone is not guaranteed to be the
+ * window total: the partial unique index excludes rows with
+ * `transaction_count < 0`, so any legacy compensating row left behind by the
+ * deleted `reverseVelocity()` is an additional row in the same window. Summing
+ * stays correct whether or not such rows remain, where `RETURNING` would not.
+ * Nothing writes them any more — `releaseVelocityClaim()` writes to
+ * `velocity_checks` not at all. Hence two statements, in one transaction, in
  * this order.
  *
  * Pass `executor` whenever the caller is already inside `sql.begin`, and do
@@ -423,8 +426,10 @@ async function admitVelocityWithin(
  *
  * **Not for a money path.** Writing without verifying is half of the race
  * `admitVelocity()` exists to close; pairing this with
- * `checkVelocityLimit()` reproduces it exactly. It remains exported because
- * `reverseVelocity()` is its counterpart and the pair is covered by
+ * `checkVelocityLimit()` reproduces it exactly. It has **no counterpart that
+ * credits `velocity_checks`** — `releaseVelocityClaim()` is a different
+ * accounting domain in `lib/velocity-claims.ts` and writes nothing here. It
+ * remains exported because it is covered by
  * `velocity.test.ts`, and because a future non-money accounting caller may
  * legitimately want to record volume it has already authorized by other
  * means. `lib/__tests__/velocity-admission-callers.test.ts` fails if a money
@@ -485,82 +490,26 @@ export async function auditLog(userId: number | null, action: string, metadata?:
   }
 }
 
-// ─── Velocity Reversal (Future Use: For Returned/Failed Transfers) ───────────
-// Reverses velocity records when a transfer is returned or fails after velocity was recorded.
-// IMPORTANT: Currently for future use only. Not called by P2P payments.
-// Will be used by webhook handlers when transfers are returned (NSF, clawed back, etc.)
-export async function reverseVelocity(
-  userId: number,
-  amount: MinorUnits,
-  currency: string,
-  reason?: string,
-  relatedEntityId?: number,
-): Promise<void> {
-  // Validation
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    throw new Error('Reverse amount must be greater than zero');
-  }
-
-  if (currency !== 'CAD' && currency !== 'USD') {
-    throw new Error(`Invalid currency: ${currency}. Must be CAD or USD.`);
-  }
-
-  const sql = getSql();
-
-  // Create compensating negative velocity records (historical rows are never
-  // deleted, so original + reversal nets to zero and both remain auditable).
-  //
-  // These are written with the same window_type / window_start / currency that
-  // checkVelocityLimit() sums over, so the reversal actually releases the
-  // user's headroom. The previous implementation inserted a single row with
-  // columns that do not exist on this table (period_type, period_start,
-  // hourly_amount, ...) under window_type 'reversal', which no query reads —
-  // so every reversal threw, was swallowed by the catch below, and freed
-  // nothing.
-  //
-  // Known limitation: the reversal is applied to the windows current at the
-  // time of reversal, not the windows the original transaction fell into. A
-  // return that arrives after the original window has rolled over therefore
-  // credits a window that never carried the charge. Correcting that needs the
-  // original transaction timestamp, which this signature does not carry; the
-  // clamp below keeps the effect conservative in the meantime.
-  const reversalAmount = Math.min(amount, MAX_SINGLE_TRANSFER_AMOUNT * 100);
-
-  try {
-    for (const { type: windowType, start: windowStart } of velocityWindows()) {
-      // A window's recorded volume can never be driven below zero: a reversal
-      // releases at most what that window currently holds.
-      const recorded = await sql`
-        SELECT COALESCE(SUM(total_amount), 0) AS total
-        FROM velocity_checks
-        WHERE user_id = ${userId} AND window_type = ${windowType}
-          AND window_start >= ${windowStart.toISOString()} AND currency = ${currency}
-      `;
-      const releasable = Math.min(reversalAmount, parseSignedDatabaseMoney(String(recorded[0]?.total ?? '0'), currency));
-      if (releasable <= 0) continue;
-
-      await sql`
-        INSERT INTO velocity_checks (
-          user_id, window_start, window_type, transaction_count, total_amount, currency
-        )
-        VALUES (
-          ${userId}, ${windowStart.toISOString()}, ${windowType}, -1, ${toSignedDatabaseDecimal(-releasable)}, ${currency}
-        )
-      `;
-    }
-
-    // Audit the reversal for compliance
-    await auditLog(userId, 'velocity_reversed', {
-      amount: toDatabaseDecimal(amount),
-      currency,
-      reason: reason || 'transfer_returned',
-      relatedEntityId,
-    });
-  } catch (err) {
-    // Log but don't block: reversal is for audit/compliance, not transaction-critical
-    console.error('Velocity reversal failed (non-blocking):', err);
-  }
-}
+// ─── Velocity reversal: removed ──────────────────────────────────────────────
+// `reverseVelocity()` lived here and has been DELETED, not deprecated.
+//
+// It released `min(amount, current window total)` — and that window total is
+// the user's volume from EVERY money path, so a returned transfer freed budget
+// `money:send` and `money:split-pay` had genuinely consumed. The owner
+// classified that as a critical financial-control defect. A function that can
+// do it must not remain reachable, so there is no compatibility shim: the
+// callers moved to `releaseVelocityClaim()` in `lib/velocity-claims.ts`, which
+// can only retire its own claim, by moving that one row out of the reserved
+// set. It returns nothing to any window: it writes to `velocity_checks` not at
+// all, which is the domain rule rather than a bound on the amount.
+//
+// Two further defects died with it, both of which the owner's requirements
+// name independently. Its three window inserts ran in no transaction, so a
+// failure part-way left a partial release committed; and its `catch` logged
+// and reported success, so that partial release was silent. The replacement
+// runs as one transaction and deliberately does not catch.
+//
+// See `docs/decisions/0012-claim-bounded-velocity-release.md`.
 
 // ─── Password verification ───────────────────────────────────────────────────
 

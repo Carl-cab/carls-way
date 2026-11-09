@@ -257,7 +257,13 @@ VALUES
   -- split-pay-velocity.test.ts would make each file's budget depend on the
   -- other's timing. 'pending' KYC on purpose — the new_user ceilings (500
   -- hourly / 5 daily count) are small enough to reach without large amounts.
-  (9121, 'Admission Payer', 'admitpayer', 'admitpayer@example.test', 'x', 'CA', 'pending', 0)
+  (9121, 'Admission Payer', 'admitpayer', 'admitpayer@example.test', 'x', 'CA', 'pending', 0),
+  -- velocity-claim-release.test.ts. Its own pair again: that file drives a
+  -- payer to a ceiling and then releases budget, so sharing a user with
+  -- another velocity file would make each one's result depend on the other's
+  -- timing. 'pending' KYC for the small new_user ceilings.
+  (9131, 'Claim Payer', 'claimpayer', 'claimpayer@example.test', 'x', 'CA', 'pending', 0),
+  (9132, 'Claim Other', 'claimother', 'claimother@example.test', 'x', 'CA', 'pending', 0)
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT MAX(id) FROM users), 1));
@@ -322,16 +328,48 @@ CREATE TABLE IF NOT EXISTS velocity_checks (
 );
 
 -- Partial uniqueness, not a plain UNIQUE constraint: exactly one accumulating
--- row per window, while the compensating rows reverseVelocity() appends
--- (transaction_count < 0) stay append-only. recordVelocity()'s upsert names
--- this index explicitly, so a test database without it fails the upsert
--- outright rather than merely losing the constraint.
+-- row per window. The transaction_count >= 0 predicate existed for the
+-- compensating rows the now-deleted reverseVelocity() appended; nothing writes
+-- such a row any more, and the predicate stays only so a legacy row does not
+-- collide. recordVelocity()'s upsert names this index explicitly, so a test
+-- database without it fails the upsert outright rather than merely losing the
+-- constraint.
 CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
   ON velocity_checks (user_id, window_type, window_start, currency)
   WHERE transaction_count >= 0;
 
 CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
   ON velocity_checks (user_id, window_type, currency, window_start);
+
+-- One row per velocity claim, so a release is bounded by what was claimed.
+-- The window_start columns are the claim's OWN windows at claim time: a
+-- return can arrive 60 (US unauthorized debit) or 90 (CA PAD personal
+-- dispute) calendar days later, by which point the current windows never
+-- carried the charge. See docs/decisions/0012.
+CREATE TABLE IF NOT EXISTS velocity_claims (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  provider TEXT NOT NULL,
+  reference TEXT NOT NULL,
+  claim_kind TEXT NOT NULL,
+  amount NUMERIC(14,2) NOT NULL,
+  currency TEXT NOT NULL,
+  hourly_window_start TIMESTAMPTZ NOT NULL,
+  daily_window_start TIMESTAMPTZ NOT NULL,
+  weekly_window_start TIMESTAMPTZ NOT NULL,
+  state TEXT NOT NULL DEFAULT 'reserved',
+  released_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  released_at TIMESTAMPTZ,
+  release_event_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS velocity_claims_reference_key
+  ON velocity_claims (provider, reference);
+
+CREATE INDEX IF NOT EXISTS idx_velocity_claims_user_state
+  ON velocity_claims (user_id, state, currency);
 
 -- Customer-facing audit trail written by auditLog() in lib/auth.ts. That
 -- helper swallows its own errors, so a missing table makes every audit write

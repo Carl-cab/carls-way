@@ -6,7 +6,7 @@
 
 import { getSql } from '@/lib/db';
 import { createNotification } from '@/lib/notifications';
-import { reverseVelocity } from '@/lib/auth';
+import { releaseVelocityClaim, VELOCITY_CLAIM_PROVIDER } from '@/lib/velocity-claims';
 import {
   minorUnitsToMajorNumber,
   parseNonNegativeMoney,
@@ -664,9 +664,13 @@ export class SettlementExecutor {
         currency: string;
       };
 
-      let amountMinor: number;
+      // Validation only. The parsed value is deliberately not bound: the
+      // release amount comes from the claim row, never from the intent (see
+      // the note below). Keeping the call rejects a corrupt intent amount
+      // before a release is attempted; keeping the binding would invite a
+      // later edit to pass it.
       try {
-        amountMinor = parsePositiveMoney(intent.amount, intent.currency);
+        parsePositiveMoney(intent.amount, intent.currency);
       } catch {
         return {
           success: false,
@@ -677,15 +681,43 @@ export class SettlementExecutor {
         };
       }
 
-      // reverseVelocity() is itself non-blocking (catches internally), but we
-      // still guard so this method can never throw into the settlement chain.
-      await reverseVelocity(intent.user_id, amountMinor, intent.currency, 'transfer_returned', intent.id);
+      // Claim-bounded release. The previous call was reverseVelocity(), which
+      // released min(amount, current window total) — a total spanning every
+      // money path, so a returned transfer freed budget money:send and
+      // money:split-pay had genuinely consumed. releaseVelocityClaim() can
+      // only return the claim's own recorded amount, to the claim's own
+      // windows, once. Decision 0012.
+      //
+      // The intent's amount, validated above, is deliberately NOT passed as
+      // the release amount: the amount comes from the claim row. Passing the
+      // intent's amount would reintroduce an unbounded release if the two ever
+      // disagreed.
+      const outcome = await releaseVelocityClaim(
+        VELOCITY_CLAIM_PROVIDER,
+        String(intent.id),
+        { eventId: plan.provider_event_id, reason: 'transfer_returned' },
+      );
+
+      if (!outcome.released) {
+        // Not a failure of settlement. The transfer rail holds no claims yet
+        // (decision 0009 is approved but unimplemented), so `no_claim` is the
+        // expected outcome today and the correct release is zero — the rail
+        // consumed no budget. `already_released` is a duplicate delivery.
+        // Both are reported rather than hidden, because a release that found
+        // nothing to release is exactly what reconciliation needs to see.
+        return {
+          success: true,
+          intentId: plan.intentId,
+          velocityReversed: false,
+          reason: `No velocity budget released (${outcome.reason}): intent ${intent.id}`,
+        };
+      }
 
       return {
         success: true,
         intentId: plan.intentId,
         velocityReversed: true,
-        reason: `Velocity reversed: ${toDatabaseDecimal(amountMinor)} ${intent.currency}`,
+        reason: `Velocity claim released: ${toDatabaseDecimal(outcome.amount)} ${intent.currency}`,
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';

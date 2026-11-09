@@ -71,6 +71,90 @@ function code(source: string): string {
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
 }
 
+describe('accounting domains stay separate', () => {
+  it('lib/velocity-claims.ts contains NO write to velocity_checks', () => {
+    // The defect this guards was architectural, not arithmetic. velocity_checks
+    // has no domain column, so it is one pool per (user, window, currency)
+    // holding money:send, request-accept and money:split-pay consumption
+    // together. Any INSERT or UPDATE into it from the claim module is
+    // cross-domain by construction: a funding or withdrawal return pays back
+    // P2P spending, and a release with no prior charge drives usage negative
+    // and creates capacity above the ceiling. All three were measured on a
+    // real database before this guard existed.
+    //
+    // Funding and withdrawal exposure is DERIVED from claim state by
+    // claimedExposure(). A reviewer reading one diff cannot see that writing
+    // a "compensating row" here is forbidden, so the rule is mechanical.
+    const src = code(read('lib/velocity-claims.ts'));
+
+    expect(src).not.toMatch(/INSERT\s+INTO\s+velocity_checks/i);
+    expect(src).not.toMatch(/UPDATE\s+velocity_checks/i);
+    expect(src).not.toMatch(/DELETE\s+FROM\s+velocity_checks/i);
+  });
+
+  it('exposure is scoped by claim_kind, so one domain cannot release another', () => {
+    // A release reducing the wrong domain is the same class of defect one
+    // level in: a withdrawal return must not free funding room. The scoping
+    // lives in claimedExposure()'s predicate, so assert it is there.
+    // RAW source here, not code(): the stripper blanks quoted strings, so it
+    // turns `state = 'reserved'` into `state = ''` and the assertion below
+    // could never match. Caught on the first run of this guard.
+    const raw = read('lib/velocity-claims.ts');
+    const exposure = raw.slice(raw.indexOf('export async function claimedExposure'));
+
+    expect(exposure).toMatch(/claim_kind\s*=\s*\$\{claimKind\}/);
+    expect(exposure).toMatch(/user_id\s*=\s*\$\{userId\}/);
+    expect(exposure).toMatch(/currency\s*=\s*\$\{currency\}/);
+    expect(exposure).toMatch(/state\s*=\s*'reserved'/);
+  });
+
+  it('the release keeps all THREE idempotency mechanisms, none of which any behavioural test pins', () => {
+    // Found by mutation testing during the validation of PR #77, and this is
+    // the reason the guard is static rather than behavioural.
+    //
+    // releaseVelocityClaim() is idempotent by three mechanisms:
+    //   1. SELECT ... FOR UPDATE, which serialises concurrent deliveries;
+    //   2. an early return when the locked row already reads 'released';
+    //   3. a conditional UPDATE ... WHERE state <> 'released'.
+    //
+    // They are genuinely 3-WAY REDUNDANT: any ONE of them alone makes a
+    // double release impossible. Measured — removing (1), (2) or (3)
+    // individually leaves all 73 cases in the velocity files GREEN, because
+    // the suite asserts the idempotent OUTCOME and the surviving mechanisms
+    // still deliver it.
+    //
+    // That redundancy is good design and a coverage hole at the same time.
+    // The realistic failure is a sequence, not a single edit: someone removes
+    // the conditional UPDATE as "redundant given FOR UPDATE", a later change
+    // removes FOR UPDATE as "redundant given the early return", and each step
+    // is individually green. Only the third removal breaks anything, and by
+    // then two reviews have blessed the direction.
+    //
+    // So assert the presence of all three. RAW source, not code(): the
+    // stripper blanks quoted strings, which would turn state <> 'released'
+    // into state <> '' — the same trap the claim_kind guard above records.
+    const raw = read('lib/velocity-claims.ts');
+    const release = raw.slice(raw.indexOf('async function releaseWithin'));
+    expect(release).not.toBe('');
+
+    expect(release, 'mechanism 1: the row lock').toMatch(/FOR UPDATE/);
+    expect(release, 'mechanism 2: the early already-released return')
+      .toMatch(/claim\.state\s*===\s*'released'/);
+    expect(release, 'mechanism 3: the conditional update predicate')
+      .toMatch(/state\s*<>\s*'released'/);
+  });
+
+  it('the claim module does not call auditLog(), which takes its own connection', () => {
+    // auditLog() uses getSql() and swallows its errors. Called from inside a
+    // release transaction it risks the max:5 pool deadlock documented in
+    // CLAUDE.md, and a swallowed failure means a release reports success with
+    // no audit record. The release writes its audit row on the caller's
+    // executor instead, so it commits and rolls back with the release.
+    const src = code(read('lib/velocity-claims.ts'));
+    expect(src).not.toMatch(/\bauditLog\s*\(/);
+  });
+});
+
 describe('velocity admission is the only way a money path consumes budget', () => {
   it('no application file outside lib/auth.ts calls recordVelocity()', () => {
     const offenders = sourceFiles().filter((p) => /\brecordVelocity\s*\(/.test(code(read(p))));

@@ -7,7 +7,6 @@ import {
   VELOCITY_LIMITS,
   checkVelocityLimit,
   recordVelocity,
-  reverseVelocity,
 } from '../auth';
 import { getSql, initializeSchema } from '../db';
 import { parseSignedDatabaseMoney } from '../money';
@@ -133,68 +132,13 @@ describe('checkVelocityLimit', () => {
   });
 });
 
-describe('reverseVelocity', () => {
-  it('releases the reversed amount from every window', async () => {
-    await recordVelocity(USER_ID, 50_000, 'CAD');
-    await reverseVelocity(USER_ID, 20_000, 'CAD', 'transfer_returned');
-
-    for (const windowType of ['hourly', 'daily', 'weekly']) {
-      expect((await windowTotal(USER_ID, windowType)).total).toBe(30_000);
-    }
-  });
-
-  it('restores headroom so a previously blocked transaction is allowed', async () => {
-    const limitCents = VELOCITY_LIMITS.verified_user.hourly_max_amount * 100;
-    await recordVelocity(USER_ID, limitCents, 'CAD');
-    expect((await checkVelocityLimit(USER_ID, 10_000, 'CAD')).allowed).toBe(false);
-
-    await reverseVelocity(USER_ID, 10_000, 'CAD', 'transfer_returned');
-    expect((await checkVelocityLimit(USER_ID, 10_000, 'CAD')).allowed).toBe(true);
-  });
-
-  it('appends a compensating row instead of mutating the original', async () => {
-    await recordVelocity(USER_ID, 50_000, 'CAD');
-    await reverseVelocity(USER_ID, 20_000, 'CAD');
-
-    const rows = await sql`
-      SELECT transaction_count, total_amount FROM velocity_checks
-      WHERE user_id = ${USER_ID} AND window_type = 'daily'
-      ORDER BY id
-    `;
-    expect(rows).toHaveLength(2);
-    expect(parseSignedDatabaseMoney(String(rows[0].total_amount), 'CAD')).toBe(50_000);
-    expect(parseSignedDatabaseMoney(String(rows[1].total_amount), 'CAD')).toBe(-20_000);
-    expect(rows[1].transaction_count).toBe(-1);
-  });
-
-  it('never drives a window below zero', async () => {
-    await recordVelocity(USER_ID, 5_000, 'CAD');
-    await reverseVelocity(USER_ID, 50_000, 'CAD');
-
-    expect((await windowTotal(USER_ID, 'daily')).total).toBe(0);
-  });
-
-  it('is a no-op when the window holds nothing to release', async () => {
-    await reverseVelocity(USER_ID, 10_000, 'CAD');
-
-    const rows = await sql`SELECT COUNT(*)::int AS n FROM velocity_checks WHERE user_id = ${USER_ID}`;
-    expect(rows[0].n).toBe(0);
-  });
-
-  it('only releases the currency it was given', async () => {
-    await recordVelocity(USER_ID, 30_000, 'CAD');
-    await recordVelocity(USER_ID, 30_000, 'USD');
-    await reverseVelocity(USER_ID, 10_000, 'CAD');
-
-    expect((await windowTotal(USER_ID, 'daily', 'CAD')).total).toBe(20_000);
-    expect((await windowTotal(USER_ID, 'daily', 'USD')).total).toBe(30_000);
-  });
-
-  it('rejects a non-positive amount', async () => {
-    await expect(reverseVelocity(USER_ID, 0, 'CAD')).rejects.toThrow(/greater than zero/);
-  });
-
-  it('rejects an unsupported currency', async () => {
-    await expect(reverseVelocity(USER_ID, 1_000, 'EUR')).rejects.toThrow(/Invalid currency/);
-  });
-});
+// The `reverseVelocity` block that stood here has been REMOVED with its
+// subject. It pinned the defective behaviour: "releases the reversed amount
+// from every window" for an arbitrary caller-supplied amount, bounded only by
+// the window total — which spans every money path, so it freed budget
+// money:send and money:split-pay had consumed. Those assertions were correct
+// about the code and wrong about what the code should do, so preserving them
+// would have made the fix look like a regression.
+//
+// Claim-bounded release is covered by `velocity-claim-release.test.ts`.
+// See `docs/decisions/0012-claim-bounded-velocity-release.md`.
