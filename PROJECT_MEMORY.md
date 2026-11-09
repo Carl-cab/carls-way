@@ -4116,8 +4116,26 @@ fixture gains one test user (9121).
 
 **Tests run and their results.** On merged master at `d78918a`: **66 files /
 943 tests pass**, on a database created fresh with the CI fixture applied.
-Master's own CI run is in progress at the time of writing; `dependency audit`
-and `secret scan` have reported success.
+Master's own CI run has since completed — **all four required checks green on
+`d78918a`**: `install · typecheck · lint · test · build`, `secret scan`,
+`dependency audit`, `analyze javascript-typescript`. (An earlier draft of this
+entry said the run was "in progress at the time of writing" with two checks
+reported; completed here rather than left as a partial result, since the entry
+had not yet merged.)
+
+**Production deployment CONFIRMED.** GitHub deployment `7664954762`,
+environment Production, sha `d78918a`, state **success**, 2026-11-09T20:14:45Z.
+Read from the GitHub deployments API rather than inferred from the merge — the
+same source that answered "what SHA is in Production" without Vercel access
+earlier in this program, since `api.vercel.com` answers 403 CONNECT through
+this environment's egress proxy.
+
+**So this is the first time either control has run in production**, and the
+behaviour change above is now in front of real users: a split portion consumes
+the payer's velocity budget, so a payer near their ceiling on another path can
+be refused a split payment that previously succeeded, and one payer's
+concurrent payments are serialized against each other. A 429 on
+`money:split-pay` is the expected shape of that, not a regression.
 
 **Deployment.** Pushing to `master` triggers a Vercel production build
 automatically, per the repository's configured behaviour — not a separate
