@@ -67,6 +67,11 @@ async function cleanup() {
   // learned the other way: a TRUNCATE on a shared table destroyed other
   // files' rows while leaving its own behind.
   await sql`DELETE FROM audit_logs WHERE user_id = ANY(${ids})`;
+  // Registration now writes an opening-balance ledger entry in the sandbox
+  // (owner decision 2), so `users` has a dependent it did not have when this
+  // cleanup was written and the DELETE fails on
+  // `ledger_entries_user_id_fkey` without this line.
+  await sql`DELETE FROM ledger_entries WHERE user_id = ANY(${ids})`;
   await sql`DELETE FROM users WHERE id = ANY(${ids})`;
 }
 
@@ -106,7 +111,27 @@ describe('users schema supports the registration route', () => {
 });
 
 describe('POST /api/auth/register', () => {
-  it('creates a CA user with a CA$100 seed balance and pending KYC', async () => {
+  // The seed grant became SANDBOX-ONLY under owner decision 2 (2026-11-18):
+  // production accounts now start at zero, because an unconditional grant
+  // credited simulated money to real customer wallets with no funding event
+  // behind it. These cases set MANNA_ENV so they keep testing what they were
+  // written to test — that the grant currency follows the user's country —
+  // rather than silently becoming assertions about zero.
+  //
+  // The grant's own rules, including that production grants nothing, are
+  // covered by `registration-opening-balance.test.ts`.
+  const SANDBOX = { MANNA_ENV: process.env.MANNA_ENV, VERCEL_ENV: process.env.VERCEL_ENV };
+  beforeAll(() => {
+    process.env.MANNA_ENV = 'sandbox';
+    delete process.env.VERCEL_ENV;
+  });
+  afterAll(() => {
+    if (SANDBOX.MANNA_ENV === undefined) delete process.env.MANNA_ENV;
+    else process.env.MANNA_ENV = SANDBOX.MANNA_ENV;
+    if (SANDBOX.VERCEL_ENV !== undefined) process.env.VERCEL_ENV = SANDBOX.VERCEL_ENV;
+  });
+
+  it('creates a CA user with a CA$100 sandbox seed balance and pending KYC', async () => {
     const { POST } = await import('../../app/api/auth/register/route');
     const req = new Request('http://localhost/api/auth/register', {
       method: 'POST',
