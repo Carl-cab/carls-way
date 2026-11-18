@@ -4929,3 +4929,93 @@ suffices and destroys no evidence. Do not drop any column to undo.
 **Next recommended action.** Owner: decide the two financial fixes, settle
 Preview database isolation, and arrange the independent claim-accounting
 review. Engineering: implement 0013 once that review is done — not before.
+
+---
+
+## 2026-11-18 — Sprint 2 blocker remediation: three financial controls corrected, one dependency cleared
+
+**Purpose and scope.** The owner authorized four specific changes (decisions
+1–3 plus dependency security) and required focused PRs, independent review,
+and no merges without authorization. Four branches off `master` at `beba277`,
+four PRs, none merged.
+
+**Financial or security behaviour affected.** All three financial changes
+alter what a control asserts or what an account receives, which is why each is
+its own PR.
+
+**Decision 1 — reconciliation (#82, `f907437`).** `paySplitPortion()` writes
+`entry_type='split_payment'` while its transaction sits in reconciliation
+scope, where both per-payment invariants counted only `payment_sent` /
+`payment_received`. Two of seven checks failed permanently and the cron
+answered HTTP 500 `passed:false`. The expected type is now **derived from the
+transaction's own classification** (`split_id IS NOT NULL`) rather than
+widened to an allow-list — an allow-list would have accepted a split entry on
+an ordinary payment and an ordinary entry on a split, and both directions are
+mutation-tested to fail. Ten mutations covering missing, duplicate, reversed,
+wrong-amount, wrong-currency, third-party and non-completed cases are each
+caught. Cross-currency was **verified, documented and not changed**: a
+cross-border payment carries `payment_rail='wire'` so no per-payment invariant
+examines it, and the FX clearing-account treatment it would need is written
+down with a test showing it reports 2 currency-balance violations if forced
+into scope.
+
+**Decision 2 — registration (#83, `a7c002b`).** The CA$100/US$100 grant was
+unconditional on every deployment, production included, and was never booked
+to the ledger. It is now sandbox-only behind `isSandboxEnvironment()` — pinned
+against an absent variable, a misspelling and the `VERCEL_ENV` override — and
+written in the same transaction as the account, so both exist or neither does.
+`createLedgerEntry()` gained an `executor` option to make that possible. A
+unit bug I introduced and caught: the helper takes **minor units**, so the
+decimal `100.00` booked $1.00 against a $100.00 wallet; the grant is now held
+in minor units with the decimal derived.
+
+**Decision 3 — backfill (#84, `011d7ad`).** `backfillOpeningBalances()` now
+throws and the admin route answers **410 Gone**, chosen over deleting the
+route because a 404 reads like a deployment problem to an operator following
+an old runbook. The read-only `assessOpeningBalanceDiscrepancies()` replaces
+it, classifying each account and reporting the independently evidenced
+original grant — **absent evidence is reported as null, never assumed to be
+100.00**. Its no-write property is asserted by comparing a full ledger
+snapshot before and after rather than by trusting the implementation.
+
+**Dependency security (#85, `c625491`).** Rechecked rather than carried over:
+both moderate advisories still applied to `next@16.4.3`. Moved to **16.4.6**,
+the latest stable patch on the same minor. `pnpm audit --prod` then reports no
+known vulnerabilities. CI never caught it because the audit job does not gate
+on moderate findings — left unchanged as a separate decision.
+
+**Tests run and results.** Per branch: #82 72/1008, #83 72/1000, #84 72/1004,
+#85 71/992. **Combined on a verification branch: 74 files / 1028 tests, all
+passing, audit clean.** Typecheck 0 errors; lint 0 errors / 29 pre-existing
+warnings; `next build` succeeds and no longer aborts on a cold build.
+
+**The measurement that matters most.** On the combined tree, on a database
+whose every account was created by the running application, after a P2P send
+and a split payment, the reconciliation cron answers **HTTP 200 `passed:true`
+with all seven checks PASS**. The same exercise on `master` answers HTTP 500
+`passed:false`.
+
+**Browser smoke: 17 PASS / 1 FAIL / 1 N/A of 19.** The N/A is deliberate and
+new — Plaid Link and Stripe.js are blocked by this environment's egress proxy,
+so bank linking is reported as **not verifiable here** rather than passed or
+failed, because counting it either way would misrepresent an unexercised
+workflow. The remaining FAIL is a genuine app-origin 404 on a `/feed?_rsc=`
+prefetch, left failing rather than suppressed.
+
+**Migration impact.** None. No schema change in any of the four PRs.
+
+**Unresolved findings.** The independent accounting review (still waived, not
+met). The `/feed?_rsc=` prefetch 404 — observed, low severity, navigation
+unaffected, and explicitly **not diagnosed**; the middleware path lists are
+correct, so it appears to be framework-level RSC handling. No form control on
+the auth pages has a `name`, `id` or `htmlFor` association, which is why the
+smoke script must select by position — a real accessibility defect, reported
+and not fixed. Cross-currency reconciliation scope. Historical opening-balance
+discrepancies, whose remediation plan is proposed and unauthorized.
+
+**Rollback requirement.** Each PR reverts independently; none is merged. No
+production balance, ledger entry, migration or credential was touched.
+
+**Next recommended action.** Owner: review and merge #82–#85, settle Preview
+database isolation, and arrange the independent claim-accounting review.
+Decision 0013 stays unimplemented until that review is satisfied.

@@ -37,7 +37,10 @@ const require = createRequire(import.meta.url);
 const { chromium, devices } = require(process.env.PLAYWRIGHT_MODULE ?? '/opt/node-tools/node_modules/playwright');
 const OUT = process.argv[2];
 const results = [];
-function log(step, status, detail='') { results.push({step,status,detail}); console.log(`${status==='PASS'?'PASS':'FAIL'} | ${step} | ${detail}`); }
+function log(step, status, detail = '') {
+  results.push({ step, status, detail });
+  console.log(`${status} | ${step} | ${detail}`);
+}
 
 const browser = await chromium.launch();
 
@@ -62,11 +65,24 @@ async function fill(sel, val) { const l = p.locator(sel).first(); if (await l.co
 // earlier version used input[placeholder*="ame" i], which matched nothing
 // (the placeholder is "Jane Smith"), left Full Name empty, and reported the
 // app broken when the app had correctly refused an incomplete form.
-await p.getByLabel(/full name/i).fill('UI Test User').catch(async () => {
-  await fill('input[name="name"]', 'UI Test User');
-});
-await fill('input[type="email"], input[name="email"]', email);
-await fill('input[type="password"], input[name="password"]', 'SandboxPass!2026');
+// Selected BY POSITION AND TYPE, which is ugly and is the only thing that
+// works: no input on this form has a `name`, an `id`, or a label associated
+// with it via `htmlFor`. Measured — all four render as
+// {type, name: null, id: null}. So `getByLabel()` times out and
+// `input[name="name"]` matches nothing.
+//
+// That is a real accessibility defect, reported separately: a form control
+// with no accessible name is invisible to a screen reader and to password
+// managers. It is NOT worked around by this comment — it is worked around by
+// this selector, which is a different thing, and the defect stays open.
+//
+// An earlier revision used input[placeholder*="ame" i], matched nothing (the
+// placeholder is "Jane Smith"), left Full Name empty, and reported the app
+// broken when the app had correctly refused an incomplete form.
+const regInputs = p.locator('form input');
+await regInputs.nth(0).fill('UI Test User');
+await p.locator('form input[type="email"]').first().fill(email);
+await p.locator('form input[type="password"]').first().fill('SandboxPass!2026');
 await p.screenshot({ path: `${OUT}/02-register-filled.png` });
 
 const submit = p.locator('button[type="submit"], button:has-text("Create"), button:has-text("Sign up"), button:has-text("Register")').first();
@@ -103,7 +119,30 @@ for (const [name, path] of [['feed','/feed'],['send','/send'],['request','/reque
   log(`page ${name}`, (!broken && !empty) ? 'PASS':'FAIL', broken ? 'error text on page' : empty ? 'page essentially empty' : `${body.trim().length} chars`);
   await p.screenshot({ path: `${OUT}/page-${name}.png`, fullPage: true });
 }
-log('console errors (desktop)', errs.length === 0 ? 'PASS':'FAIL', errs.slice(0,3).join(' | ').slice(0,300) || 'none');
+// The console-error check is split in two, because one half is an
+// application property and the other is a property of THIS NETWORK.
+//
+// The pages load Plaid Link and Stripe.js from cdn.plaid.com and
+// js.stripe.com. Both are blocked by the engineering environment's egress
+// proxy (ERR_TUNNEL_CONNECTION_FAILED), which says nothing about the
+// application. Counting them as a failure makes the suite permanently red
+// for an environment limit; counting them as a pass would misrepresent a
+// workflow — bank linking — as verified when it was never exercised.
+// So they are reported as NOT APPLICABLE, named.
+const blockedExternal = errs.filter((e) => /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY/.test(e));
+const appErrors = errs.filter((e) => !blockedExternal.includes(e));
+log(
+  'console errors from the application itself',
+  appErrors.length === 0 ? 'PASS' : 'FAIL',
+  appErrors.slice(0, 3).join(' | ').slice(0, 300) || 'none',
+);
+log(
+  'third-party SDKs reachable (Plaid Link, Stripe.js)',
+  blockedExternal.length === 0 ? 'PASS' : 'N/A',
+  blockedExternal.length
+    ? `${blockedExternal.length} blocked by this environment's egress proxy — bank linking NOT verified here`
+    : 'reachable',
+);
 
 // ---------- MOBILE ----------
 const m = await browser.newContext({ ...devices['iPhone 13'] });
@@ -129,5 +168,12 @@ for (const [name, path] of [['feed','/feed'],['send','/send'],['history','/histo
 log('mobile page errors', merrs.length===0 ? 'PASS':'FAIL', merrs.slice(0,2).join(' | ').slice(0,200) || 'none');
 
 await browser.close();
-const fails = results.filter(r=>r.status==='FAIL').length;
-console.log(`\n=== ${results.length - fails} PASS / ${fails} FAIL ===`);
+const fails = results.filter((r) => r.status === 'FAIL').length;
+const na = results.filter((r) => r.status === 'N/A').length;
+const passes = results.length - fails - na;
+console.log(
+  `\n=== ${passes} PASS / ${fails} FAIL / ${na} N/A (of ${results.length}) ===`,
+);
+console.log(
+  na ? 'N/A = not verifiable in this environment; NOT counted as verified.' : '',
+);
