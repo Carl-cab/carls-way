@@ -204,11 +204,28 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_deposit_enabled BOOLEAN NOT NULL
 -- reason, and admin login lockout) could not be tested against a fixture
 -- database either.
 --
--- The legacy `users.balance` column is deliberately NOT added. No application
--- code reads it — the apparent matches are prose in sandbox consent strings —
--- and CLAUDE.md forbids its use in new code, so adding it to the fixture
--- would invite exactly that.
+-- CORRECTION, and the reason is worth keeping. An earlier revision of this
+-- comment said the legacy `users.balance` column was "deliberately NOT added"
+-- because "no application code reads it". That was wrong. `GET /api/me`
+-- selects it:
+--
+--     SELECT id, name, username, email, phone, balance, balance_cad, ...
+--
+-- and answered 500 `column "balance" does not exist` on this fixture. The
+-- claim came from a grep that excluded every line also mentioning
+-- `balance_cad` — which is precisely the line that disproves it. A filter
+-- written to remove false positives removed the true one.
+--
+-- It is added below. Two independent parts of the repository already require
+-- it: `MONEY_COLUMNS` in lib/db.ts lists ['users','balance'] and the
+-- migration registry probes that list, and scripts/verify-migrate.sql checks
+-- its type. A database without it fails both.
+--
+-- CLAUDE.md's rule stands unchanged and is about *writing*: never use this
+-- column in new code, always `balance_cad` / `balance_usd`. Making the test
+-- schema match what the code already reads is not using it.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS province TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(14,2) NOT NULL DEFAULT 100.00;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_provider TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_session_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_verified_at TIMESTAMPTZ;
@@ -275,6 +292,12 @@ CREATE TABLE IF NOT EXISTS split_participants (
 );
 
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS split_id INTEGER REFERENCES splits(id);
+-- Read by GET /api/feed, GET /api/transactions and GET /api/transactions/[id],
+-- and written by the last of those. It is in BOTH lib/db.ts and the migrate
+-- route, so a migrated database has it; it was missing only here, which made
+-- the feed answer 500 `column t.estimated_settlement does not exist` on a
+-- fixture-built database. Found by loading the feed in a running sandbox.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS estimated_settlement TIMESTAMPTZ;
 
 -- Split test actors: one creator, three participants.
 INSERT INTO users (id, name, username, email, password_hash, country, kyc_status, balance_cad)
@@ -505,3 +528,71 @@ CREATE TABLE IF NOT EXISTS plaid_transfer_event_cursors (
 INSERT INTO plaid_transfer_event_cursors (cursor_id, after_id)
 VALUES ('default', 0)
 ON CONFLICT (cursor_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- The remainder of the gap between this fixture and the two authoritative
+-- schema sources, closed in one pass and now enforced by
+-- `lib/__tests__/fixture-schema-parity.test.ts`.
+--
+-- Found by that test rather than one 500 at a time: four tables and four
+-- columns, after `users.province`, `users.balance`,
+-- `transactions.estimated_settlement` and the six KYC/lockout columns had
+-- already been found by using a running sandbox. Whack-a-mole was the wrong
+-- method; comparing the whole schema was the right one.
+--
+-- Definitions mirror `initializeSchema()` in lib/db.ts and the migrate route
+-- EXACTLY, including constraint clauses and defaults. An approximation would
+-- be a fourth dialect of the schema rather than a copy of it.
+-- ---------------------------------------------------------------------------
+
+-- Admin RBAC: `admin_users` was here, but roles, permissions and the join
+-- table were not — so permission checks (`exceptions:manage` and the rest)
+-- could not be exercised against a real database at all. These are the
+-- gate on the Redis-verification and ledger-backfill routes.
+CREATE TABLE IF NOT EXISTS admin_roles (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admin_permissions (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  category TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+  role_id INTEGER NOT NULL REFERENCES admin_roles(id),
+  permission_id INTEGER NOT NULL REFERENCES admin_permissions(id),
+  PRIMARY KEY (role_id, permission_id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Marks intents needing reconciliation. The partial unique index is part of
+-- the contract, not an optimisation: it is what makes "one open flag per
+-- intent" true, so a fixture without it would let a test pass that production
+-- would reject.
+CREATE TABLE IF NOT EXISTS transfer_recovery_flags (
+  id SERIAL PRIMARY KEY,
+  transfer_intent_id INTEGER NOT NULL REFERENCES transfer_intents(id),
+  status TEXT NOT NULL,
+  recovery_action TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  flagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ,
+  resolved_by TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_open_recovery_flag
+  ON transfer_recovery_flags (transfer_intent_id) WHERE resolved_at IS NULL;
+
+-- `fx_rate` is why `POST /api/transactions` answered 500 on this fixture:
+-- sending money writes it on every transaction, cross-border or not, because
+-- a same-currency send records a rate of 1.0 rather than NULL.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS fx_rate NUMERIC(12,6) NOT NULL DEFAULT 1.0;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS fx_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS relink_required BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
