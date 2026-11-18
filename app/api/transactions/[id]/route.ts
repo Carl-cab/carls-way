@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSql } from '@/lib/db';
 import { getAuthUser, admitVelocity, VelocityLimitError, auditLog } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
+import { isCapabilityRestricted, restrictionMessage } from '@/lib/beta-restrictions';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
 import {
@@ -96,6 +97,48 @@ export async function PATCH(
   if (action === 'accept') {
     const payerCurrency = transaction.sender_currency;
     const receiverCurrency = transaction.receiver_currency;
+
+    // RESTRICTED BETA GATE — accepting a request is a balance-moving path,
+    // and it was missed when the restriction was first added to
+    // POST /api/transactions. Found by independent inspection of PR #87.
+    //
+    // THE GAP THIS CLOSES: a cross-currency request created BEFORE the
+    // restriction took effect could still be accepted afterwards and move
+    // funds. Gating only where a payment is *created* leaves every path that
+    // acts on an already-created object open — the same lesson
+    // `money:split-pay` taught, and the reason the transfer-confirm route
+    // carries its own gate too.
+    //
+    // The currency pair comes from the TRANSACTION's own stored
+    // `sender_currency` / `receiver_currency`, which is the authoritative
+    // record of what this payment will do. Deliberately not
+    // `transaction.is_cross_border`: that is a denormalised boolean written
+    // at creation, and if it ever disagreed with the currencies the
+    // currencies are what the FX quote and the ledger actually follow.
+    //
+    // Placed before parsePositiveMoney, before buildFxQuote and before the
+    // money transaction, so a refusal requests no rate, consumes no velocity
+    // budget and moves nothing.
+    //
+    // Scoped to `accept` only: DECLINING a request moves no money and must
+    // stay available, or a participant holding a cross-currency request from
+    // before the beta would have no way to clear it.
+    //
+    // RETURNS rather than throws, unlike the other gates. This handler has no
+    // outer try/catch, so a thrown BetaRestrictionError would surface as an
+    // unhandled 500 — the refusal would be reported as a server fault. Same
+    // resolver, same response shape; only the control flow differs, and it
+    // differs because of this route's structure rather than by preference.
+    if (payerCurrency !== receiverCurrency && isCapabilityRestricted('cross_currency')) {
+      return NextResponse.json(
+        {
+          error: restrictionMessage('cross_currency'),
+          code: 'BETA_RESTRICTED',
+          capability: 'cross_currency',
+        },
+        { status: 403 },
+      );
+    }
     let amountMinor: number;
     try {
       amountMinor = parsePositiveMoney(String(transaction.amount), payerCurrency);

@@ -64,10 +64,10 @@ export default function RequestPage() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="from-username">
               From (username)
             </label>
-            <input
+            <input id="from-username"
               type="text"
               value={form.receiverUsername}
               onChange={e => update('receiverUsername', e.target.value)}
@@ -78,12 +78,12 @@ export default function RequestPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="amount">
               Amount ({currency})
             </label>
             <div className="relative">
               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">$</span>
-              <input
+              <input id="amount"
                 type="number"
                 step="0.01"
                 min="0.01"
@@ -99,10 +99,10 @@ export default function RequestPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="what-apos-s-it-for">
               What&apos;s it for?
             </label>
-            <input
+            <input id="what-apos-s-it-for"
               type="text"
               value={form.note}
               onChange={e => update('note', e.target.value)}

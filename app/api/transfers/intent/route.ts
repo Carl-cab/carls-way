@@ -4,6 +4,7 @@ import { getAuthUser, checkVelocityLimit, auditLog } from '@/lib/auth';
 import { getTransferProvider, regionFromCountry, resolveExecutionMode } from '@/lib/transfers/router';
 import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
 import { MoneyValidationError, isMoneyCurrency, parsePositiveMoney, toDatabaseDecimal } from '@/lib/money';
+import { assertCapabilityAllowed, BetaRestrictionError } from '@/lib/beta-restrictions';
 
 export async function POST(req: Request) {
   try {
@@ -23,6 +24,35 @@ export async function POST(req: Request) {
     }
 
     const sql = getSql();
+
+    // Body parsed and the transfer type validated FIRST, ahead of every
+    // database read, so the restricted-beta gate below can run before any
+    // query. This order was corrected after the gate's own test caught it:
+    // the gate originally sat after the user and bank-account lookups, which
+    // made its comment false and meant a withheld capability still cost two
+    // queries.
+    const body = await req.json() as { type?: string; amount?: unknown; currency?: string };
+    const { type, amount, currency } = body;
+
+    if (!type || amount === undefined || amount === null || !currency) {
+      return NextResponse.json({ error: 'Missing required fields: type, amount, currency' }, { status: 400 });
+    }
+    if (!['add_money', 'cash_out'].includes(type)) {
+      return NextResponse.json({ error: 'type must be add_money or cash_out' }, { status: 400 });
+    }
+
+    // RESTRICTED BETA GATE — before any database read, so a withheld
+    // capability creates no intent to clean up and leaves no trace a later
+    // step could act on.
+    //
+    // 403, not 400: the request is well formed and the caller is
+    // authenticated — they are simply not permitted this capability. A 400
+    // would invite them to "fix" the request and retry.
+    //
+    // Deliberately unwrapped: nothing catches between here and the handler's
+    // outer catch, which maps BetaRestrictionError explicitly. A catch that
+    // swallowed it would turn a refusal into an admission.
+    assertCapabilityAllowed(type === 'add_money' ? 'funding' : 'cash_out');
 
     // Load user record — need country for provider routing and KYC status
     const userRows = await sql`
@@ -49,15 +79,6 @@ export async function POST(req: Request) {
     }
     const bankAccountId = bankRows[0].id as number;
 
-    const body = await req.json() as { type?: string; amount?: unknown; currency?: string };
-    const { type, amount, currency } = body;
-
-    if (!type || amount === undefined || amount === null || !currency) {
-      return NextResponse.json({ error: 'Missing required fields: type, amount, currency' }, { status: 400 });
-    }
-    if (!['add_money', 'cash_out'].includes(type)) {
-      return NextResponse.json({ error: 'type must be add_money or cash_out' }, { status: 400 });
-    }
     if (typeof amount !== 'string' && typeof amount !== 'number') {
       return NextResponse.json({ error: 'amount must be a decimal string or number' }, { status: 400 });
     }
@@ -102,6 +123,16 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: true, ...result }, { status: 201 });
   } catch (err) {
+    // Mapped BEFORE MoneyValidationError and before the generic 500, so a
+    // withheld capability can never be reported as the caller's malformed
+    // input or as a server fault. Both would be misleading: the request was
+    // fine and nothing broke.
+    if (err instanceof BetaRestrictionError) {
+      return NextResponse.json(
+        { error: err.message, code: 'BETA_RESTRICTED', capability: err.capability },
+        { status: 403 },
+      );
+    }
     if (err instanceof MoneyValidationError) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }

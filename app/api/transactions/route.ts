@@ -5,6 +5,7 @@ import { buildFxQuote } from '@/lib/fx';
 import { createNotification } from '@/lib/notifications';
 import { createLedgerPair, createCrossBorderLedgerPair } from '@/lib/ledger';
 import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
+import { assertCapabilityAllowed, BetaRestrictionError } from '@/lib/beta-restrictions';
 import {
   MoneyValidationError,
   formatMoneyDisplay,
@@ -102,6 +103,20 @@ export async function POST(req: NextRequest) {
     const senderCurrency = sender.country === 'US' ? 'USD' : 'CAD';
     const receiverCurrency = receiver.country === 'US' ? 'USD' : 'CAD';
     const isCrossBorder = senderCurrency !== receiverCurrency;
+
+    // RESTRICTED BETA GATE. Placed the moment cross-border is known and
+    // before the balance check, the FX quote, the velocity admission and the
+    // money transaction — so a withheld payment consumes no budget, requests
+    // no rate, and moves nothing.
+    //
+    // The condition is the CURRENCY PAIR, not the user's country and not a
+    // request field: `senderCurrency` and `receiverCurrency` are both derived
+    // from the two `country` columns here, so a caller cannot present
+    // themselves as same-currency. That is what makes this a server-enforced
+    // restriction rather than a client-side one.
+    if (isCrossBorder) {
+      assertCapabilityAllowed('cross_currency');
+    }
     const inputCurrency = type === 'pay' ? senderCurrency : receiverCurrency;
     const amountMinor = parsePositiveMoney(amount, inputCurrency, { maxMinorUnits: 1_000_000 });
     const amountDecimal = toDatabaseDecimal(amountMinor);
@@ -299,6 +314,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, transactionId: reqTxId }, { status: 201 });
     }
   } catch (err) {
+    // Before every other branch: a withheld capability is neither the
+    // caller's malformed input nor a server fault, and reporting it as
+    // either would mislead a beta participant into retrying.
+    if (err instanceof BetaRestrictionError) {
+      return NextResponse.json(
+        { error: err.message, code: 'BETA_RESTRICTED', capability: err.capability },
+        { status: 403 },
+      );
+    }
     if (err instanceof MoneyValidationError) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }

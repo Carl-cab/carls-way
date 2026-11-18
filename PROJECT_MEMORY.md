@@ -5037,3 +5037,97 @@ merged all of them, and CodeRabbit skipped every one because the repository
 has fewer than 10 stars. A merge is not a review, and the independent
 validation of the claim/exposure accounting model remains **waived rather
 than met** — nothing in Sprint 2 counts toward it.
+
+---
+
+## 2026-11-18 — Restricted P2P-only beta: the control, and two fixes that could not be made
+
+**Purpose and scope.** The owner approved proceeding toward a restricted
+P2P-only internal sandbox beta and set ten execution priorities. This entry
+records what was built, what was verified, and — equally — what turned out to
+be impossible and was therefore not shipped.
+
+**Financial or security behaviour affected.** One new control: funding,
+cash-out and cross-currency payments are refused server-side with **403
+BETA_RESTRICTED**. Nothing else changed. No production database, credential,
+migration or configuration was touched; no live rail enabled; no invitation
+sent.
+
+**The control, and why its default matters.** The profile resolves from
+`MANNA_BETA_PROFILE`, but in a **sandbox** deployment an absent or misspelled
+value resolves to `p2p_only`. Forgetting the variable leaves a beta restricted
+rather than open — the opposite posture from an opt-in flag. Lifting it needs
+an explicit `MANNA_BETA_PROFILE=unrestricted`. Production is deliberately
+untouched: its protection is the live-rail flags and decision 0010.
+
+Enforced at three points. `transfers/[id]/confirm` is **not** redundant with
+`transfers/intent`: confirm is where money moves, and a draft created before
+the restriction took effect would otherwise still settle — the lesson
+`money:split-pay` taught about controls that live only where an object is
+created. The cross-currency condition is the currency pair derived from both
+users' `country` columns, so a caller cannot present themselves as
+same-currency.
+
+**Verified against a running deployment** with `MANNA_ENV=sandbox` and no
+profile variable set: `/api/beta-profile` reports `p2p_only`; `add_money`,
+`cash_out` and a CA→US payment each answer 403; a CA→CA payment answers 201.
+Bypass attempts covered casing, whitespace, body fields named after the
+environment variable, and a pre-existing draft at confirm — each asserting not
+only the status but that no query, FX quote, velocity admission or transaction
+ran.
+
+**A defect my own test caught.** The intent gate originally sat *after* the
+user and bank-account lookups, making its own comment false and costing two
+queries per refusal. Reordered so body parsing and type validation precede
+every database read.
+
+**Reconciliation: 7/7 PASS, cron HTTP 200** on a correctly provisioned
+database, after a P2P send, a request-accept and a split payment. The first
+run showed 3 failures, all of them **CI-fixture test accounts** seeded with
+500.00 and no ledger entries. Hence a new provisioning requirement: the beta
+database must be built from `initializeSchema()` plus `POST /api/migrate` and
+must **not** have `test-schema.sql` applied.
+
+**Redis, verified properly for the first time.** A real server was run.
+Connectivity confirmed by keys written under `ratelimit:*` rather than inferred
+from the variable. A mid-flight kill degraded to in-process counters while
+still serving requests, emitting one credential-free operator line; a restart
+plus the 30s cooldown restored shared counting. It does not latch.
+
+**TWO FIXES THAT COULD NOT BE MADE, and were reverted rather than shipped.**
+The `/feed?_rsc=` 404 is the shadow of a redirected prefetch. I attempted to
+stop the middleware redirecting prefetches, twice:
+
+1. Detect the prefetch by header — compiled cleanly and did **nothing**.
+   Echoing the headers middleware can see returns only `accept, host,
+   user-agent, x-forwarded-*`: Next strips `RSC` and `Next-Router-Prefetch`
+   before middleware runs.
+2. Detect the `_rsc` marker instead — also ineffective: `?dbg=1&_rsc=abc`
+   arrives at middleware as `?dbg=1`.
+
+Middleware cannot distinguish a prefetch from a navigation at all, so both
+changes were reverted. Shipping either would have been dead code under a
+confident comment, which is the failure mode this repository keeps correcting.
+The failing check was **not suppressed**.
+
+**Tests run and results.** 75 files / 1041 tests passing on a fresh fixtured
+database; typecheck 0 errors; lint 0 errors / 29 pre-existing warnings; audit
+clean. Browser 17 PASS / 1 FAIL / 1 N/A of 19. Mutation-checked: making
+sandbox opt-in fails 8 cases, removing the confirm gate 1, removing the
+cross-currency gate 1.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The independent accounting validation (still waived,
+not met) and decision 0013 blocked behind it; Preview isolation and
+provisioning, both owner-blocked; the RSC prefetch 404; the opening-balance
+set, for which a quarantine option now sits beside the repair plan and neither
+is authorized; no monitoring of `rateLimitBackendHealth()`.
+
+**Rollback requirement.** One branch, revertible on its own. Nothing merged
+without authorization.
+
+**Next recommended action.** Owner: provision an isolated Preview database per
+the runbook, set and verify the beta profile from the running deployment, and
+decide the opening-balance outcome. Engineering: nothing further until those
+land — 0013 stays blocked.
