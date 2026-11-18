@@ -4768,3 +4768,77 @@ was true when written and is no longer: the owner authorized the merge on
 2026-11-18 and #77 landed on `master` as `0cdadfa`, with `expectedHeadSha`
 pinned to `7dae651`. Corrected here rather than left to contradict the history
 below it.
+
+---
+
+## 2026-11-18 — Post-merge audit: four governance documents re-anchored, one waived gate recorded as waived
+
+**Purpose and scope.** The owner asked for a project audit and for updates to
+be synced. This entry records what the audit found and what was corrected.
+Documentation and status records only — `CLAUDE.md`, `CURRENT_STATUS.md`,
+`GO_LIVE_RUNBOOK.md`, `scripts/status/readiness.json` and this file. No code,
+no configuration, no Vercel change, no migration.
+
+**Verified state at the time of the audit.** `master` at `38678e3`. Measured
+on a database created fresh and seeded with the CI fixture: **68 files / 977
+tests**, all passing; typecheck 0 errors; lint 0 errors / 29 pre-existing
+warnings. GitHub's deployments API records deployment 7870051100, environment
+Production, sha `0cdadfa6`, state `success` — #77's merge. `POST /api/migrate`
+has NOT been run for `0cdadfa` or `38678e3` and is not authorized.
+Fifteen remote branches remain unmerged into `master`; none of them is
+`sec/claim-bounded-velocity-release`, which is the evidence that the claim
+work landed rather than a recollection that it did.
+
+**The finding that mattered, and it was not a stale number.** Four documents
+still described the claim-bounded velocity release as sitting on an unmerged
+branch awaiting independent validation. It merged on 2026-11-18. But the
+correction is *not* "the prerequisite is met" — the owner authorized the merge
+while **waiving** the independent-validation precondition for that decision.
+So the accurate statement is that the code is on `master` and the validation
+never happened, and the two must not be allowed to collapse into each other
+later. A waiver of a gate is not a pass through it. Every corrected passage
+now says so in those terms, and `GO_LIVE_RUNBOOK.md` §10 gains a new
+**unchecked** box for the validation rather than losing one.
+This matters because of what the gate was for: this control has been got wrong
+twice in two revisions, in opposite directions, and both times the
+accompanying tests asserted the defect under titles claiming correctness. The
+validation that does exist is adversarial self-review by the change's own
+author — evidence, and not independent.
+
+**What rendering the report caught that editing fields did not.** Two
+*neighbouring* rows were left asserting what the main correction had just made
+false. The VERIFIED P2P-money-paths row still ended "NOT YET ON MASTER … #74
+itself remains UNMERGED", naming head `694550b` and 943 tests. And the
+production-cron row still read that `CRON_SECRET`'s presence was unverified,
+which the owner's 2026-11-17 audit had settled — while the report's own
+deployment prose two sections above said it was set. Both are corrected, both
+by appending the correction rather than deleting the earlier claim, and each
+keeps its old measurement against the commit it was taken on. This is the
+second time in two revisions that rendering the report found drift that field
+edits missed, which is why that rule is in `CLAUDE.md`.
+
+**Financial or security behaviour affected.** None. No control changed. The
+security-relevant content is the recording of an *unmet* prerequisite in the
+four places a reader checks, plus four owner actions added to
+`readiness.json`: remove `PLAID_SECRET` from Preview (and specifically do NOT
+add `PLAID_CLIENT_ID` there), compare the two `DATABASE_URL` values, delete
+`NEXT_PUBLIC_PLAID_ENV`, and assign a permanent Risk Operations Lead so
+`0011`'s "interim" does not quietly become permanent.
+
+**Tests run and results.** `pnpm test` 68 files / 977 tests all passing;
+`pnpm run typecheck` 0 errors; `pnpm run lint` 0 errors / 29 warnings;
+`node scripts/status/report.mjs` rendered and read in full.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The claim-model validation itself; the FINTRAC/FinCEN
+applicability question in `0010` §3.4; the three Vercel configuration actions;
+`0013` approved, specified and unimplemented.
+
+**Rollback requirement.** Documentation only — `git revert` of the merge
+suffices and restores no deleted evidence, since every correction was
+additive.
+
+**Next recommended action.** Owner: the three Vercel configuration changes,
+and a decision on how the claim-model validation is to be obtained now that it
+is a rail gate rather than a merge gate.

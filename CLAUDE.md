@@ -658,21 +658,35 @@ arbitrary end user.
   **decide another domain's outcome by reading** it. The first version of that
   rule had only the first half, which is why this survived it.
 
-- **`reverseVelocity()` is deleted; its replacement is on an unmerged branch
-  awaiting independent validation.** The defect: it released
+- **`reverseVelocity()` is deleted and its replacement is now on `master` —
+  but the independent validation the owner required was *waived for the
+  merge*, not satisfied.** The defect: it released
   `min(amount, current window total)`, and that total spans every money path,
   so a returned transfer freed budget `money:send` and `money:split-pay` had
   genuinely consumed. Abuse shape: fund by `add_money`, spend the credit
   through P2P, let the funding transfer return NSF, recover outbound budget
   actually used. Latent — a `returned` status needs a provider webhook and
   both live flags are off.
-  Replaced by `lib/velocity-claims.ts` on `sec/claim-bounded-velocity-release`
-  (`docs/decisions/0012`): claims keyed `(provider, reference)`, exposure
-  derived per domain, release is a state transition that writes nothing to
-  `velocity_checks`. **Still a prerequisite for enabling any rail**, because
-  the owner requires independent validation of the accounting model before
-  that branch merges — the first implementation of it reproduced the same
-  cross-domain error in the opposite direction and its own tests asserted it.
+  Replaced by `lib/velocity-claims.ts` (`docs/decisions/0012`): claims keyed
+  `(provider, reference)`, exposure derived per domain, release is a state
+  transition that writes nothing to `velocity_checks`. This reached `master`
+  through PR #77 on 2026-11-18 as `0cdadfa`, from the branch
+  `sec/claim-bounded-velocity-release`, and is deployed (GitHub deployment
+  7870051100, Production, `success`).
+  **What has NOT happened is the independent validation.** The owner set that
+  as a precondition because the *first* implementation of this model
+  reproduced the same cross-domain error in the opposite direction and its own
+  tests asserted the defect under titles claiming correctness. On 2026-11-18
+  the owner authorized the merge and **waived the precondition for the merge
+  decision** — a waiver of a gate is not a pass through it, and the two must
+  not be conflated here later. The validation that was done is adversarial
+  self-review by the change's own author (11 probes, 7 mutations, three
+  rounds, 20 findings addressed); that is evidence, and it is **not**
+  independent.
+  Two consequences stand. `docs/decisions/0013` remains blocked on this
+  model being independently validated, by its own terms. And **no rail may be
+  enabled on the strength of this code having merged** — the flags remain off
+  and `0010` sets permitted live throughput at zero as policy.
 - **The transfer rail consumes no velocity budget.** `POST
   /api/transfers/intent` runs a non-binding preview; no confirm or execute
   route has ever written velocity, despite a comment in the intent route that
