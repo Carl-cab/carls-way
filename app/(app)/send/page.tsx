@@ -32,6 +32,13 @@ function SendForm() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+  // Server-resolved beta posture. Same endpoint and same resolver the routes
+  // enforce with, so the page cannot offer what the API will refuse.
+  const [crossCurrencyAllowed, setCrossCurrencyAllowed] = useState<boolean | null>(null);
+  // Set when the chosen recipient uses a different currency AND cross-currency
+  // is withheld. Carried in state rather than computed at render time because
+  // the recipient's country is only known after the lookup below.
+  const [crossCurrencyBlocked, setCrossCurrencyBlocked] = useState(false);
 
   useEffect(() => {
     fetch('/api/me').then(r => r.json()).then((d: Me) => setMe(d));
@@ -51,7 +58,22 @@ function SendForm() {
       const receiver = Array.isArray(users) ? users.find(u => u.username === username) : null;
       if (!receiver) { setFxQuote(null); setFxLoading(false); return; }
       const toCurrency = receiver.country === 'US' ? 'USD' : 'CAD';
-      if (toCurrency === currency) { setFxQuote(null); setFxLoading(false); return; }
+      if (toCurrency === currency) {
+        setCrossCurrencyBlocked(false);
+        setFxQuote(null);
+        setFxLoading(false);
+        return;
+      }
+      // Cross-currency, and the beta withholds it: say so here rather than
+      // quoting a rate for a payment the API will refuse with 403. Fetching
+      // the quote anyway would also be a pointless Wise call.
+      if (crossCurrencyAllowed === false) {
+        setCrossCurrencyBlocked(true);
+        setFxQuote(null);
+        setFxLoading(false);
+        return;
+      }
+      setCrossCurrencyBlocked(false);
       const res = await fetch('/api/fx/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -60,7 +82,21 @@ function SendForm() {
       if (res.ok) setFxQuote(await res.json() as FxQuote);
     } catch { setFxQuote(null); }
     setFxLoading(false);
-  }, [currency]);
+  }, [currency, crossCurrencyAllowed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/beta-profile')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!cancelled && d) setCrossCurrencyAllowed(d.capabilities.cross_currency === true);
+      })
+      .catch(() => {
+        // Left null: unknown, so nothing is claimed either way and the
+        // ordinary same-currency path is unaffected.
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => { if (form.type === 'pay') fetchFxQuote(form.amount, form.receiverUsername); }, 600);
@@ -160,9 +196,15 @@ function SendForm() {
             </div>
           </div>
           {insufficient && <div className="bg-red-50 text-red-700 px-4 py-2 rounded-lg text-sm">Insufficient balance. Add money first.</div>}
+          {crossCurrencyBlocked && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-900 px-4 py-2 rounded-lg text-sm">
+              Cross-currency payments are turned off in this restricted beta.
+              You can send to people who use the same currency as you.
+            </div>
+          )}
           {error && <div className="bg-red-50 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>}
           {success && <div className="bg-green-50 text-green-700 px-4 py-2 rounded-lg text-sm">{success}</div>}
-          <button type="submit" disabled={loading || insufficient}
+          <button type="submit" disabled={loading || insufficient || crossCurrencyBlocked}
             className="w-full bg-blue-700 hover:bg-blue-800 text-white font-semibold py-3 rounded-lg transition disabled:opacity-60 text-lg">
             {loading ? (form.type === 'pay' ? 'Sending…' : 'Requesting…') : form.type === 'pay' ? `Send ${currency === 'CAD' ? '🍁' : '🦅'}` : `Request ${currency === 'CAD' ? '🍁' : '🦅'}`}
           </button>

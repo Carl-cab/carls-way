@@ -75,6 +75,18 @@ function TransfersPageInner() {
   const [currency, setCurrency] = useState('CAD');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // The restricted-beta posture, read from the SERVER's own resolver via
+  // /api/beta-profile rather than from a build-time constant. The interface
+  // must not be able to disagree with the routes: a page that offered a
+  // capability the API refuses would send a participant into a 403, and one
+  // that hid a capability the API still honoured would merely look
+  // controlled. `null` means "not yet known", and the form stays disabled
+  // until it is — failing closed while loading rather than flashing controls
+  // that may be withheld.
+  const [betaCaps, setBetaCaps] = useState<{
+    restricted: boolean;
+    capabilities: { funding: boolean; cash_out: boolean; cross_currency: boolean };
+  } | null>(null);
 
   // Active intent going through the review flow
   const [activeIntentId, setActiveIntentId] = useState<number | null>(null);
@@ -157,6 +169,27 @@ function TransfersPageInner() {
     setError('');
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/beta-profile')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!cancelled && d) setBetaCaps(d);
+      })
+      .catch(() => {
+        // Leaving betaCaps null keeps the form disabled. An interface that
+        // re-enabled withheld controls because a status request failed would
+        // be the wrong way round.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const fundingAllowed = betaCaps?.capabilities.funding === true;
+  const cashOutAllowed = betaCaps?.capabilities.cash_out === true;
+  const anyTransferAllowed = fundingAllowed || cashOutAllowed;
+
   return (
     <div className="space-y-4">
       <div>
@@ -168,12 +201,16 @@ function TransfersPageInner() {
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
         <p className="text-sm font-semibold text-blue-900 mb-0.5">Sandbox Mode</p>
         <p className="text-sm text-blue-800">
-          No real bank funds move in sandbox, but your Manna balance updates instantly so you can add money, cash out, and send end-to-end. US users use the US rail; Canadian users use the Canadian EFT rail.
+          {betaCaps?.restricted
+            ? 'This is a restricted internal beta. Adding money and cashing out are turned off, so this page is read-only — you can review past transfers but not start a new one. Sending and requesting money between Manna accounts works normally.'
+            : 'No real bank funds move in sandbox, but your Manna balance updates instantly so you can add money, cash out, and send end-to-end. US users use the US rail; Canadian users use the Canadian EFT rail.'}
         </p>
       </div>
 
-      {/* Step 1: Form */}
-      {step === 'form' && (
+      {/* Step 1: Form. Hidden entirely when every transfer capability is
+          withheld — a disabled form still invites a participant to try, and
+          the honest thing is to say the page has nothing to do right now. */}
+      {step === 'form' && anyTransferAllowed && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
           <h2 className="text-lg font-bold text-gray-900 mb-4">Initiate Transfer</h2>
           <form onSubmit={handleCreateIntent} className="space-y-4">
@@ -184,8 +221,8 @@ function TransfersPageInner() {
                 onChange={e => setTransferType(e.target.value as 'add_money' | 'cash_out')}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                <option value="add_money">Add Money (from bank)</option>
-                <option value="cash_out">Cash Out (to bank)</option>
+                {fundingAllowed && <option value="add_money">Add Money (from bank)</option>}
+                {cashOutAllowed && <option value="cash_out">Cash Out (to bank)</option>}
               </select>
             </div>
             <div>
