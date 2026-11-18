@@ -4160,3 +4160,510 @@ history, so a bad production build can be rolled back independently of the
 git revert.
 
 **Next recommended action.** Validation verdict on PR #77, which gates `0013`.
+
+## 2026-11-08 — A confirmed cross-domain accounting defect, and the model that replaced it
+
+**Purpose and scope.** An independent GitHub inspection found a potential
+critical defect in `sec/claim-bounded-velocity-release` at `836a8cd`:
+`createVelocityClaim()` records a claim without charging `velocity_checks`,
+while `releaseVelocityClaim()` writes negative rows into it. Investigated
+against the source and a real database as instructed, rather than dismissed
+because the suite passed. **Confirmed, and worse than reported.**
+
+**Financial behaviour affected — the finding.** The root cause is
+architectural. `velocity_checks` has **no domain column**: it is one
+undifferentiated pool per `(user_id, window_type, window_start, currency)`
+holding `money:send`, request-accept and `money:split-pay` consumption
+together. Any credit into it is cross-domain by construction, whatever bounds
+the amount. Measured on a database built from the CI fixture:
+
+- a funding claim of 100 released against 450 of **pure P2P** volume left 350
+  — the funding return paid back P2P spending;
+- a **withdrawal** claim behaved the same way, 400 → 250;
+- a release from an empty start drove usage to **−300**, which
+  `parseDatabaseMoney` refused to read;
+- after that release the payer admitted 500 and then a further 250 — **750 of
+  P2P against a 500 hourly ceiling**, a 50% bypass from a return on a transfer
+  that consumed nothing.
+
+Clamping the negative rows would have hidden the third case and left the first
+two untouched, so the model changed rather than the arithmetic.
+
+**My own tests asserted the defect.** `velocity-claim-release.test.ts` held
+`expect(await consumed()).toBe(cad('350.00'))` under a title claiming the
+release was "bounded by the claim" — the amount was bounded, the *domain* was
+not, and the title hid the difference. One case described a claim owner going
+negative against an empty window as "representable and auditable", which is a
+rationalisation of capacity creation. This is the same failure as the
+`reverseVelocity` tests deleted one revision earlier, by the same hand: a test
+that encodes current behaviour as the expectation, so the defect reads as a
+feature and the fix reads as a regression. Five tests across three files were
+rewritten, each now stating the invariant with the old expectation named in a
+comment.
+
+**The correction.** Funding and withdrawal exposure lives in
+`velocity_claims` and is **derived** from claim state by `claimedExposure()`,
+scoped on `user_id` / `claim_kind` / `currency`. `lib/velocity-claims.ts` now
+writes to `velocity_checks` **not at all** — no insert, no update, no clamp. A
+release is a state transition removing the claim from the reserved set, so it
+reduces only its own domain. Exposure sums **positive** amounts over a subset,
+so it cannot go negative or create capacity: a property of the model rather
+than a guard on a row.
+
+**Transaction and audit integrity — also confirmed.** The release called
+`auditLog()` inside its transaction; that helper takes its own connection from
+`getSql()` and swallows errors. Mutation restoring it makes the
+six-concurrent-release test **time out at 5000 ms** with cascading 10-second
+hook timeouts — the `max: 5` pool deadlock, hanging rather than failing — and
+the atomicity cases report `resolved instead of rejecting`. The audit row also
+committed on its own connection, so it **outlived a rolled-back release**: a
+record of something that did not happen, which is worse than a missing one.
+The audit row is now written on the caller's executor.
+
+**Structural guards added**, because both revisions of this defect were
+invisible to a reviewer reading one diff:
+`velocity-admission-callers.test.ts` now fails if `lib/velocity-claims.ts`
+contains any write against `velocity_checks`, if `claimedExposure()` stops
+scoping on `claim_kind`, or if the module calls `auditLog()`.
+
+**Tests run and their results.** **67 files / 965 tests, all passing** at
+`6b0ceb8` on a database created fresh with the CI fixture. Typecheck 0 errors;
+lint 0 errors / 30 pre-existing warnings; `pnpm run build` succeeds;
+`scripts/verify-migrate.sql` reports `velocity_claims` and its unique index
+`OK`. Mutation-checked four ways: the reported cross-domain write is caught by
+**12 cases across four files**; restoring `auditLog()` by 5; the original
+`reverseVelocity` window-release by 2; removing both idempotency guards by 2.
+
+Two harness bugs were found by running the tests rather than reading them, and
+both first looked like production defects: the executor proxy needed
+`sql.json` carried across or `jsonbParam()` failed with "sql.json is not a
+function"; and the static guard's own string-stripper blanked `'reserved'`, so
+its assertion could never have matched.
+
+**Documents.** `0012` revised to lead with the defect rather than the design.
+`0009` marked **Accepted (architecture only)** per the owner's approval of
+Option C, with its sandbox step 2 marked **wrong** — it said to admit with
+`admitVelocity()`, which would have made a simulated `add_money` consume the
+payer's real P2P outbound budget. `0010` (funding/withdrawal limits) and
+`0011` (realized loss) landed as Proposed. `0013` written as the corrected
+sandbox acceptance criteria and regression-test specification, before
+implementation, as instructed.
+
+**Migration impact.** One table, `velocity_claims`, in all three schema
+sources plus `scripts/verify-migrate.sql`. `POST /api/migrate` required after
+deploy. No live path reads it yet.
+
+**Rollback requirement.** Revert the commits; the table is additive and unused
+by any live path. Reverting restores the defect, so the rail stays disabled.
+
+**Unresolved findings.** The accounting model has **not** been independently
+validated — the owner requires that before this branch merges, and the
+history justifies it: this control has been got wrong twice in two revisions,
+in opposite directions, with the tests asserting the defect both times. The
+second was caught by an independent inspection, not by the suite, which
+passed. CodeRabbit cannot supply the validation: auto-review is disabled for
+this repository (fewer than 10 stars) and manual triggers hit the free-OSS
+rate limit.
+
+**Next recommended action.** Owner: arrange independent validation of the
+accounting model; decide the #76 review exception; approve `0013`'s sandbox
+approach and set its ceiling; supply `0010`'s limits and `0011`'s thresholds.
+
+**Commit / PR.** Branch `sec/claim-bounded-velocity-release`, commits
+`836a8cd` (first implementation, defective) and `6b0ceb8` (the correction).
+Not merged, no PR opened. Stacked on PR #75 → PR #74. PR #76 is the dependency
+fix at `ca2c4fd`, open against `master`.
+
+---
+
+## 2026-11-09 — PR #76's review requirement: asked the reviewer, got "unverified"
+
+**Purpose and scope.** PR #76 (the `follow-redirects` dependency patch) was
+conditionally authorized to merge on four conditions, one of which was "the
+review is clean". This entry records why that condition is **not met**, and
+that the finding came from asking the reviewer rather than from inferring.
+
+**What happened.** Four attempts at an independent review. Three returned
+`Review rate limited` — CodeRabbit's auto-review is disabled for this
+repository (fewer than 10 stars, so every review is hand-triggered) and its
+free OSS capacity was exhausted. The fourth, roughly five hours later,
+reported **`Finished`** with zero inline comments and zero review objects, and
+**without** the explicit "Actionable comments posted: 0" that a completed
+clean review normally carries.
+
+`Finished` with no findings is ambiguous between "reviewed and found nothing"
+and "treated the commit as already seen and did nothing" — CodeRabbit's own
+note says it "does not re-review already reviewed commits", and it *had*
+generated a Walkthrough for `ca2c4fd` at 05:03:50Z before the rate-limited
+attempts.
+
+**So I asked it, instead of reading the summary word as a verdict.** Its
+answer, quoted:
+
+> I can't conclusively distinguish (1) from (2) for the 10:25 run. … Please
+> treat the substantive review requirement as **unverified** until the per-file
+> run details or CodeRabbit support confirm it.
+
+Its reasoning: the check reports run ID `93846a1f-…` while the review summary
+reports `dd51b718-…`, so it cannot establish that the file-selection details
+describe that check run, nor that selecting a file proves the file was
+analysed. It added that it has **not** independently verified the lockfile or
+the audit results.
+
+**Why this matters beyond one PR.** This is the fourth time in this engagement
+that a check's summary word would have stood in for a verdict it did not give:
+"ALL GREEN 1/1", "Review paused", "neutral", and now "Finished". The pattern
+is identical each time — a status that means *absence* read as *success*. The
+only thing that resolved it was asking a direct, falsifiable question with the
+two possible answers spelled out, and committing in advance to what each one
+would mean.
+
+**A structural limit no retry fixes.** CodeRabbit's configuration excludes
+`pnpm-lock.yaml` via `!**/pnpm-lock.yaml`, and the lockfile is half of this
+two-file diff. So even a confirmed clean review covers `package.json` only.
+That half rests on mechanical verification and is reported as such.
+
+**The precise rule, since the owner asked for it.** Ruleset `25851827`
+("master CI and security checks", active, branch-targeted) carries exactly one
+rule: `required_status_checks` with four contexts. There is **no**
+`required_approving_review_count` and no pull-request-review rule. All four
+contexts are green on `ca2c4fd`. So repository policy requires no review,
+merging would **satisfy** branch protection rather than bypass it, and the
+blocker is the owner's own condition — which is the right way round, but it
+means only the owner can clear it.
+
+**Financial or security behaviour affected.** None by this entry. The patch
+itself remains unmerged: `follow-redirects@1.16.1` stays in the production
+tree, so CI's `dependency audit` stays red on `master` and on both stacked
+branches, which continues to block revalidating #74.
+
+**Tests run and their results.** No code changed. The repository state is
+unchanged from `495c8c0`: 67 files / 965 tests passing, typecheck 0, lint 0
+errors, build succeeds.
+
+**Also corrected here.** `CLAUDE.md`'s transfer-rail gap still described
+`0009` as "**Proposed** … awaiting owner approval", which the owner's
+2026-11-08 approval of Option C had made false. Corrected to "Accepted as
+architecture only", with the explicit qualifier that accepted is not
+implemented and is not approval to enable a rail or use unapproved limits, and
+with a pointer to `0013` replacing 0009's wrong sandbox step 2. Found by the
+session re-reading the file, not by a test — the same neighbouring-stale-claim
+pattern this file has now recorded three times.
+
+**Unresolved findings.** The review requirement on #76, above. The accounting
+model on `sec/claim-bounded-velocity-release` still needs independent
+validation. `0010`, `0011` and `0013` are all Proposed and all need owner
+numbers.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Owner: pick one of (a) an explicit documented
+review exception for #76, permitted by repository policy since it requires no
+review; (b) a human or second reviewer, noting the lockfile is reviewable only
+by hand or by the audit job; (c) paid CodeRabbit capacity and a retry.
+
+**Commit / PR.** PR #76 at `ca2c4fd`, open against `master`, unmerged. Branch
+`sec/claim-bounded-velocity-release` at `495c8c0`.
+
+---
+
+## 2026-11-09 — Reversal branch refreshed from patched master and measured
+
+**Purpose and scope.** `sec/claim-bounded-velocity-release` was stacked on a
+pre-`4495f13` base, so `pnpm audit --prod` on it reported **1 high** —
+`follow-redirects: Cross-realm sensitiveHeaders arrays`, reached by
+`.>plaid>axios>follow-redirects`, which is exactly the advisory PR #76 closed.
+Merged `origin/master` in (`26f98c7`), reinstalled from the merged lockfile,
+and re-measured. Also removed one lint warning in
+`lib/settlement/SettlementExecutor.ts`: the velocity-reversal block bound
+`parsePositiveMoney()`'s result to `amountMinor` and then deliberately never
+used it, because the release amount comes from the claim row. The call is kept
+as a validation guard and the binding dropped, so the shape no longer invites a
+later edit to pass the intent's amount; the adjacent comment was reworded to
+match.
+
+**Financial or security behaviour affected.** None by the merge — it changes
+`package.json` and `pnpm-lock.yaml` only. The `SettlementExecutor` change is
+behaviour-preserving: the same corrupt-amount guard runs and still returns
+`INVALID_AMOUNT`, and `releaseVelocityClaim()` is called with the same three
+arguments.
+
+**Tests run and their results.** Measured on a database created fresh for the
+run with `lib/__tests__/helpers/test-schema.sql` applied, per the CI
+"Prepare test schema" step.
+
+- Before the master merge, at `5d9bcea`: **67 files / 965 tests pass**,
+  typecheck 0 errors, `pnpm audit --prod` **1 high** (above).
+- After the merge and the lint fix: **67 files / 965 tests pass**, typecheck 0
+  errors, lint 0 errors / 29 warnings (down from 30), `pnpm audit --prod`
+  reports no known vulnerabilities.
+
+**Mutation check re-run on the central invariant.** Replacing
+`AND claim_kind = ${claimKind}` in `claimedExposure()` with
+`AND claim_kind IS NOT NULL` — the defect the owner's review identified, in
+which one domain's release credits another's capacity — fails **2 files / 2
+tests**. The file was restored and `git diff` confirmed clean afterwards.
+
+**Migration impact.** None beyond the `velocity_claims` table already carried
+by this branch in all four schema sources.
+
+**Unresolved findings.** The accounting model on this branch still requires the
+**independent validation** the owner made a precondition; the measurement above
+is evidence for a reviewer, not a substitute for one. The branch is not merged.
+
+**Rollback requirement.** Revert `26f98c7` and the lint commit; neither touches
+schema or financial behaviour.
+
+**Next recommended action.** Independent review of the corrected accounting
+model. Owner decisions outstanding: merging #75 into #74, the intent-route
+cross-domain gate, the finalized-claim capacity window, and the numbers for
+`0010`, `0011` and `0013`.
+
+---
+
+## 2026-11-09 — Owner numbers recorded for 0010, 0011 and 0013
+
+**Purpose and scope.** The owner supplied the parameters all three records
+deliberately left blank. Updated on `sec/claim-bounded-velocity-release`:
+`docs/decisions/0010`, `0011`, `0013` and `CLAUDE.md`. Documentation only; no
+code changed and nothing here is implemented.
+
+**0010 — funding and withdrawal limits: DECIDED, and the decision is zero.**
+Live funding DISABLED, effective permitted throughput zero. Live withdrawals
+DISABLED, zero. No positive live limit approved. §3's table is explicitly
+re-labelled as the provider-imposed outer bound, not approved ceilings, with
+four rules carried: provider testing limits are **not** commercial approval;
+future limits are **configuration**, not constants; funding and withdrawal
+counters stay independent; nothing here activates a rail. The
+FINTRAC/FinCEN applicability question is recorded as **still open** and
+required before any positive limit — setting the ceiling to zero removes
+today's exposure without answering it.
+
+**0011 — realized loss: DECIDED, zero-tolerance.** Any positive unrecovered
+account loss suspends that account's funding and opens a manual risk review.
+Two returned funding transactions inside the applicable risk window suspend
+funding **even where immediate realized loss is zero**. Any positive aggregate
+unrecovered loss halts platform funding pending authorized investigation. Per
+currency, no hidden conversions. **No automatic collections and no automatic
+write-offs**, so §4 step 4 is "none" for the pilot and step 6 stays manual and
+audited. Escalation owner: the project owner acting as **interim** Risk
+Operations Lead until a role is formally assigned. Controls must be
+configurable, auditable and exercised by **simulated** tests.
+The record now states plainly what the shape implies: with zero-tolerance
+triggers, the first unrecovered dollar is a stopping event, so the pilot's
+expected failure mode is a halt rather than a loss. That is a deliberate
+availability-for-exposure trade and should be re-derived, not relaxed by habit,
+once a base rate exists. The superseded tier table is kept, because its two
+findings are why the owner's rules take this shape.
+
+**0013 — sandbox funding: APPROVED with numbers.** CA$100 and US$100
+**cumulative** funding capacity per user per sandbox test cycle — cumulative,
+not a rolling window, so capacity does not return on its own. Sandbox cash-out
+disabled. A test cycle may be reset only by an authorized, audited
+administrative operation; no public or customer-controlled reset, and no reset
+as a side effect of another action. The record now calls the reset out as the
+one operation in the mechanism that **creates** capacity, and therefore the one
+most worth pinning. Claims stay independent of `velocity_checks`; claim,
+balance and ledger commit atomically; duplicate confirmation creates neither a
+duplicate claim nor a duplicate movement; the sandbox mechanism stays
+explicitly separate from the live-rail architecture.
+
+**Financial or security behaviour affected.** None today. All three records
+remain unimplemented, and `0013` remains **blocked on** independent validation
+of `0012`'s accounting model — the owner's approval of the sandbox mechanism
+does not lift that block.
+
+**Tests run and their results.** No code changed by this entry. The branch's
+last measurement stands at `b8d406f`: 67 files / 965 tests pass, typecheck 0,
+audit clean, four required checks green via `integration/reversal-refreshed`.
+
+**Migration impact.** None.
+
+**Unresolved findings.** FINTRAC/FinCEN applicability. The interim escalation
+owner is interim. `0012`'s model still needs independent validation before
+`0013` can be built on it.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Independent validation of `0012`, then implement
+`0013` in a focused PR against the approved numbers.
+
+---
+
+## 2026-11-09 — Independent review of PR #77 found two real defects in decision 0013
+
+**Purpose and scope.** The owner required independent validation of the
+claim-bounded release accounting model before `sec/claim-bounded-velocity-release`
+merges. PR #77 was opened to give that a review surface; a manually triggered
+external review ran on `eee2656` and returned **11 actionable findings, 4
+Major**. All 11 are addressed in `4f696fc`. Documentation and comments only —
+no behaviour changed.
+
+**The two findings that mattered, both in `0013`'s specified mechanism rather
+than in the release implementation.**
+
+1. **The cumulative sandbox cap was pointed at a rolling-window function.**
+   `claimedExposure()` sums `reserved` claims whose recorded window start is at
+   or after the *current* window boundary. The owner's approved cap is
+   **cumulative per test cycle**, resettable only by an authorized audited
+   operation. Wiring one to the other hands every user fresh capacity at each
+   calendar boundary — the exact opposite of the approved property, and the
+   record asserted both things four paragraphs apart. `0013` now specifies a
+   per-user/per-currency/per-cycle consumption total that a release does **not**
+   decrement, and the limitation is documented at `claimedExposure()` itself so
+   the mistake is visible where someone would make it. The unwindowed measure
+   was deliberately **not** added as an unused export.
+
+2. **Write-then-verify cannot serialize two concurrent confirmations of
+   *distinct* intents.** This is the one worth carrying forward. That ordering
+   closes the TOCTOU in `admitVelocity()` only because the rows it writes are
+   **shared** — one per `(user, window_type, window_start, currency)` — so a
+   second admission by the same payer upserts the *same* row, blocks on the
+   first transaction's lock, and only then reads a total that includes it.
+   **The lock is what makes the verify meaningful.** `velocity_claims` rows are
+   per-intent (`ON CONFLICT (provider, reference)`), so two concurrent
+   confirmations insert *different* rows, contend on nothing, and at
+   `READ COMMITTED` each verifies against a snapshot that cannot see the other:
+   two CA$60 confirmations both pass a CA$100 check. Verified against the
+   source — there is no `FOR UPDATE` and no advisory lock anywhere in the
+   claim-creation path. **This is the same CWE-367 defect decision 0008
+   exists to close**, reproduced on the funding path by copying a mechanism
+   without its precondition. `0013` now requires a shared per-user/currency
+   lock held through commit, preferring `SELECT ... FOR UPDATE` on the
+   per-cycle counter row so the lock and the counter are one object, plus a
+   concurrent-distinct-intents test asserted as a **lock** observation rather
+   than a scheduling race.
+
+**The lesson, stated plainly because it is now the third instance.** A control
+carried from one path to another loses the property that made it work unless
+that property is carried too: velocity enforcement in routes missed
+`paySplitPortion()`; the release's amount bound was carried without its domain
+bound; and write-then-verify has now been carried without its shared-row lock.
+In each case the mechanism was copied and its precondition was not.
+
+**The other nine findings.** `0010` attributed the 55–85 day post-settlement
+return exposure to `0011`'s realized-loss counter, which stays at zero until a
+return produces an unrecovered shortfall and so carries none of it — three
+quantities are now named separately, with the gap covered by the
+finalized-claim capacity window. `0012`'s guarantee table still promised
+compensating-row behaviour, the model it rejects. Comments in `lib/auth.ts`,
+`lib/velocity-claims.ts`, `lib/db.ts`, the CI fixture and two tests still
+described `velocity_checks` writes that no longer happen, and one named a test
+file that does not exist — these matter more than usual, because the PR asks a
+reviewer to validate the accounting model and the comments described the
+rejected one. `CLAUDE.md` stated the release contract as "signals refusal by
+throwing"; it **returns** `{ released: false }` for `no_claim` and
+`already_released`, and only a genuine fault throws. Statuses corrected:
+`0013` Proposed → Approved, and `0009`'s pointer to `0011` as still needing
+thresholds.
+
+**`readiness.json`, and why rendering the report is a rule.** Editing the
+fields caught none of what actually misled. Rendering it caught **six
+neighbouring rows** asserting what this change made false: an owner action
+still requesting three answered decisions, the merged dependency fix still
+listed as a pending decision, a row claiming no external review was obtainable
+(one ran, and found these defects), `#75` described as unmerged, a stale
+evidence commit, and the deleted `reverseVelocity()` still credited with
+releasing headroom. One of those rows now also records an error of mine from
+earlier in this program, rather than quietly dropping it.
+
+**Financial or security behaviour affected.** None. No code path changed; the
+corrections are to records and to comments. The two `0013` defects were in a
+specification that is **not implemented**, so they were caught before anything
+was built on them — which is the point of specifying acceptance criteria before
+implementation.
+
+**Tests run and their results.** At `4f696fc`: **67 files / 965 tests pass** on
+a database created fresh with the CI fixture applied; typecheck 0 errors; lint
+0 errors / 29 warnings.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The accounting model itself still has no independent
+validation verdict — the review found no defect *in the release
+implementation*, which is not the same as validating it. FINTRAC/FinCEN
+applicability. The interim escalation owner. `0013` cannot be built until the
+model is validated.
+
+**Rollback requirement.** None; documentation and comments only.
+
+**Next recommended action.** A reviewer's verdict on the accounting model
+itself, against the five checks named in `0010`'s owner-action row. `0013`'s
+implementation waits on it.
+
+---
+
+## 2026-11-09 — The two findings GitHub could not post inline
+
+**Purpose and scope.** The #77 review's summary comment carried a
+`⚠️ Outside diff range comments (2)` block — two findings GitHub could not
+attach inline because they fall outside the diff. They were **not** in the 11
+inline comments I worked from, and I only found them by reading the review
+body rather than the comment list. Worth recording as a process note: the
+inline-comment count is not the finding count.
+
+**Finding A (Major) — `readiness.json` owner action still naming the deleted
+function.** An owner action instructed the owner to "bound `reverseVelocity()`'s
+release by the claim", with an explanation saying `SettlementExecutor` calls it.
+The function is deleted. The report renders that as a **current** action, so an
+owner reading the table would be told to fix something that no longer exists
+while the real outstanding item — independent validation of its replacement —
+sat in the neighbouring row. **Already corrected** in `4f696fc`, before this
+finding was read, as part of the rendered-report pass.
+
+**Finding B (Minor) — `CURRENT_STATUS.md` presenting it as working
+infrastructure.** Two lines in the "What's Working" sections described
+`reverseVelocity()` as implemented in `lib/auth.ts`, creating compensating
+negative velocity records — directly contradicting the warning 22 lines above
+saying it was deleted as a critical financial-control defect. A reader of the
+working-infrastructure list got the opposite answer about the returned-transfer
+path from a reader of the warnings list, in the same file. **Corrected here**,
+with both lines replaced by the deletion and the unmerged, unvalidated status of
+the replacement, and the contradiction itself named so the correction is not
+mistaken for the original text.
+
+**Also corrected in the same pass:** `lib/auth.ts` described
+`releaseVelocityClaim()` as `recordVelocity()`'s "counterpart", which implies a
+credit to `velocity_checks` that does not exist — the second half of inline
+finding 8, which I had missed while fixing the first half. And
+`CURRENT_STATUS.md` still called `0009` "Proposed, awaiting approval" after the
+owner accepted it.
+
+**Financial or security behaviour affected.** None. Records and comments only.
+
+**Tests run and their results.** 67 files / 965 tests pass; typecheck 0 errors;
+lint 0 errors / 29 warnings; the readiness report renders.
+
+**Migration impact.** None.
+
+**Unresolved findings.** Unchanged: the accounting model has no independent
+validation verdict; FINTRAC/FinCEN applicability; the interim escalation owner.
+
+**Rollback requirement.** None.
+
+**Next recommended action.** Unchanged — a reviewer's verdict on the accounting
+model itself.
+
+---
+
+## 2026-11-09 — Addendum: the measured commits for the two entries above
+
+Appended rather than edited, per this file's append-only rule, and because a
+review of PR #77 pointed out that the entry recording the outside-diff review
+findings did not name the commit its results were measured on.
+
+- **"The two findings GitHub could not post inline"** — the 67 files / 965
+  tests, typecheck 0 and lint 0 errors / 29 warnings recorded there were
+  measured at **`bb75327`**, which was that branch's head when the entry was
+  written.
+- **"Independent review of PR #77 found two real defects in decision 0013"** —
+  its 67 / 965 figure was measured at **`4f696fc`**.
+
+Both are superseded by the current measurement at **`78b80cf`**: **68 files /
+977 tests**, typecheck 0 errors, lint 0 errors / 29 warnings, and all four
+required checks green on that commit as a `pull_request` run now that #77
+targets `master` rather than a feature branch.
+
+The general rule this enforces, already a learning in this repository: a test
+result names the commit it was measured on, and a branch name is not a
+substitute, because a branch moves and the number does not follow it.
