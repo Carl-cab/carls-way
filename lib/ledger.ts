@@ -3,6 +3,7 @@ import { getSql } from '@/lib/db';
 import {
   type MinorUnits,
   isMoneyCurrency,
+  type MoneyCurrency,
   parseDatabaseMoney,
   subtractMinorUnits,
   toNarrowDatabaseDecimal,
@@ -323,67 +324,225 @@ export async function getUserLedgerEntries(userId: number, limit: number = 100):
   return entries as unknown as LedgerEntry[];
 }
 
-// Backfill opening balance ledger entries for users with seed balances but no ledger entries.
-// Safe idempotent operation: checks if opening_balance entry exists before creating.
-// Does NOT modify user balances. Called during migration or via admin API.
-// Returns count of entries created.
-export async function backfillOpeningBalances(): Promise<{ cadCount: number; usdCount: number }> {
-  const sql = getSql();
+/**
+ * RETIRED. This function no longer writes to the ledger, and must not be made
+ * to again (owner decision 3, 2026-11-18).
+ *
+ * WHAT IT DID AND WHY THAT WAS WRONG. It credited `u.balance_cad` — the
+ * user's **current** balance — as an `opening_balance` entry for any user
+ * lacking one. For a user who had transacted, that books their entire history
+ * a second time. Measured on a real sandbox database:
+ *
+ *     before:  wallet 1370.00   ledger 1270.00   discrepancy   +100.00
+ *     after:   wallet 1370.00   ledger 2640.00   discrepancy  -1270.00
+ *
+ * Twelve times worse, in the opposite direction, on a ledger documented as a
+ * passive audit log of all financial movement.
+ *
+ * THE TRAP, which is the part worth remembering: it looked like it helped.
+ * Aggregate `user_wallets_exactly_match_ledger` violations fell from 6 to 3,
+ * because the three users with no activity WERE corrected properly. An
+ * operator reading the count would have concluded the operation worked while
+ * it was corrupting every active account it touched.
+ *
+ * It was reachable through `POST /api/admin/ledger/backfill-opening-balances`
+ * — gated on `BACKFILL_SECRET` and `exceptions:manage`, i.e. designed to be
+ * run by an operator — with no guard restricting it to users who have no
+ * other entries.
+ *
+ * THROWS rather than returning a zero result. A silent no-op would let a
+ * caller believe a repair had happened; a caller that cannot repair must find
+ * out at the call site.
+ *
+ * The read-only replacement is `assessOpeningBalanceDiscrepancies()` below.
+ * It reports and never writes. A repair needs its own authorization, its own
+ * evidence of each account's ORIGINAL grant, and a plan — none of which this
+ * function had.
+ */
+export async function backfillOpeningBalances(): Promise<never> {
+  throw new Error(
+    'backfillOpeningBalances() is retired: it credited each user\'s CURRENT ' +
+      'balance as an opening entry, double-counting the history of every ' +
+      'active account. Use assessOpeningBalanceDiscrepancies() for a ' +
+      'read-only report. A repair requires separate owner authorization.',
+  );
+}
 
-  // Find users with non-zero balance_cad but no opening_balance entry
-  const cadResults = await sql`
-    INSERT INTO ledger_entries (
-      user_id, currency, account_type, entry_type,
-      debit, credit, description
+/** One (user, currency) pair in the opening-balance assessment. */
+export interface OpeningBalanceAssessmentRow {
+  userId: number;
+  currency: MoneyCurrency;
+  /** The wallet column, as stored. */
+  walletBalance: string;
+  /** Sum of credits minus debits across that user's wallet entries. */
+  ledgerBalance: string;
+  /** wallet − ledger. Zero means the account reconciles. */
+  discrepancy: string;
+  openingEntryCount: number;
+  /** Total credited by existing opening entries, for spotting a wrong one. */
+  openingEntryTotal: string;
+  /**
+   * Whether the account has any ledger entry that is NOT an opening balance.
+   * This is the fact that made the old backfill dangerous, so it is reported
+   * per account rather than inferred.
+   */
+  hasSubsequentActivity: boolean;
+  /**
+   * The original grant where it is INDEPENDENTLY EVIDENCED — read from the
+   * `user_registered` audit row's `registration_grant` metadata, which
+   * registration began writing under decision 2.
+   *
+   * `null` means no evidence exists, and that is the common case for
+   * historical accounts. It explicitly does NOT mean "no grant" and must not
+   * be read as one: assuming every historical user received 100.00 is exactly
+   * the guess decision 3 forbids.
+   */
+  evidencedGrantMinorUnits: number | null;
+  classification: OpeningBalanceClassification;
+}
+
+export type OpeningBalanceClassification =
+  /** Wallet equals ledger. Nothing to do. */
+  | 'reconciled'
+  /** No opening entry, no other activity, and a discrepancy equal to the wallet. */
+  | 'missing_opening_entry_no_activity'
+  /** Discrepant AND has other activity — the case the old backfill corrupted. */
+  | 'discrepant_with_activity'
+  /** More than one opening entry for this currency. */
+  | 'duplicate_opening_entries'
+  /** Discrepant in a shape none of the above describes. */
+  | 'requires_manual_investigation';
+
+export interface OpeningBalanceAssessment {
+  rows: OpeningBalanceAssessmentRow[];
+  summary: Record<OpeningBalanceClassification, number>;
+  /** Rows whose evidence is absent, so no repair amount can be derived. */
+  withoutEvidencedGrant: number;
+}
+
+/**
+ * READ-ONLY assessment of opening-balance state. Executes SELECTs only.
+ *
+ * This is a diagnostic, NOT a repair, and the distinction is deliberate and
+ * load-bearing: the operation it replaces looked like a repair and was a
+ * corruption. Nothing here writes, and nothing here proposes an amount for an
+ * account whose original grant is not independently evidenced.
+ */
+export async function assessOpeningBalanceDiscrepancies(
+  executor: LedgerExecutor = getSql(),
+): Promise<OpeningBalanceAssessment> {
+  const rows = await executor<
+    {
+      user_id: number;
+      currency: string;
+      wallet_balance: string;
+      ledger_balance: string;
+      discrepancy: string;
+      opening_entry_count: string;
+      opening_entry_total: string;
+      has_subsequent_activity: boolean;
+      evidenced_grant_minor_units: string | null;
+    }[]
+  >`
+    WITH per_currency AS (
+      SELECT u.id AS user_id, 'CAD' AS currency, u.balance_cad AS wallet_balance FROM users u
+      UNION ALL
+      SELECT u.id, 'USD', u.balance_usd FROM users u
+    ),
+    ledger AS (
+      SELECT
+        pc.user_id,
+        pc.currency,
+        pc.wallet_balance,
+        COALESCE(SUM(le.credit - le.debit), 0)::numeric(14,2) AS ledger_balance,
+        COUNT(le.id) FILTER (WHERE le.entry_type = 'opening_balance') AS opening_entry_count,
+        COALESCE(SUM(le.credit) FILTER (WHERE le.entry_type = 'opening_balance'), 0)::numeric(14,2)
+          AS opening_entry_total,
+        COUNT(le.id) FILTER (WHERE le.entry_type <> 'opening_balance') > 0
+          AS has_subsequent_activity
+      FROM per_currency pc
+      LEFT JOIN ledger_entries le
+        ON le.user_id = pc.user_id
+       AND le.currency = pc.currency
+       AND le.account_type = 'wallet'
+      GROUP BY pc.user_id, pc.currency, pc.wallet_balance
+    ),
+    evidence AS (
+      -- The ONLY independent evidence of an original grant: the registration
+      -- audit row. A readJsonbRecord()-style read is unnecessary here
+      -- because this reads a key that only the corrected writer produces, and
+      -- a legacy string-scalar row simply yields NULL — which is the correct
+      -- answer for an account registered before the evidence existed.
+      SELECT
+        al.user_id,
+        al.metadata #>> '{registration_grant,currency}' AS currency,
+        (al.metadata #>> '{registration_grant,minor_units}') AS minor_units
+      FROM audit_logs al
+      WHERE al.action = 'user_registered'
+        AND jsonb_typeof(al.metadata) = 'object'
     )
     SELECT
-      u.id,
-      'CAD',
-      'wallet',
-      'opening_balance',
-      0,
-      u.balance_cad,
-      'Opening seed balance'
-    FROM users u
-    WHERE u.balance_cad > 0
-      AND NOT EXISTS (
-        SELECT 1 FROM ledger_entries le
-        WHERE le.user_id = u.id
-          AND le.currency = 'CAD'
-          AND le.entry_type = 'opening_balance'
-      )
-    ON CONFLICT DO NOTHING
-    RETURNING user_id
+      l.user_id,
+      l.currency,
+      l.wallet_balance::text    AS wallet_balance,
+      l.ledger_balance::text    AS ledger_balance,
+      (l.wallet_balance - l.ledger_balance)::text AS discrepancy,
+      l.opening_entry_count::text AS opening_entry_count,
+      l.opening_entry_total::text AS opening_entry_total,
+      l.has_subsequent_activity,
+      e.minor_units             AS evidenced_grant_minor_units
+    FROM ledger l
+    LEFT JOIN evidence e ON e.user_id = l.user_id AND e.currency = l.currency
+    ORDER BY l.user_id, l.currency
   `;
 
-  // Find users with non-zero balance_usd but no opening_balance entry
-  const usdResults = await sql`
-    INSERT INTO ledger_entries (
-      user_id, currency, account_type, entry_type,
-      debit, credit, description
-    )
-    SELECT
-      u.id,
-      'USD',
-      'wallet',
-      'opening_balance',
-      0,
-      u.balance_usd,
-      'Opening seed balance'
-    FROM users u
-    WHERE u.balance_usd > 0
-      AND NOT EXISTS (
-        SELECT 1 FROM ledger_entries le
-        WHERE le.user_id = u.id
-          AND le.currency = 'USD'
-          AND le.entry_type = 'opening_balance'
-      )
-    ON CONFLICT DO NOTHING
-    RETURNING user_id
-  `;
-
-  return {
-    cadCount: cadResults.length,
-    usdCount: usdResults.length,
+  const summary: Record<OpeningBalanceClassification, number> = {
+    reconciled: 0,
+    missing_opening_entry_no_activity: 0,
+    discrepant_with_activity: 0,
+    duplicate_opening_entries: 0,
+    requires_manual_investigation: 0,
   };
+  let withoutEvidencedGrant = 0;
+
+  const assessed = rows.map((r): OpeningBalanceAssessmentRow => {
+    const openingEntryCount = Number(r.opening_entry_count);
+    const discrepancy = Number(r.discrepancy);
+
+    let classification: OpeningBalanceClassification;
+    if (openingEntryCount > 1) {
+      // Checked FIRST: a duplicate is a defect even on an account that
+      // happens to reconcile, and classifying by discrepancy alone would hide
+      // it behind a zero.
+      classification = 'duplicate_opening_entries';
+    } else if (discrepancy === 0) {
+      classification = 'reconciled';
+    } else if (r.has_subsequent_activity) {
+      classification = 'discrepant_with_activity';
+    } else if (openingEntryCount === 0 && Number(r.ledger_balance) === 0) {
+      classification = 'missing_opening_entry_no_activity';
+    } else {
+      classification = 'requires_manual_investigation';
+    }
+    summary[classification] += 1;
+
+    const evidenced =
+      r.evidenced_grant_minor_units === null ? null : Number(r.evidenced_grant_minor_units);
+    if (classification !== 'reconciled' && evidenced === null) withoutEvidencedGrant += 1;
+
+    return {
+      userId: r.user_id,
+      currency: r.currency as MoneyCurrency,
+      walletBalance: r.wallet_balance,
+      ledgerBalance: r.ledger_balance,
+      discrepancy: r.discrepancy,
+      openingEntryCount,
+      openingEntryTotal: r.opening_entry_total,
+      hasSubsequentActivity: r.has_subsequent_activity,
+      evidencedGrantMinorUnits: evidenced,
+      classification,
+    };
+  });
+
+  return { rows: assessed, summary, withoutEvidencedGrant };
 }
