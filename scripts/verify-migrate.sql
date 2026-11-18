@@ -43,7 +43,11 @@ FROM (VALUES
   ('ledger_entries',          'correlation_id'),
   ('transactions',            'correlation_id'),
   -- JWT revocation: read on every authenticated request
-  ('users',                   'token_version')
+  ('users',                   'token_version'),
+  -- INSERTed unguarded by POST /api/auth/register. Absent here means
+  -- registration answers 500 on 42703, which is the first step of every user
+  -- workflow, so a database that fails this row cannot onboard anyone.
+  ('users',                   'province')
 ) AS t(tbl, col)
 LEFT JOIN information_schema.columns c
   ON c.table_schema = 'public' AND c.table_name = t.tbl AND c.column_name = t.col

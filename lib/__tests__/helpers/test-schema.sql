@@ -180,6 +180,42 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '#
 ALTER TABLE users ADD COLUMN IF NOT EXISTS interac_email TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_deposit_enabled BOOLEAN NOT NULL DEFAULT false;
 
+-- Seven columns `initializeSchema()` declares on `users` that this fixture did
+-- not have, found by booting the application against a fixture-built database
+-- and registering a user: `POST /api/auth/register` answered 500 on
+-- `column "province" of relation "users" does not exist` (42703).
+--
+-- Why 977 passing tests did not catch it: no test exercised the registration
+-- route at all, so the only reader of `province` was never run against this
+-- schema. The route-level consequence is total — registration is the first
+-- step of every user workflow — and it was invisible from the suite.
+--
+-- `province` is the serious one, because it is declared ONLY inside
+-- `initializeSchema()`'s CREATE TABLE body. `schema-source-parity.test.ts`
+-- cannot see it (it checks the migrate route's objects against a
+-- db.ts-built database, i.e. the other direction), and
+-- `migrate-route-execution.test.ts` cannot either, because the migrate route
+-- never mentions it. That blind spot is documented in CLAUDE.md and this is
+-- it occurring.
+--
+-- The other six are reachable on a migrated database — the migrate route does
+-- ALTER them in — but they were missing here, so the routes that read them
+-- (KYC session creation, the Stripe KYC webhook, `/api/me`'s rejection
+-- reason, and admin login lockout) could not be tested against a fixture
+-- database either.
+--
+-- The legacy `users.balance` column is deliberately NOT added. No application
+-- code reads it — the apparent matches are prose in sandbox consent strings —
+-- and CLAUDE.md forbids its use in new code, so adding it to the fixture
+-- would invite exactly that.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS province TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_provider TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_session_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_verified_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS friends (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id),

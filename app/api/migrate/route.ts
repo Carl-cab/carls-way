@@ -277,6 +277,16 @@ export async function POST(req: NextRequest) {
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`;
+    // `province` was declared ONLY inside initializeSchema()'s CREATE TABLE
+    // body, so this route — the authority on what the live database holds —
+    // never guaranteed it. The live table has it because initializeSchema()
+    // created that table; a database rebuilt from this route alone would not,
+    // and `POST /api/auth/register` INSERTs into it unguarded, answering 500
+    // with 42703. That makes it a restore-and-rebuild hazard rather than a
+    // production outage: the column is missing exactly on the fresh
+    // environments nobody has registered against yet. Found by booting the
+    // application against a fixture-built database.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS province TEXT`;
 
     // Transactions default to private. Existing rows keep whatever they were
     // given; this only changes what a row created from now on gets when no
