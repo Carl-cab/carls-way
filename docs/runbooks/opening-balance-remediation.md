@@ -138,3 +138,56 @@ discrepant and documented is a legitimate outcome — the discrepancy is in an
 audit ledger rather than in customer balances, no customer's wallet is wrong,
 and a repair built on guessed amounts would put a fabricated number into the
 record the ledger exists to be.
+
+---
+
+## Appendix — QUARANTINE, the alternative to repair
+
+Added 2026-11-18 at the owner's request: "prepare a separately authorized
+remediation **or quarantine** plan". Quarantine is the better option for most
+of these accounts, and saying so plainly is the point of this appendix.
+
+### Why quarantine rather than repair
+
+A repair writes a number into the ledger. For any account whose original grant
+is not independently evidenced, that number is a guess — and the ledger is the
+record a guess should never enter. The read-only assessment already separates
+the accounts where this is decidable from the ones where it is not, and
+`withoutEvidencedGrant` counts the latter.
+
+Quarantine keeps the discrepancy visible and labelled instead of papering over
+it. Nothing about these accounts is wrong from a customer's point of view:
+**no customer wallet holds an incorrect balance.** The discrepancy is between
+the wallet and an audit ledger that was never written at registration.
+
+### What quarantine means concretely
+
+1. **Freeze the set.** Snapshot the assessment output — every account,
+   classification, discrepancy and evidence status — into a dated audit
+   document. That snapshot is the quarantine list, and it is evidence rather
+   than a worklist.
+2. **Exclude it from the invariant, explicitly and visibly.** If
+   `user_wallets_exactly_match_ledger` is ever scoped to exclude quarantined
+   accounts, the scope counter must report how many were excluded, so the
+   exclusion cannot be mistaken for a clean result. An invariant that silently
+   skips rows is the failure this repository has corrected twice.
+3. **Do not re-admit silently.** A quarantined account that later transacts
+   stays quarantined: its new entries reconcile among themselves, and its
+   opening gap is a permanent, documented fact about an account created before
+   the grant was booked.
+4. **Repair only the decidable subset**, per steps 3–5 above — accounts
+   classified `missing_opening_entry_no_activity` **with** an evidenced grant.
+
+### What is NOT acceptable under either option
+
+- Writing an opening entry for the account's **current** balance. That is the
+  retired backfill, and it is what made a +100.00 discrepancy into −1270.00.
+- Assuming an unevidenced grant was 100.00 because the discrepancy happens to
+  be 100.00.
+- Adjusting a customer's wallet balance to match the ledger. The wallet is
+  correct; the ledger is the incomplete record.
+- Narrowing the reconciliation invariant without reporting the exclusion.
+
+**Neither option is authorized.** Both need the owner's decision, and doing
+nothing — leaving the accounts discrepant, documented and visible — remains a
+legitimate third choice.

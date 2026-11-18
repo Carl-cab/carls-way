@@ -86,6 +86,48 @@ item 2 is first.
       account must **fail**. That negative is the proof; a successful page load
       proves nothing.
 
+## 2b. Provision the beta database correctly — NOT from the test fixture
+
+**Found 2026-11-18, and it will fail reconciliation on day one if missed.**
+
+- [ ] Build the beta database from `initializeSchema()` plus
+      `POST /api/migrate`. **Do NOT apply
+      `lib/__tests__/helpers/test-schema.sql`.**
+
+That file is a CI fixture, and it seeds accounts — `splitpayera`,
+`splitpayerb`, `velpayer` — holding 500.00 with **no ledger entries at all**.
+Measured: a beta database built from it reported **3 violations** of
+`user_wallets_exactly_match_ledger` and the reconciliation cron answered
+**HTTP 500 `passed:false`** before a single participant had signed up.
+Removing those accounts produced **7/7 PASS and HTTP 200**.
+
+- [ ] After provisioning, confirm `SELECT count(*) FROM users` is **0** before
+      any participant registers. A non-zero count means the fixture was
+      applied.
+
+## 2c. Set and VERIFY the restricted beta profile
+
+- [ ] Set `MANNA_ENV=sandbox` on the Preview scope. This is what makes the
+      restricted profile the default.
+- [ ] Set `PLAID_ENV=sandbox` on the Preview scope.
+- [ ] Optionally set `MANNA_BETA_PROFILE=p2p_only` explicitly. It is belt and
+      braces: with `MANNA_ENV=sandbox` the profile already resolves to
+      `p2p_only` when the variable is absent or misspelled.
+- [ ] **Verify it from the running deployment**, not from the dashboard:
+
+      GET /api/beta-profile   (authenticated)
+
+      must return
+      `{"profile":"p2p_only","restricted":true,
+        "capabilities":{"funding":false,"cash_out":false,"cross_currency":false}}`
+
+      A variable somebody believes they set is not evidence. This endpoint
+      reads the same resolver the routes enforce with.
+- [ ] Confirm the three refusals against the deployment:
+      `POST /api/transfers/intent` with `add_money` and with `cash_out`, and a
+      cross-currency `POST /api/transactions` — each **403 BETA_RESTRICTED** —
+      and that a same-currency payment still answers 201.
+
 ## 3. Seed synthetic data (owner or engineering, once isolated)
 
 - [ ] Register synthetic participants through the running application rather
@@ -145,12 +187,16 @@ All of these must hold, together:
 - [ ] Item 2 complete and the negative login test performed.
 - [ ] `scripts/verify-migrate.sql` reports **0 non-OK rows** on the Preview
       database.
-- [ ] `scripts/reconciliation-check.sql` has been run and its output
-      **understood** — note that on any database where someone has registered
-      or paid a split portion it will currently report FAIL for reasons
-      documented in `docs/audits/2026-11-18-sandbox-beta-readiness.md`
-      (findings 6 and 6b). Establish that baseline *before* testing, or a real
-      discrepancy will be indistinguishable from the known ones.
+- [ ] `scripts/reconciliation-check.sql` reports **all seven PASS**, and
+      `GET /api/cron/internal-reconciliation` answers **HTTP 200** with
+      `passed: true`.
+
+      This changed on 2026-11-18. The two split-payment failures were fixed by
+      PR #82 and the wallet-equality failure by PR #83, and a correctly
+      provisioned beta database now passes 7/7 — measured, after a P2P send, a
+      request-accept and a split payment. A FAIL here is therefore a real
+      signal again, not an expected one. If `user_wallets_exactly_match_ledger`
+      fails, check item 2b first: it is almost certainly the test fixture.
 - [ ] Both live rail flags confirmed absent.
 - [ ] The participants are synthetic and the data is disposable.
 
