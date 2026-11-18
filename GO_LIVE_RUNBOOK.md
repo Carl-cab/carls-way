@@ -4,8 +4,19 @@
 **Audience:** The account owner + engineering. Many steps are owner-only and external.
 **Golden rule:** Do not enable a live flag until every prerequisite above it in this document is complete. Live flags default OFF and must be set deliberately.
 
-**Verified against:** `master` at `e0f3f0d`, on 2026-10-26, by reading the tree
-— not by exercising any rail. `e0f3f0d` is the tip after Sprint 1's five
+**Verified against:** `master` at `38678e3`, on 2026-11-18, by reading the tree
+— not by exercising any rail. `38678e3` is the tip after PRs #74, #75, #76,
+#77, #78 and #79 merged. **No box in this document changed state as a result**,
+and that was checked rather than assumed: those six PRs changed velocity
+admission, the claim/exposure release model, a dependency bump and
+documentation. None touched a live flag, a rail, a provider credential, a
+webhook registration or a migration, and `POST /api/migrate` has not been run
+for `0cdadfa` or `38678e3`. One box was **added** — §10's claim-model
+validation prerequisite — because it is a genuine prerequisite the document did
+not previously list, not because anything was completed.
+
+The previous anchor, accurate when written: `master` at `e0f3f0d` on
+2026-10-26. `e0f3f0d` is the tip after Sprint 1's five
 merges (#69 `1bc81df`, #68 `ce7255a`, #67 `a08c82f`, #71 `0b609f4`, #70
 `e0f3f0d`); the previous anchor read `1bc81df`, the first of those five. None
 of the five touched a live flag or any rail, so **no box in this document
@@ -293,5 +304,17 @@ Manna is genuinely live only when **all** are true:
 - [ ] Add Money / Cash Out move real money; balances are 1:1 fund-backed.
 - [ ] Execute endpoint live; webhooks settle transfers; SettlementExecutor updates balances.
 - [ ] Both live flags enabled after successful $1 end-to-end tests in each direction.
+- [ ] **The claim/exposure accounting model has been validated by someone who
+  did not write it.** Added 2026-11-18. The code is on `master` (PR #77,
+  `0cdadfa`) and the owner **waived** this requirement for the merge decision —
+  a waiver of a gate is not a pass through it, so the box is unchecked. It is
+  here because this control has been got wrong twice in two revisions, in
+  opposite directions, and both times the accompanying tests asserted the
+  defect under titles claiming correctness. A reviewer must check that no
+  accounting domain can charge or credit another, that exposure cannot go
+  negative or exceed what was reserved, that a release reduces only its own
+  claim, that duplicate and concurrent deliveries are idempotent, and that
+  nothing holds a database transaction open across a provider call.
+  `docs/decisions/0013` is blocked on this by its own terms.
 
 Until every box is checked, Manna is a functional **sandbox** — safe to demo, not to move real money.

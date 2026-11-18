@@ -1,8 +1,25 @@
 # Manna — Current Status
 
-Last updated: **2026-10-26** — verified against commit `e0f3f0d` on `master`,
-the tip after Sprint 1's five pull requests were merged in the authorized
-order:
+Last updated: **2026-11-18** — verified against commit `38678e3` on `master`,
+the tip after PRs #74, #75, #76, #77, #78 and #79 all merged. Measured on that
+commit against a database created fresh and seeded with the CI fixture:
+**68 files / 977 tests** pass, typecheck 0 errors, lint 0 errors / 29
+warnings. Deployment: GitHub's deployments API records 7870051100, environment
+Production, sha `0cdadfa6`, state `success` — which is #77's merge; #79
+(`38678e3`) is documentation only. That is a deployment record, **not** a
+check that the alias serves it, and **not** evidence that `POST /api/migrate`
+has been run, which it has not been for either commit.
+
+**One precondition was waived rather than met, and it belongs in this header
+because a merged commit otherwise reads as a cleared gate.** The owner
+required independent validation of the claim/exposure accounting model before
+PR #77 merged, and on 2026-11-18 authorized the merge while waiving that
+requirement *for the merge decision*. The model has not been independently
+validated. See the transfer-rail row in `scripts/status/readiness.json`.
+
+The previous header, kept because it was accurate when written, verified
+against `e0f3f0d` on 2026-10-26 — the tip after Sprint 1's five pull requests
+were merged in the authorized order:
 
 | PR | Subject | Merge SHA |
 |---|---|---|
@@ -31,11 +48,15 @@ the CI fixture applied: **67 files / 965 tests** pass, typecheck 0 errors, lint 
 errors / 30 warnings, and `pnpm run build` succeeds. Earlier baselines on this
 file: 55 / 778 at `4e63bb9`, 56 / 788 at `42dbba6`, 57 / 821 claimed at
 `6d8861c`, 57 / 832 at `6927ebd`, and **61 / 907 at `e0f3f0d`** — which is the
-figure that belongs to this header's commit. 943 becomes a baseline fact only
-when **both** stacked branches merge: PR #74 (`docs/sprint1-owner-confirmations`)
-and PR #75 (`claude/cool-cerf-ErxD3`), which targets #74's branch rather than
-`master` so the known check-then-record concurrency defect in #74 is never
-deployed on its own. All of that is **code verification**; none of it is
+figure that belongs to `e0f3f0d`. **943 did become a baseline fact**: PR #75
+(`claude/cool-cerf-ErxD3`) merged into PR #74's branch
+(`docs/sprint1-owner-confirmations`) as `3d6769a` — stacked that way on
+purpose so #74's known check-then-record defect was never deployed alone — and
+#74 then merged to `master` as `d78918a`, carrying both. #77 subsequently took
+the count to **977 at `38678e3`**, which is this header's commit and the
+figure that belongs to it. Every number in this paragraph is kept against the
+commit it was measured on, because a count does not follow a branch.
+All of that is **code verification**; none of it is
 production operational verification, and no part of either branch has run
 against the production database.
 
