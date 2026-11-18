@@ -4160,3 +4160,98 @@ history, so a bad production build can be rolled back independently of the
 git revert.
 
 **Next recommended action.** Validation verdict on PR #77, which gates `0013`.
+
+---
+
+## 2026-11-18 — Environment-variable audit: documentation corrected, two security findings recorded
+
+**Purpose and scope.** The owner asked for an audit of the Vercel
+environment-variable settings page, then ran the read-only pass themselves and
+supplied **names and scopes only** — no values read, nothing changed. This
+entry records what that produced. Documentation only: `CLAUDE.md` and this
+file. No code, no configuration, no Vercel change.
+
+**Why the audit was split in two.** The Vercel page is unreachable from the
+engineering environment — `403 CONNECT` at the egress gateway for every
+`vercel.com` and `*.vercel.app` host, re-verified 2026-11-17, with no CLI, no
+token and no `.vercel` directory. The URL was also the **team-wide** settings
+page (`/~/settings/...`), which needs the owner's authenticated session, so
+even with network access it would have returned a login wall rather than the
+variables. The owner read the names and scopes out; this session audited what
+the code actually demands. Neither half would have found the main results
+alone.
+
+**Finding 1 — five variables the code reads were absent from `CLAUDE.md`'s
+required-variables table.** Found by enumerating every `process.env.*` in
+`app`, `lib`, `proxy.ts` and `scripts` (27 names, of which 6 are
+platform-injected) and diffing against the table (16 rows). Three are genuine
+Vercel variables and are now listed: `RESEND_API_KEY` and `EMAIL_FROM`
+(`lib/email.ts` **throws** when either is missing, and its only caller is
+`sendPasswordResetEmail()`, so an unset value breaks password reset at *send*
+time rather than at boot) and `BACKFILL_SECRET` (fails closed with 503, behind
+`requirePermission('exceptions:manage')` and a header check). All three are
+present in Vercel per the owner's audit, so nothing was broken — but an
+operator provisioning a new environment from that table would have missed
+them. The other two, `ADMIN_BOOTSTRAP_SECRET` and `ADMIN_BOOTSTRAP_PASSWORD`,
+belong to `scripts/bootstrap-admin.ts` and must **not** be Vercel variables;
+their deliberate exclusion is now stated so it is not read as an omission.
+Nothing was documented-but-unread, so there was no staleness in that direction.
+
+**Finding 2 — `PLAID_SECRET` is in Preview, `PLAID_CLIENT_ID` is not.** The
+production Plaid secret is therefore present in every preview build and cannot
+be used there, because Plaid authenticates on both headers together. Recorded
+as an open gap in `CLAUDE.md`. The point worth keeping is not the broken call
+but that **the protection is accidental**: what stops preview builds reaching
+Plaid is a *missing* client id, so adding it — which looks like fixing an
+inconsistency — would point preview deployments at live Plaid with the
+production secret. Not fixed here: it is a production configuration change and
+the owner's. The fix is to remove the secret from Preview, not to add the
+client id.
+
+**Finding 3 — `NEXT_PUBLIC_PLAID_ENV` is configured in Vercel and read by no
+code.** Verified by grepping every `.ts`, `.tsx`, `.mjs` and `.json` outside
+`node_modules`: zero references. The server-side resolver is `PLAID_ENV` via
+`lib/plaid-env.ts`. A `NEXT_PUBLIC_` variable is inlined into the browser
+bundle, so it ships to every visitor for nothing, and its name reads as though
+it controls Plaid's host — which would mislead whoever next debugs Plaid.
+Removal is the owner's, being a configuration change.
+
+**Finding 4 — `DATABASE_URL` is in Production and Preview, isolation
+unverified.** Names and scopes cannot settle it; the question is one of values,
+which are deliberately not compared through a transcript. Recorded as an open
+gap, with the two facts that compound it: preview deployments resolve to
+`production` mode (because `MANNA_ENV` is absent and `lib/environment.ts`
+correctly defaults to production), and PR #77 alone produced a dozen preview
+builds in a week.
+
+**Confirmed correct, and worth recording as checked rather than assumed.**
+`PLAID_TRANSFER_LIVE` and `CA_EFT_LIVE` both **absent** — the live-money rails
+are off at the only place that currently controls them, since `0010`'s zero
+throughput is policy with no enforcing code. `CRON_SECRET` Production-only.
+`MANNA_ENV` absent, which `lib/environment.ts` documents as the **safe**
+value. No team-level variables linked to the project, so the rail flags cannot
+be inherited from elsewhere.
+
+**Financial or security behaviour affected.** None by this entry. Two
+*unfixed* security findings are now written down where the next session will
+read them, which is the whole point of recording rather than quietly fixing
+documentation.
+
+**Tests run and their results.** Documentation only; measured at the commit
+below.
+
+**Migration impact.** None.
+
+**Unresolved findings.** The `PLAID_SECRET`-in-Preview exposure and the
+`DATABASE_URL` isolation question, both owner actions. Also not enumerated by
+the audit, so no conclusion is drawn either way: `JWT_SECRET`,
+`PLAID_TOKEN_ENCRYPTION_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`WISE_API_KEY`, `WISE_ENV`, `REDIS_URL` — the last being the interesting one,
+since `CLAUDE.md` records it as production-set on an owner report of
+2026-10-20 and its scope is unknown.
+
+**Rollback requirement.** None; documentation only.
+
+**Next recommended action.** Owner: remove `PLAID_SECRET` from Preview, delete
+`NEXT_PUBLIC_PLAID_ENV`, and compare the two `DATABASE_URL` values. PR #77
+remains open and green at `7dae651`, awaiting a merge decision.
