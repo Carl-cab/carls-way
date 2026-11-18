@@ -28,7 +28,8 @@
 
 import { getSql } from '../db';
 import { parseDatabaseMoney, parsePositiveMoney } from '../money';
-import { admitVelocity, reverseVelocity, VelocityLimitError, VELOCITY_LIMITS } from '../auth';
+import { admitVelocity, VelocityLimitError, VELOCITY_LIMITS } from '../auth';
+import { createVelocityClaim, releaseVelocityClaim, VELOCITY_CLAIM_PROVIDER } from '../velocity-claims';
 
 // Its own user: vitest runs files in parallel and this file drives a payer to
 // a ceiling, so sharing one with split-pay-velocity.test.ts would make each
@@ -91,6 +92,10 @@ async function rowCount(): Promise<number> {
 
 async function cleanup() {
   await sql`DELETE FROM velocity_checks WHERE user_id = ${PAYER}`;
+  // This file now creates claims too; a leftover claim would make a later run
+  // hit the (provider, reference) unique index instead of its assertions.
+  await sql`DELETE FROM velocity_claims WHERE user_id = ${PAYER}`;
+  await sql`DELETE FROM audit_logs WHERE user_id = ${PAYER}`;
 }
 
 beforeEach(cleanup);
@@ -308,29 +313,38 @@ describe('admitVelocity is an atomic admission, not a check and a later write', 
     expect(await consumed('hourly')).toBe(0);
   });
 
-  it('releases headroom when a transfer is reversed', async () => {
-    // reverseVelocity() appends compensating rows with transaction_count < 0,
-    // which the partial unique index deliberately excludes. admitVelocity()
-    // sums ALL rows in a window rather than reading the accumulating row, so
-    // a reversal actually frees budget. If it read only the upserted row —
-    // the obvious shortcut, since the upsert can RETURNING its own totals —
-    // a returned transfer would never release anything.
+  it('a released claim does NOT give back P2P headroom', async () => {
+    // This case asserted the opposite one revision ago — that releasing a 300
+    // funding claim dropped the payer's P2P usage from 450 to 150 — and that
+    // assertion WAS the defect. velocity_checks has no domain column, so it
+    // is one pool holding send, request-accept and split-pay consumption
+    // together; crediting it from a funding return pays back P2P spending.
+    // Measured consequence: from an empty start a release drove usage to -300
+    // and the payer then moved 750 against a 500 hourly ceiling.
+    //
+    // Funding and withdrawal exposure now live in velocity_claims and are
+    // derived from claim state, so nothing writes to velocity_checks here.
     await admitVelocity(PAYER, cad('450.00'), 'CAD');
     await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(VelocityLimitError);
 
-    await reverseVelocity(PAYER, cad('300.00'), 'CAD', 'transfer_returned');
+    await createVelocityClaim({
+      userId: PAYER, provider: VELOCITY_CLAIM_PROVIDER, reference: 'admission-test-1',
+      claimKind: 'funding', amount: cad('300.00'), currency: 'CAD',
+    });
+    const outcome = await releaseVelocityClaim(VELOCITY_CLAIM_PROVIDER, 'admission-test-1');
+    expect(outcome.released).toBe(true);
 
-    expect(await consumed('hourly')).toBe(cad('150.00'));
-    // The payment refused a moment ago now fits.
-    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).resolves.toBeUndefined();
-    expect(await consumed('hourly')).toBe(cad('250.00'));
+    // P2P usage is untouched, so the payment refused above is STILL refused.
+    expect(await consumed('hourly')).toBe(cad('450.00'));
+    await expect(admitVelocity(PAYER, cad('100.00'), 'CAD')).rejects.toThrow(VelocityLimitError);
 
-    // Both rows are retained: the original and its compensating entry.
-    const rows = await sql`
-      SELECT transaction_count FROM velocity_checks
-      WHERE user_id = ${PAYER} AND window_type = 'hourly' ORDER BY id
+    // And no compensating row was written at all — the mechanism is gone,
+    // not merely clamped.
+    const negatives = await sql`
+      SELECT COUNT(*)::int AS n FROM velocity_checks
+      WHERE user_id = ${PAYER} AND transaction_count < 0
     `;
-    expect(rows.map((r) => Number(r.transaction_count))).toContain(-1);
+    expect(negatives[0].n).toBe(0);
   });
 
   it('rejects a non-positive or non-integer amount rather than admitting it', async () => {

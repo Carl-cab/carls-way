@@ -500,9 +500,12 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
-  // Partial uniqueness: exactly one accumulating row per window, while the
-  // compensating rows reverseVelocity() appends (transaction_count < 0) stay
-  // append-only. recordVelocity()'s upsert targets this index explicitly.
+  // Partial uniqueness: exactly one accumulating row per window. The
+  // predicate excludes transaction_count < 0, which existed for the
+  // compensating rows the now-deleted reverseVelocity() appended; nothing
+  // writes such a row any more, and the predicate stays only so that any
+  // legacy row still present does not collide. recordVelocity()'s upsert
+  // targets this index explicitly.
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS velocity_checks_window_key
       ON velocity_checks (user_id, window_type, window_start, currency)
@@ -511,6 +514,58 @@ export async function initializeSchema(executor: ReturnType<typeof getSql> = get
   await sql`
     CREATE INDEX IF NOT EXISTS idx_velocity_checks_lookup
       ON velocity_checks (user_id, window_type, currency, window_start)
+  `;
+  // One row per velocity claim, so a release can be bounded by what was
+  // actually claimed. Before this table, reverseVelocity() released
+  // min(amount, current window total) — where the window total is the user's
+  // volume from EVERY path — so a returned transfer freed budget money:send
+  // and money:split-pay had genuinely consumed. See decision 0012.
+  //
+  // window_start columns are recorded AT CLAIM TIME on purpose, so exposure
+  // is attributed to the window that actually carried the claim. A release
+  // credits nothing anywhere -- it only moves the claim out of the reserved
+  // set -- and recording the original windows is what makes a late return
+  // incapable of touching a current one. A US unauthorized-debit return may
+  // land 60 calendar days later and a CA PAD dispute 90 days later, by which
+  // point the original hourly and daily windows are long gone; crediting the
+  // current ones would have handed back headroom in a window that never
+  // carried the charge.
+  //
+  // NOTE: because these columns are compared against the CURRENT window,
+  // claimedExposure() is a rolling-window measure. See its comment in
+  // lib/velocity-claims.ts -- it is the wrong input for 0009's in-flight
+  // exposure and for 0013's cumulative sandbox ceiling, both of which need an
+  // unwindowed total over the reserved set.
+  await sql`
+    CREATE TABLE IF NOT EXISTS velocity_claims (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      provider TEXT NOT NULL,
+      reference TEXT NOT NULL,
+      claim_kind TEXT NOT NULL,
+      amount NUMERIC(14,2) NOT NULL,
+      currency TEXT NOT NULL,
+      hourly_window_start TIMESTAMPTZ NOT NULL,
+      daily_window_start TIMESTAMPTZ NOT NULL,
+      weekly_window_start TIMESTAMPTZ NOT NULL,
+      state TEXT NOT NULL DEFAULT 'reserved',
+      released_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      released_at TIMESTAMPTZ,
+      release_event_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  // At most one claim per (provider, reference). This is what makes a release
+  // identifiable: a webhook names an intent, not a window. It is also the
+  // guard against a duplicate confirmation claiming twice.
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS velocity_claims_reference_key
+      ON velocity_claims (provider, reference)
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_velocity_claims_user_state
+      ON velocity_claims (user_id, state, currency)
   `;
   // Customer-facing audit trail written by auditLog() in lib/auth.ts. That
   // helper swallows its own errors, so while this table was missing every

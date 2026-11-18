@@ -10,6 +10,10 @@ SELECT
   CASE WHEN c.table_name IS NULL THEN 'MISSING' ELSE 'OK' END AS status
 FROM (VALUES
   ('velocity_checks'), ('audit_logs'), ('fx_rates'),
+  -- Claim ledger for velocity releases. Missing means releaseVelocityClaim()
+  -- raises 42703 on every returned transfer, which is a settlement path, so
+  -- it is read unguarded and belongs here. Decision 0012.
+  ('velocity_claims'),
   ('notifications'), ('provider_webhook_events'),
   ('webhook_dead_letters'), ('ledger_entries'),
   ('password_reset_tokens'),
@@ -74,6 +78,17 @@ FROM pg_indexes
 WHERE schemaname = 'public' AND tablename = 'fx_rates'
   AND indexdef ILIKE '%UNIQUE%'
   AND indexdef ILIKE '%from_currency%' AND indexdef ILIKE '%to_currency%';
+
+-- velocity_claims_reference_key is what makes a release identifiable and a
+-- duplicate confirmation unable to claim twice. Without it the claim table
+-- exists but the guarantee does not, which is worse than a missing table
+-- because nothing errors.
+SELECT
+  'velocity_claims unique (provider, reference)' AS object,
+  CASE WHEN COUNT(*) > 0 THEN 'OK' ELSE 'MISSING' END AS status
+FROM pg_indexes
+WHERE schemaname = 'public' AND tablename = 'velocity_claims'
+  AND indexdef ILIKE '%UNIQUE%' AND indexdef ILIKE '%provider%' AND indexdef ILIKE '%reference%';
 
 -- ── 4. What would have blocked those indexes ────────────────────────────────
 -- Both should return zero rows. Any row here is a duplicate that a human must

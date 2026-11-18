@@ -181,9 +181,11 @@ function main() {
   out.push('');
   out.push(
     'Production SHA is readable here after all, from the **GitHub**' +
-      ' deployments API rather than Vercel: deployment 7665135331, environment' +
-      ' Production, sha `10f96507`, state `success`. That is a deployment' +
-      ' record, not a check that the alias serves it.',
+      ' deployments API rather than Vercel: deployment 7870051100, environment' +
+      ' Production, sha `0cdadfa6`, state `success` (2026-11-18T00:12Z) — the' +
+      ' merge of PR #77. That is a deployment record, not a check that the' +
+      ' alias serves it, and it says nothing about `POST /api/migrate`, which' +
+      ' has NOT been run for this commit and is not authorized here.',
   );
   out.push('');
   out.push(
