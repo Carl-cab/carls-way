@@ -41,7 +41,25 @@ WITH internal_payments AS (
     COALESCE(t.sender_currency, t.currency) AS sender_currency,
     COALESCE(t.receiver_currency, t.currency) AS receiver_currency,
     COALESCE(t.sender_amount, t.amount) AS sender_amount,
-    COALESCE(t.receiver_amount, t.amount) AS receiver_amount
+    COALESCE(t.receiver_amount, t.amount) AS receiver_amount,
+    -- The expected ledger entry types, DERIVED FROM THE TRANSACTION'S OWN
+    -- CLASSIFICATION rather than taken from a list of types that happen to be
+    -- tolerated.
+    --
+    -- Why this shape and not `entry_type IN ('payment_sent','split_payment')`:
+    -- an allow-list accepts a split-payment entry on an ordinary payment and
+    -- an ordinary entry on a split, so a path writing the wrong type would
+    -- reconcile clean. Deriving the expectation keeps exactly one correct
+    -- answer per payment.
+    --
+    -- `split_id` is the classification: paySplitPortion() sets it on the
+    -- transaction and writes entry_type='split_payment' on both legs, while
+    -- every other internal payment leaves it NULL and writes
+    -- payment_sent/payment_received.
+    CASE WHEN t.split_id IS NOT NULL THEN 'split_payment' ELSE 'payment_sent' END
+      AS expected_sender_entry_type,
+    CASE WHEN t.split_id IS NOT NULL THEN 'split_payment' ELSE 'payment_received' END
+      AS expected_receiver_entry_type
   FROM transactions AS t
   WHERE t.payment_rail = 'internal'
     AND t.type IN ('pay', 'payment')
@@ -56,11 +74,13 @@ per_payment AS (
     p.receiver_currency,
     p.sender_amount,
     p.receiver_amount,
+    p.expected_sender_entry_type,
+    p.expected_receiver_entry_type,
     COUNT(le.id) AS wallet_ledger_entry_count,
     COUNT(le.id) FILTER (
       WHERE le.user_id = p.sender_id
         AND le.account_type = 'wallet'
-        AND le.entry_type = 'payment_sent'
+        AND le.entry_type = p.expected_sender_entry_type
         AND le.currency = p.sender_currency
         AND le.debit > 0
         AND le.credit = 0
@@ -68,7 +88,7 @@ per_payment AS (
     COUNT(le.id) FILTER (
       WHERE le.user_id = p.receiver_id
         AND le.account_type = 'wallet'
-        AND le.entry_type = 'payment_received'
+        AND le.entry_type = p.expected_receiver_entry_type
         AND le.currency = p.receiver_currency
         AND le.debit = 0
         AND le.credit > 0
@@ -76,13 +96,13 @@ per_payment AS (
     COALESCE(SUM(le.debit) FILTER (
       WHERE le.user_id = p.sender_id
         AND le.account_type = 'wallet'
-        AND le.entry_type = 'payment_sent'
+        AND le.entry_type = p.expected_sender_entry_type
         AND le.currency = p.sender_currency
     ), 0) AS sender_debit_total,
     COALESCE(SUM(le.credit) FILTER (
       WHERE le.user_id = p.receiver_id
         AND le.account_type = 'wallet'
-        AND le.entry_type = 'payment_received'
+        AND le.entry_type = p.expected_receiver_entry_type
         AND le.currency = p.receiver_currency
     ), 0) AS receiver_credit_total,
     COUNT(le.id) FILTER (
@@ -98,7 +118,9 @@ per_payment AS (
     p.sender_currency,
     p.receiver_currency,
     p.sender_amount,
-    p.receiver_amount
+    p.receiver_amount,
+    p.expected_sender_entry_type,
+    p.expected_receiver_entry_type
 ),
 user_wallets AS (
   SELECT
