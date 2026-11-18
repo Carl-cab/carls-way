@@ -90,6 +90,23 @@ export async function createLedgerEntry(
     provider?: string;
     providerReference?: string;
     description?: string;
+    /**
+     * Run the INSERT on a caller's transaction instead of a pooled
+     * connection, so the entry commits — or rolls back — with whatever else
+     * that transaction is doing.
+     *
+     * `createLedgerPair()` has always taken one; this function did not, which
+     * meant any caller needing a single entry written atomically with a
+     * balance change had to inline the SQL. Registration needs exactly that:
+     * the account row and its opening-balance entry must both exist or
+     * neither.
+     *
+     * Passing `tx` is also what keeps this off a second pool connection. The
+     * pool is `max: 5`, and a caller holding one inside `sql.begin` that lets
+     * this fall back to `getSql()` asks for a second while holding the first
+     * — the deadlock shape CLAUDE.md documents for the velocity helpers.
+     */
+    executor?: LedgerExecutor;
   }
 ): Promise<number> {
   // Validation
@@ -109,7 +126,7 @@ export async function createLedgerEntry(
     throw new Error('Debit or credit must be greater than zero.');
   }
 
-  const sql = getSql();
+  const sql = options?.executor ?? getSql();
   const result = await sql`
     INSERT INTO ledger_entries (
       user_id, transaction_id, transfer_intent_id,
