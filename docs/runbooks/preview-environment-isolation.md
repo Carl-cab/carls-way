@@ -1,0 +1,163 @@
+# Preview environment isolation — checklist
+
+**Status: NOT RUN. Every item below is unverified, and this document cannot
+verify any of them.**
+
+The engineering session that wrote this cannot reach Vercel: `vercel.com`,
+`api.vercel.com` and the deployment host all answer `403 CONNECT` through the
+egress proxy, and no Vercel CLI or token is present. Every item here is a
+**dashboard fact** that only the owner can read, and several are questions
+about **values**, which are deliberately never compared through a session or a
+transcript.
+
+Do not treat an unticked box as low risk. Item 2 in particular describes
+something that may already have happened many times.
+
+---
+
+## Why this exists
+
+Sprint 2 requires: *"Preview must use an isolated database containing synthetic
+data. Verify whether separate overrides already exist. Do not perform
+transactional testing against Preview until database isolation is confirmed."*
+
+That last sentence is the operative one. **Until item 2 is answered, no
+transactional testing may run against a Preview deployment.** A preview build
+runs on every push to every PR, resolves to `production` mode
+(`MANNA_ENV` is absent and `lib/environment.ts` correctly defaults to
+production), and would therefore exercise whatever database `DATABASE_URL`
+names.
+
+---
+
+## What the owner's 2026-11-17 read-only audit established
+
+Names and scopes only; no values read, nothing changed.
+
+| Variable | Scope | Note |
+|---|---|---|
+| `DATABASE_URL` | Production **and** Preview | single entry — **the question behind item 2** |
+| `PLAID_SECRET` | Production **and** Preview | production secret, reaches every preview build |
+| `PLAID_CLIENT_ID` | Production only | the accidental protection |
+| `REDIS_URL` | separate entries for Production and Preview | both recently updated |
+| `NEXT_PUBLIC_PLAID_ENV` | Production and Preview | read by no code in this repository |
+| `CRON_SECRET` | Production only | |
+| `MANNA_ENV` | absent | correct: production is the safe default |
+| `PLAID_TRANSFER_LIVE`, `CA_EFT_LIVE` | absent | live rails off |
+| `RESEND_API_KEY`, `EMAIL_FROM`, `BACKFILL_SECRET` | All Environments | |
+
+**A single entry scoped to two environments is one value.** Vercel shows a
+separate entry per scope when the values differ. `REDIS_URL` has two entries —
+so Redis is plausibly already split. `DATABASE_URL` has one, which is
+consistent with Preview and Production sharing a database, and is the reason
+item 2 is first.
+
+---
+
+## 1. Establish the facts (owner, dashboard)
+
+- [ ] Open Settings → Environment Variables and confirm whether `DATABASE_URL`
+      is **one entry covering both scopes** or **two entries with different
+      values**. Report only *same* or *different* — never the values.
+- [ ] If one entry: Preview and Production share a database. Treat every
+      preview deployment to date as having read and written production data,
+      and go to item 2.
+- [ ] Confirm the two `REDIS_URL` entries point at different instances. A
+      shared Redis is a smaller problem than a shared database — rate-limit
+      counters, not money — but it is still shared state between environments.
+
+## 2. Give Preview its own database (owner)
+
+- [ ] Create a **separate Supabase project** for Preview. Not a second schema
+      in the same project: a schema shares the instance, its connection limits
+      and its backups, and one wrong `search_path` crosses the boundary.
+- [ ] Build its schema from the repository, in this order:
+      1. deploy the branch so `initializeSchema()` has run, **or** apply
+         `lib/__tests__/helpers/test-schema.sql`;
+      2. call `POST /api/migrate` once against the Preview deployment,
+         authenticated;
+      3. run `scripts/verify-migrate.sql` and require **0 non-OK rows**.
+- [ ] **Do not restore a production dump into it.** That would put real
+      customer data in an environment every PR can reach.
+- [ ] Set `DATABASE_URL` **Preview scope only** to the new project. Leave the
+      Production entry untouched.
+- [ ] Redeploy a preview and confirm it is reading the new database — a fresh
+      Preview database has no users, so a login with a known production
+      account must **fail**. That negative is the proof; a successful page load
+      proves nothing.
+
+## 3. Seed synthetic data (owner or engineering, once isolated)
+
+- [ ] Register synthetic participants through the running application rather
+      than by SQL insert, so the seed matches what the code produces.
+      Emails under a domain you control or `@example.test`.
+- [ ] Note the `auth:register` limit: **3/hour**, keyed on
+      `clientIdentifier()`, which collapses to **one global bucket** when no
+      client IP header is present. Several people behind one NAT share it, and
+      the fourth signup inside an hour is refused. Space the seeding out, or
+      accept the refusals as expected.
+- [ ] Never copy a production row, including a single user, into Preview.
+
+## 4. Remove the production Plaid secret from Preview (owner)
+
+**Do this whether or not Preview exercises Plaid.**
+
+- [ ] Delete `PLAID_SECRET` from the **Preview** scope. Keep Production.
+- [ ] **Do NOT add `PLAID_CLIENT_ID` to Preview.** It reads like tidying up an
+      inconsistency and is the opposite: today a preview build sends an empty
+      client id (`cleanPlaidCredential(undefined)` returns `''`) and Plaid
+      rejects it. What stops preview builds reaching live Plaid is a *missing
+      credential*, not a control anyone chose. Adding the client id would point
+      every PR's preview build at live Plaid with the production secret.
+- [ ] If Preview should exercise Plaid at all, add **sandbox** credentials for
+      **both** values plus `PLAID_ENV=sandbox`, scoped to Preview only.
+- [ ] Afterwards, confirm a preview build's Plaid call fails for the new
+      reason (no credentials) rather than the old one (empty client id).
+
+## 5. Delete the unused variable (owner)
+
+- [ ] Delete `NEXT_PUBLIC_PLAID_ENV` from both scopes. Verified 2026-11-18 by
+      grepping every `.ts`, `.tsx`, `.mjs` and `.json` outside `node_modules`:
+      **zero references**. The server-side resolver is `PLAID_ENV` via
+      `lib/plaid-env.ts`. It is inlined into the browser bundle, so it ships to
+      every visitor for no purpose, and its name reads as though it controls
+      Plaid's host — so an operator changing it to fix a Plaid problem would
+      see no effect and look elsewhere.
+
+## 6. Keep the rails off in Preview (owner)
+
+- [ ] Confirm `PLAID_TRANSFER_LIVE` and `CA_EFT_LIVE` remain **absent** in
+      every scope. Any value other than `true` is sandbox, but absence is the
+      state to maintain.
+- [ ] Confirm no team-level variable supplies either. The 2026-11-17 audit
+      found none linked to this project; re-check after any team change,
+      because a team variable would be inherited silently.
+- [ ] Consider setting `MANNA_ENV=sandbox` on Preview **only**. Note what it
+      does and does not do: `VERCEL_ENV=production` overrides it, so it cannot
+      weaken a production deploy — and on Vercel a preview deployment does not
+      carry `VERCEL_ENV=production`, so this does change preview behaviour.
+      Decide deliberately; it is not a no-op.
+
+## 7. Before any transactional testing against Preview
+
+All of these must hold, together:
+
+- [ ] Item 2 complete and the negative login test performed.
+- [ ] `scripts/verify-migrate.sql` reports **0 non-OK rows** on the Preview
+      database.
+- [ ] `scripts/reconciliation-check.sql` has been run and its output
+      **understood** — note that on any database where someone has registered
+      or paid a split portion it will currently report FAIL for reasons
+      documented in `docs/audits/2026-11-18-sandbox-beta-readiness.md`
+      (findings 6 and 6b). Establish that baseline *before* testing, or a real
+      discrepancy will be indistinguishable from the known ones.
+- [ ] Both live rail flags confirmed absent.
+- [ ] The participants are synthetic and the data is disposable.
+
+---
+
+## What this does not cover
+
+Supabase-side isolation: database roles, Row Level Security, connection
+limits and backup retention for the Preview project. Those are configured in
+Supabase, not Vercel, and nothing in this repository can verify them either.

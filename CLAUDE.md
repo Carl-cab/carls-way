@@ -278,17 +278,15 @@ migration to production. **It is POST, not GET** — a state-changing GET was
 reachable by CSRF; see `docs/decisions/0005-migration-privilege-separation.md`.
 `GET` answers 405 with a pointer rather than failing silently.
 
-**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **68 files /
-977 tests** — measured on a database created fresh for the run with the CI
-fixture applied; all 977 pass. That is the number **on `master`** once this
-change lands: master ran **66 / 943** at `10f96507`, and this change adds
-**34**. The composition is worth writing out because it is not a single
-number: `velocity-claim-release.test.ts` (**+26**), four guards in
-`velocity-admission-callers.test.ts` (**+4**), the new adversarial file
-`velocity-claim-adversarial.test.ts` (**+11**), one assertion split into two
-in `settlement-b3.3.test.ts` (**+1**), and the eight-case `reverseVelocity`
-block deleted from `velocity.test.ts` (**−8**). 26 + 4 + 11 + 1 − 8 = 34, and
-943 + 34 = 977.
+**Tests:** `pnpm test` (vitest) runs the suite in `lib/__tests__`. **71 files /
+992 tests** — measured on a database created fresh for the run with the CI
+fixture applied; all 992 pass. Master at `55c8cee` ran **68 / 977**; this
+change adds **15**: `registration-schema.test.ts` (**+6**),
+`fixture-schema-parity.test.ts` (**+4**) and `email-send-failure.test.ts`
+(**+5**). 977 + 15 = 992.
+The 977 came from `d78918a` (PRs #74 and #75, which took 907 → 943) and then
+#77 (943 → 977, composed as +26 claim-release, +4 caller guards, +11
+adversarial, +1 split assertion, −8 for the deleted `reverseVelocity` block).
 The earlier baseline was **61 / 907** on `master` at `403acf1`; the 943 came
 from PR #74 (`split-pay-velocity.test.ts` 9 and
 `split-pay-route-status.test.ts` 6) together with PR #75, merged into #74's
@@ -629,6 +627,45 @@ arbitrary end user.
   `scripts/status/readiness.json` already records environment isolation as
   unverified, and this is the specific unanswered question behind that row.
 
+- **Internal reconciliation FAILS on any database where a split has been paid
+  or anyone has registered — so the daily cron reports failure permanently.**
+  Measured 2026-11-18 on a database produced by using the sandbox normally;
+  the cron route returns **HTTP 500 with `passed:false`**. Three of the seven
+  checks fail, for two separate causes, and **neither is a money error**:
+  - `internal_payment_amounts_match_ledger` and
+    `payer_recipient_direction_currency_and_type`: `paySplitPortion()` writes
+    ledger entries with `entry_type='split_payment'`, but its `transactions`
+    row is `type='payment'`, `payment_rail='internal'`, `status='completed'`
+    — which puts it **in reconciliation scope**, where both invariants count
+    only `payment_sent` / `payment_received`. So `valid_sender_debit_count`
+    is 0 and `sender_debit_total` is 0 against a 30.00 payment. The ledger
+    itself is correct and balanced.
+  - `user_wallets_exactly_match_ledger`: the CA$100/US$100 registration seed
+    balance is written straight to `balance_cad`/`balance_usd` with **no
+    ledger entry**, so every registered user is permanently out by their seed
+    amount. Measured: two users each +100.00.
+  Why this matters more than the arithmetic: `money:split-pay` is live and
+  registration is universal, so the control cannot distinguish a real
+  discrepancy from routine use. **A control that always fails is not a
+  control.** Fixing it means either widening both invariants to recognise
+  `split_payment` or making splits write the standard entry types, and
+  `lib/__tests__/reconciliation-sql-parity.test.ts` requires the SQL file and
+  `lib/internal-reconciliation.ts` to change **together**. It is a financial
+  control, so the choice is the owner's. Evidence:
+  `docs/audits/2026-11-18-sandbox-beta-readiness.md` §6.
+- **`backfillOpeningBalances()` corrupts the ledger of any user who has
+  transacted.** `lib/ledger.ts` credits **`u.balance_cad`** — the *current*
+  balance — as an `opening_balance` entry for any user lacking one, so for an
+  active user it books their whole history a second time. Measured: a user at
+  wallet 1370.00 / ledger 1270.00 (discrepancy **+100**) became ledger
+  2640.00 (discrepancy **−1270**) — twelve times worse and in the opposite
+  direction. **The trap is that it looks like it helped**: aggregate
+  violations fell 6 → 3, because the inactive users were corrected properly.
+  Reachable through `POST /api/admin/ledger/backfill-opening-balances`
+  (`BACKFILL_SECRET` + `exceptions:manage`), with no guard limiting it to
+  users with no other entries. Do not run it. Fixing it is a financial
+  decision — book the original seed, restrict it to untouched accounts, or
+  retire it.
 - **The transfer-intent route refuses funding on the P2P outbound budget.**
   `app/api/transfers/intent/route.ts` gates **both** `add_money` and
   `cash_out` on `checkVelocityLimit()`, which sums `velocity_checks` — the P2P

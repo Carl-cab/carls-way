@@ -12,12 +12,47 @@ function getEmailConfig() {
   return { apiKey, fromEmail, appUrl };
 }
 
+/**
+ * The Resend SDK does NOT throw when the API rejects a send.
+ *
+ * `emails.send()` resolves to `{ data, error: null } | { data: null, error }`
+ * — read off `Response<T>` in resend@6's own type definitions, not inferred.
+ * Its `RESEND_ERROR_CODE_KEY` union includes `invalid_api_key`,
+ * `missing_api_key`, `restricted_api_key`, `invalid_from_address`,
+ * `validation_error`, `rate_limit_exceeded` and the three quota codes. Every
+ * one of those resolves successfully with `error` populated.
+ *
+ * This function previously discarded that result, and the consequence ran the
+ * whole length of the only caller. `POST /api/auth/forgot-password` wraps the
+ * call in a `try/catch` that logs, and then returns `{ success: true }`
+ * unconditionally — correctly, because revealing whether an address exists is
+ * account enumeration. So with the result discarded:
+ *
+ *   - the SDK did not throw,
+ *   - the catch therefore never ran and nothing was logged,
+ *   - the route answered `{"success": true}`,
+ *   - a `password_reset_tokens` row was created,
+ *   - and no email was sent.
+ *
+ * Measured in a running sandbox against an invalid API key: the route answered
+ * 200 and the server log contained zero occurrences of its own
+ * "Password reset email error". A completely silent failure of password
+ * recovery, invisible to the user by design and invisible to the operator by
+ * accident.
+ *
+ * Throwing here is what makes the caller's existing catch mean something. The
+ * enumeration-resistant response is unchanged — users still always see
+ * success — but an operator now gets a log line.
+ *
+ * The thrown message carries the provider's error name and message and NOT the
+ * recipient address, because this travels to `logRedactedError`.
+ */
 export async function sendPasswordResetEmail(email: string, token: string): Promise<void> {
   const { apiKey, fromEmail, appUrl } = getEmailConfig();
   const resend = new Resend(apiKey);
   const resetUrl = `${appUrl}/reset-password?token=${token}`;
 
-  await resend.emails.send({
+  const result = await resend.emails.send({
     from: fromEmail,
     to: email,
     subject: 'Reset your Manna password',
@@ -35,4 +70,12 @@ export async function sendPasswordResetEmail(email: string, token: string): Prom
       <p>—<br />Manna Team</p>
     `,
   });
+
+  if (result.error) {
+    // `name` is the RESEND_ERROR_CODE_KEY (e.g. `invalid_api_key`,
+    // `invalid_from_address`), which is the part an operator acts on.
+    throw new Error(
+      `Resend rejected the password-reset email: ${result.error.name} — ${result.error.message}`,
+    );
+  }
 }

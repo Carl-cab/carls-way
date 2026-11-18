@@ -4842,3 +4842,90 @@ additive.
 **Next recommended action.** Owner: the three Vercel configuration changes,
 and a decision on how the claim-model validation is to be obtained now that it
 is a rail gate rather than a merge gate.
+
+---
+
+## 2026-11-18 — Sprint 2: ran the application, found four 500s behind 977 green tests
+
+**Purpose and scope.** Sprint 2 asked for a demonstrably working sandbox
+rather than a higher test count. So the method was to build the application,
+run it against an isolated local PostgreSQL database, and use it — HTTP
+against the real routes, then a real browser — instead of reading the code.
+Branch `fix/sandbox-beta-blockers` off `master` at `55c8cee`.
+
+**Financial and security behaviour affected.** No control was changed. Three
+schema sources and one error-handling path were corrected; two financial
+defects were found and deliberately NOT fixed, because fixing either changes
+what a financial control asserts.
+
+**What running it found, that 68 files / 977 passing tests did not.** Four of
+the primary user workflows answered 500 on a fixture-built database:
+registration (`users.province`), `/api/me` (`users.balance`), the feed
+(`transactions.estimated_settlement`) and **sending money**
+(`transactions.fx_rate`). Fixing them one at a time proved to be the wrong
+method, so the whole schema was diffed instead: **4 missing tables and 24
+missing columns**, including the entire admin RBAC role/permission surface.
+
+The reason no guard caught it is worth keeping. `province` and `balance` are
+declared only inside `initializeSchema()`'s CREATE TABLE body.
+`schema-source-parity.test.ts` runs one direction (migrate route ⊆ db.ts),
+`migrate-route-execution.test.ts` can only execute statements that exist, and
+`verify-migrate.sql` is a hand-maintained list. All three worked as designed;
+**nothing ran the reader**. `fixture-schema-parity.test.ts` now closes the
+missing third direction.
+
+**A silent failure of password recovery.** `resend.emails.send()` resolves to
+`{data, error}` and does not throw — confirmed from resend@6's own types and
+by direct probe, where even a blocked network resolved as
+`{error: application_error}`. `lib/email.ts` discarded that result, and
+`forgot-password` correctly returns `{success:true}` unconditionally for
+enumeration resistance. Net: no exception, no log, no email, a token row
+created, and a 200. Measured: zero occurrences of the route's own
+"Password reset email error" in the log. Now throws, so the caller's existing
+catch means something.
+
+**Two financial defects found and left for the owner.** Both are recorded in
+CLAUDE.md's open gaps with measurements.
+1. Internal reconciliation FAILS permanently on any real database. The cron
+   returns HTTP 500 `passed:false`. Split payments write
+   `entry_type='split_payment'` while sitting in reconciliation scope, and the
+   registration seed balance is never booked to the ledger. Neither is a money
+   error; the ledger is balanced. But a control that always fails cannot
+   distinguish a real discrepancy from routine use.
+2. `backfillOpeningBalances()` credits the user's CURRENT balance, so for an
+   active user it books their whole history twice. Measured: a discrepancy of
+   +100.00 became −1270.00. It looks like it helped — aggregate violations
+   fell 6 → 3 because inactive users were corrected properly.
+
+**Tests run and results.** `pnpm test` **71 files / 992 tests, all passing**
+(977 + 15) on a fresh fixtured database; typecheck 0 errors; lint 0 errors /
+29 pre-existing warnings; `next build` succeeds. Browser smoke test: 16 of 18
+checks pass, all five mobile pages with no horizontal overflow. Backup and
+restore rehearsal: 0 errors, exact parity, `verify-migrate.sql` 0 non-OK rows.
+Migration rehearsed on an existing-schema database: applied clean, idempotent
+across three runs, data preserved, unique index proven by a rejected
+duplicate. Mutation-checked: removing `province` from the fixture fails 4 of 6
+registration cases; disabling the email error check fails 3 of 5.
+
+**Commit SHA and PR.** Branch `fix/sandbox-beta-blockers`; see the PR for the
+merge commit.
+
+**Migration impact.** `app/api/migrate/route.ts` gains two additive
+`ADD COLUMN IF NOT EXISTS` statements (`users.province`, `users.balance`).
+Both are no-ops on production, where the columns already exist; they matter
+for databases rebuilt from the route. `POST /api/migrate` was NOT run against
+production and is not authorized here.
+
+**Unresolved findings.** The two financial defects above; sandbox funding
+measured at CA$1,850 against 0013's CA$100 ceiling with sandbox cash-out fully
+reachable; 31 of 36 form labels have no programmatic association; two moderate
+Next.js advisories (`16.4.3`, patched `>=16.4.5`) that CI's audit job does not
+gate on; no simulated bank-linking path, so a participant cannot link an
+account without Plaid sandbox credentials.
+
+**Rollback requirement.** Schema and fixture changes are additive; `git revert`
+suffices and destroys no evidence. Do not drop any column to undo.
+
+**Next recommended action.** Owner: decide the two financial fixes, settle
+Preview database isolation, and arrange the independent claim-accounting
+review. Engineering: implement 0013 once that review is done — not before.

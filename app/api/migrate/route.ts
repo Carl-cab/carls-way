@@ -277,6 +277,27 @@ export async function POST(req: NextRequest) {
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0`;
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`;
+    // `province` was declared ONLY inside initializeSchema()'s CREATE TABLE
+    // body, so this route — the authority on what the live database holds —
+    // never guaranteed it. The live table has it because initializeSchema()
+    // created that table; a database rebuilt from this route alone would not,
+    // and `POST /api/auth/register` INSERTs into it unguarded, answering 500
+    // with 42703. That makes it a restore-and-rebuild hazard rather than a
+    // production outage: the column is missing exactly on the fresh
+    // environments nobody has registered against yet. Found by booting the
+    // application against a fixture-built database.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS province TEXT`;
+    // The legacy dual-currency-era column, in the same position as `province`:
+    // declared only in initializeSchema()'s CREATE TABLE body, so this route
+    // never guaranteed it on a rebuilt database. It is NOT dead weight —
+    // `GET /api/me` selects it (500 `column "balance" does not exist`
+    // without it), `MONEY_COLUMNS` in lib/db.ts lists it so the migration
+    // registry probes it, and scripts/verify-migrate.sql checks its type.
+    // Declared exactly as lib/db.ts declares it, so a rebuilt database is
+    // identical to a historically grown one rather than merely close.
+    // CLAUDE.md's rule is unaffected: never use this column in NEW code, use
+    // balance_cad / balance_usd. Guaranteeing it exists is not using it.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(14,2) NOT NULL DEFAULT 100.00`;
 
     // Transactions default to private. Existing rows keep whatever they were
     // given; this only changes what a row created from now on gets when no
