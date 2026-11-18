@@ -5019,3 +5019,21 @@ production balance, ledger entry, migration or credential was touched.
 **Next recommended action.** Owner: review and merge #82–#85, settle Preview
 database isolation, and arrange the independent claim-accounting review.
 Decision 0013 stays unimplemented until that review is satisfied.
+
+**Correction appended 2026-11-18, same day.** The entry above was written
+while PRs #82–#86 were open, and says so. The owner authorized merging all
+five and they landed: #82 `12377f6`, #83 `c602d69`, #84 `5ed0908`,
+#85 `4a70d66`, #86 with this correction. Each was **rebased onto the moving
+master and its CI re-run on the true post-merge tree**, rather than merged on
+a result measured against a base that no longer existed — a green check
+belongs to the commit it ran on.
+
+Measured on the merged tree: **74 files / 1028 tests**, typecheck 0 errors,
+lint 0 errors / 29 pre-existing warnings, `pnpm audit --prod` reporting **no
+known vulnerabilities** where there had been two moderate.
+
+**None of the five is independently reviewed.** This session authored and
+merged all of them, and CodeRabbit skipped every one because the repository
+has fewer than 10 stars. A merge is not a review, and the independent
+validation of the claim/exposure accounting model remains **waived rather
+than met** — nothing in Sprint 2 counts toward it.
