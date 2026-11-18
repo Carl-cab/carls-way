@@ -163,18 +163,43 @@ function main() {
   out.push('## Deployment status');
   out.push('');
   out.push(
-    '⛔ **BLOCKED — not verifiable from the engineering environment.** The' +
-      ' egress proxy refuses `api.vercel.com` and the deployment host with' +
-      ' `403 CONNECT`, and no Vercel CLI or token is present. Production SHA,' +
-      ' preview SHA, environment isolation, deployment logs and health are' +
+    '⛔ **STILL BLOCKED from this environment, but no longer blank.** The' +
+      ' egress proxy refuses `api.vercel.com`, `vercel.com` and the deployment' +
+      ' host with `403 CONNECT`, and no Vercel CLI or token is present' +
+      ' (re-verified 2026-11-17). Deployment logs, health and error rates are' +
       ' therefore **NOT RUN**, not passing. Steps to grant access are in' +
       ' `docs/runbooks/vercel-access.md`.',
   );
   out.push('');
   out.push(
     'What *is* known from the repository: `vercel.json` declares one cron,' +
-      ' `/api/cron/internal-reconciliation` at `0 15 * * *`. Whether it fires,' +
-      ' and whether `CRON_SECRET` is set, is unverified.',
+      ' `/api/cron/internal-reconciliation` at `0 15 * * *`. Whether it fires' +
+      ' is still unverified — but `CRON_SECRET` **is** set, Production-only' +
+      ' (owner-audited 2026-11-17), so the route will not refuse for want of' +
+      ' it.',
+  );
+  out.push('');
+  out.push(
+    'Production SHA is readable here after all, from the **GitHub**' +
+      ' deployments API rather than Vercel: deployment 7870051100, environment' +
+      ' Production, sha `0cdadfa6`, state `success` (2026-11-18T00:12Z) — the' +
+      ' merge of PR #77. That is a deployment record, not a check that the' +
+      ' alias serves it, and it says nothing about `POST /api/migrate`, which' +
+      ' has NOT been run for this commit and is not authorized here.',
+  );
+  out.push('');
+  out.push(
+    '**Environment variables: names and scopes audited 2026-11-17 by the' +
+      ' owner, read-only, no values read or changed.** Live-money flags' +
+      ' `PLAID_TRANSFER_LIVE` and `CA_EFT_LIVE` are **absent**; `MANNA_ENV` is' +
+      ' absent, which `lib/environment.ts` documents as the safe default; no' +
+      ' team-level variables are linked, so the rail flags cannot be inherited.' +
+      ' Two findings remain OPEN and are recorded in `CLAUDE.md`:' +
+      ' `PLAID_SECRET` is scoped to Preview while `PLAID_CLIENT_ID` is not, so' +
+      ' the production secret sits in every preview build and is stopped only' +
+      ' by an accidental missing credential; and `DATABASE_URL` is scoped to' +
+      ' Production and Preview, which names and scopes **cannot** settle —' +
+      ' isolation is a question about values, so it stays **NOT RUN**.',
   );
   out.push('');
 

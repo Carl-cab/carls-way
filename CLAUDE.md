@@ -590,6 +590,45 @@ arbitrary end user.
 
 ### Known gaps, deliberately open
 
+- **`PLAID_SECRET` is configured for Preview, where `PLAID_CLIENT_ID` is not —
+  so the production Plaid secret sits in every preview build and cannot be
+  used there.** Found by the owner's read-only Vercel audit of 2026-11-17
+  (names and scopes only; no values were read or changed) and traced against
+  the tree the next day.
+  The asymmetry: `PLAID_SECRET` is scoped **Production and Preview**,
+  `PLAID_CLIENT_ID` **Production only**. Plaid authenticates on both headers
+  together — `lib/plaid.ts` sends `PLAID-CLIENT-ID` and `PLAID-SECRET` on every
+  call — and `cleanPlaidCredential(undefined)` returns `''`, so a preview
+  deployment sends an empty client id and Plaid rejects it.
+  **The danger is not the failure, it is that the protection is accidental.**
+  What stops preview builds reaching Plaid is a *missing* client id, not a
+  control anyone chose. Adding `PLAID_CLIENT_ID` to Preview — which reads like
+  tidying up an inconsistency — would immediately point preview deployments at
+  live Plaid with the production secret. A preview build runs on **every PR
+  push**, so the blast radius is every branch anyone pushes.
+  **Not fixed here**: removing a value from Preview is a production
+  configuration change and the owner's to make. The fix is to remove
+  `PLAID_SECRET` from Preview, *not* to add the client id — and if preview
+  builds should exercise Plaid at all, to give them **sandbox** credentials for
+  both values. Until then, read "preview cannot reach Plaid" as a coincidence
+  rather than a guarantee.
+- **`DATABASE_URL` is configured for Production *and* Preview, and whether
+  they are the same database is unverified.** The owner's 2026-11-17 audit read
+  names and scopes, which cannot settle it — the question is one of *values*,
+  and comparing those is deliberately not done through this session or any
+  transcript.
+  If the two values match, every preview build of every pull request reads and
+  writes the **production** database. Two things compound it. Preview
+  deployments resolve to `production` mode, because `MANNA_ENV` is absent and
+  `lib/environment.ts` makes production the default (correctly — see its
+  security contract). And PR #77 alone produced a dozen preview builds in a
+  week. So this is not a hypothetical window; it is whatever has already been
+  happening.
+  Settling it needs the owner to compare the two values in the Vercel
+  dashboard, or to confirm Preview points at a separate Supabase project.
+  `scripts/status/readiness.json` already records environment isolation as
+  unverified, and this is the specific unanswered question behind that row.
+
 - **The transfer-intent route refuses funding on the P2P outbound budget.**
   `app/api/transfers/intent/route.ts` gates **both** `add_money` and
   `cash_out` on `checkVelocityLimit()`, which sums `velocity_checks` — the P2P
@@ -990,6 +1029,30 @@ in-process counter multiplier.
 | `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit. A failure opens a **30s cooldown** (`redisDownUntil`) and then retries, so it no longer latches until the instance recycles; the **raw exception** is unlogged by design, while a degradation line naming the stage and a cumulative count goes to stderr, so callers get no explicit failure signal and operators get one line with no connection detail. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** The backend state (`redisClient`, `redisDownUntil`) and the in-process counters are module-level, so they are per serverless instance: another live instance can be counting in-process while this one answers pass. (Line numbers are deliberately not cited here — they went stale within a day of being written.) Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |
 | `CA_EFT_LIVE` | `true` enables live CA EFT. Any other value, including unset, is sandbox |
+| `RESEND_API_KEY` | Resend API key for transactional email. **Present for All Environments** (owner-audited 2026-11-17). `lib/email.ts` **throws** when this or `EMAIL_FROM` is missing, and its only caller is `sendPasswordResetEmail()` — so an unset value breaks password reset at *send* time, not at boot, which is the hard way to discover it. Was absent from this table until 2026-11-18 |
+| `EMAIL_FROM` | Sender address for the same path, and subject to the same throw. **Present for All Environments** (owner-audited 2026-11-17). Also absent from this table until 2026-11-18 |
+| `BACKFILL_SECRET` | Additional factor on `POST /api/admin/ledger/backfill-opening-balances`, which writes to the ledger. **Present for All Environments** (owner-audited 2026-11-17). **Fails closed**: unset answers **503** "Backfill not enabled", and the route also requires the `exceptions:manage` permission *and* a matching `x-backfill-secret` header, so the secret is a third factor rather than the only one. Absent from this table until 2026-11-18 |
+
+**Two things this table deliberately does NOT list, recorded so their absence
+is not read as an omission.**
+
+`ADMIN_BOOTSTRAP_SECRET` and `ADMIN_BOOTSTRAP_PASSWORD` are read only by
+`scripts/bootstrap-admin.ts`, which is run from an operator's own terminal.
+They are **not** Vercel variables and must not be set there; the owner's
+2026-11-17 audit confirms both are absent from Vercel, which is correct. The
+script refuses when the secret is unset or under 32 characters, and generates a
+random password when `ADMIN_BOOTSTRAP_PASSWORD` is absent.
+
+`NEXT_PUBLIC_PLAID_ENV` **is configured in Vercel (Production and Preview) and
+is read by no code in this repository.** Verified 2026-11-18 by grepping every
+`.ts`, `.tsx`, `.mjs` and `.json` outside `node_modules`: zero references. The
+server-side resolver is `PLAID_ENV`, through `lib/plaid-env.ts`. Two reasons to
+delete it rather than leave it: a `NEXT_PUBLIC_` variable is **inlined into the
+browser bundle**, so it ships to every visitor for no purpose (it is a host
+name, not a secret); and its name reads as though it controls Plaid's host, so
+an operator changing it to fix a Plaid problem would see no effect and look
+elsewhere. Removing it is a Vercel configuration change and therefore the
+owner's.
 
 **After any schema change:** Deploy first, then call `POST /api/migrate` once with a valid auth cookie to apply `ALTER TABLE` changes to the live database. A command-line call sends no `Origin` header, which the route deliberately allows; a browser-originated request from another site is refused.
 
