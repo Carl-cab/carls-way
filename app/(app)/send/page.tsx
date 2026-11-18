@@ -153,15 +153,15 @@ function SendForm() {
         )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">{form.type === 'pay' ? 'To' : 'From'} (username)</label>
-            <input type="text" value={form.receiverUsername} onChange={e => update('receiverUsername', e.target.value.replace('@', ''))} required
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="username">{form.type === 'pay' ? 'To' : 'From'} (username)</label>
+            <input id="username" type="text" value={form.receiverUsername} onChange={e => update('receiverUsername', e.target.value.replace('@', ''))} required
               className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="@username" />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Amount ({currency})</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="amount">Amount ({currency})</label>
             <div className="relative">
               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">$</span>
-              <input type="number" step="0.01" min="0.01" max="10000" value={form.amount} onChange={e => update('amount', e.target.value)} required
+              <input id="amount" type="number" step="0.01" min="0.01" max="10000" value={form.amount} onChange={e => update('amount', e.target.value)} required
                 className="w-full border border-gray-300 rounded-lg pl-8 pr-16 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="0.00" />
               <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">{currency}</span>
             </div>
@@ -180,8 +180,8 @@ function SendForm() {
             </div>
           )}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Note / Emoji</label>
-            <input type="text" value={form.note} onChange={e => update('note', e.target.value)} maxLength={200}
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="note-emoji">Note / Emoji</label>
+            <input id="note-emoji" type="text" value={form.note} onChange={e => update('note', e.target.value)} maxLength={200}
               className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="🍕 Pizza night, ☕ Coffee, 🏒 Game tickets…" />
           </div>
           <div>

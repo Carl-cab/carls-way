@@ -89,8 +89,8 @@ export default function RegisterPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-            <input
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="full-name">Full Name</label>
+            <input id="full-name"
               type="text"
               value={form.name}
               onChange={e => update('name', e.target.value)}
@@ -100,8 +100,8 @@ export default function RegisterPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="email">Email</label>
+            <input id="email"
               type="email"
               value={form.email}
               onChange={e => update('email', e.target.value)}
@@ -112,8 +112,8 @@ export default function RegisterPage() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
-              <input
+              <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="phone">Phone</label>
+              <input id="phone"
                 type="tel"
                 value={form.phone}
                 onChange={e => update('phone', e.target.value)}
@@ -122,8 +122,8 @@ export default function RegisterPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">{regionLabel}</label>
-              <select
+              <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="province-or-state">{regionLabel}</label>
+              <select id="province-or-state"
                 value={form.province}
                 onChange={e => update('province', e.target.value)}
                 className="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
@@ -134,8 +134,8 @@ export default function RegisterPage() {
             </div>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="password">Password</label>
+            <input id="password"
               type="password"
               value={form.password}
               onChange={e => update('password', e.target.value)}

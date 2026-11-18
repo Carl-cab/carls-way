@@ -60,27 +60,22 @@ const email = `uitest${Date.now()}@example.test`;
 const fields = await p.locator('input').count();
 log('register form has inputs', fields >= 3 ? 'PASS' : 'FAIL', `${fields} inputs`);
 
-async function fill(sel, val) { const l = p.locator(sel).first(); if (await l.count()) { await l.fill(val); return true; } return false; }
 // Selected by the visible label rather than a guessed name/placeholder. An
 // earlier version used input[placeholder*="ame" i], which matched nothing
 // (the placeholder is "Jane Smith"), left Full Name empty, and reported the
 // app broken when the app had correctly refused an incomplete form.
-// Selected BY POSITION AND TYPE, which is ugly and is the only thing that
-// works: no input on this form has a `name`, an `id`, or a label associated
-// with it via `htmlFor`. Measured — all four render as
-// {type, name: null, id: null}. So `getByLabel()` times out and
-// `input[name="name"]` matches nothing.
+// SEMANTIC SELECTORS, which is the point rather than a style preference.
 //
-// That is a real accessibility defect, reported separately: a form control
-// with no accessible name is invisible to a screen reader and to password
-// managers. It is NOT worked around by this comment — it is worked around by
-// this selector, which is a different thing, and the defect stays open.
+// These previously had to be positional — `form input` indexed by number —
+// because no control on the auth forms carried a name, an id or a label
+// associated by htmlFor, so getByLabel() timed out and matched nothing. The
+// labels are now associated (id + htmlFor), so the test asks for a field the
+// way a person or a screen reader would.
 //
-// An earlier revision used input[placeholder*="ame" i], matched nothing (the
-// placeholder is "Jane Smith"), left Full Name empty, and reported the app
-// broken when the app had correctly refused an incomplete form.
-const regInputs = p.locator('form input');
-await regInputs.nth(0).fill('UI Test User');
+// That makes this check meaningful in a second way: if a future change breaks
+// the association, this fails. A positional selector would have gone on
+// passing while the form became unusable with assistive technology.
+await p.getByLabel(/full name/i).fill('UI Test User');
 await p.locator('form input[type="email"]').first().fill(email);
 await p.locator('form input[type="password"]').first().fill('SandboxPass!2026');
 await p.screenshot({ path: `${OUT}/02-register-filled.png` });
@@ -94,11 +89,17 @@ if (await submit.count()) {
   await p.screenshot({ path: `${OUT}/03-after-register.png`, fullPage: true });
 } else { log('register submit button found','FAIL','no submit button'); }
 
-// Login page
+// Login page.
+//
+// Cookies are cleared first because the registration step above signed this
+// context in, and /login redirects an authenticated visitor to /feed — so the
+// email field would not exist and the selector would time out. That is the
+// app behaving correctly; the script was at fault when it first hit this.
+await ctx.clearCookies();
 await p.goto('http://localhost:3000/login', { waitUntil: 'networkidle' });
 await p.screenshot({ path: `${OUT}/04-login-desktop.png` });
-await fill('input[type="email"], input[name="email"]', 'alice@example.test');
-await fill('input[type="password"], input[name="password"]', 'SandboxPass!2026');
+await p.getByLabel(/^email/i).fill('alice@example.test');
+await p.getByLabel(/^password/i).fill('SandboxPass!2026');
 const lbtn = p.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")').first();
 if (await lbtn.count()) { await lbtn.click(); await p.waitForTimeout(3500); }
 log('login navigates away from /login', !p.url().includes('/login') ? 'PASS':'FAIL', p.url());
@@ -153,8 +154,8 @@ await mp.goto('http://localhost:3000/login', { waitUntil: 'networkidle' });
 await mp.screenshot({ path: `${OUT}/m01-login.png` });
 const sw = await mp.evaluate(() => ({ scrollW: document.documentElement.scrollWidth, clientW: document.documentElement.clientWidth }));
 log('mobile login: no horizontal overflow', sw.scrollW <= sw.clientW + 1 ? 'PASS':'FAIL', JSON.stringify(sw));
-await mp.locator('input[type="email"], input[name="email"]').first().fill('alice@example.test').catch(()=>{});
-await mp.locator('input[type="password"], input[name="password"]').first().fill('SandboxPass!2026').catch(()=>{});
+await mp.getByLabel(/^email/i).fill('alice@example.test').catch(() => {});
+await mp.getByLabel(/^password/i).fill('SandboxPass!2026').catch(() => {});
 const mb = mp.locator('button[type="submit"]').first();
 if (await mb.count()) { await mb.click(); await mp.waitForTimeout(3500); }
 await mp.screenshot({ path: `${OUT}/m02-feed.png`, fullPage: true });

@@ -141,7 +141,34 @@ record the ledger exists to be.
 
 ---
 
-## Appendix — QUARANTINE, the alternative to repair
+## DECIDED 2026-11-18 — QUARANTINE, outside the beta environment
+
+**The owner chose quarantine.** This section is no longer a menu: the
+decision is recorded, and the repair steps above (3–5) are retained as the
+shape any FUTURE evidence-based proposal must take, not as work authorized
+now.
+
+What the decision means, in the owner's terms:
+
+- Historical discrepancies stay **documented and visible**.
+- **No historical ledger entry or wallet balance is modified.** Not now, not
+  as a side effect of anything else.
+- Historical accounts are **not excluded from production reconciliation
+  merely to produce a passing result.** This is the part most easily got
+  wrong: quarantine is a label on a known set, not a filter that makes the
+  report green. If the production reconciliation reports failures caused by
+  these accounts, that output is **correct** and must stay visible.
+- A separate, **evidence-based** historical remediation proposal is to be
+  prepared for future authorization.
+- The retired backfill is **never** executed.
+
+**Quarantine is outside the beta environment.** The beta runs on its own
+database, provisioned from `initializeSchema()` plus the authorized Preview
+migration and containing only accounts created through the application — so
+it holds none of these historical rows and reports 7/7 PASS. Production keeps
+its discrepancies, labelled.
+
+## Appendix — QUARANTINE, the reasoning behind the decision
 
 Added 2026-11-18 at the owner's request: "prepare a separately authorized
 remediation **or quarantine** plan". Quarantine is the better option for most
@@ -188,6 +215,14 @@ the wallet and an audit ledger that was never written at registration.
   correct; the ledger is the incomplete record.
 - Narrowing the reconciliation invariant without reporting the exclusion.
 
-**Neither option is authorized.** Both need the owner's decision, and doing
-nothing — leaving the accounts discrepant, documented and visible — remains a
-legitimate third choice.
+**Superseded by the decision above.** This appendix set out the options when
+the choice was still open; the owner chose quarantine on 2026-11-18. It is
+kept because it records why — a repair writes a number into the ledger, and
+for any account whose original grant is not independently evidenced that
+number is a guess.
+
+One line in it is now binding rather than advisory: **if
+`user_wallets_exactly_match_ledger` is ever scoped to exclude quarantined
+accounts, the scope counter must report how many were excluded.** The owner's
+instruction is stronger still — do not exclude them merely to generate a
+passing result.
