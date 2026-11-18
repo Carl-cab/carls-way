@@ -1,163 +1,58 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { withAdminAuth, withAuditLog, requirePermission } from '@/lib/rbac';
-import { getSql } from '@/lib/db';
+import { assessOpeningBalanceDiscrepancies } from '@/lib/ledger';
 
-// POST /api/admin/ledger/backfill-opening-balances
-// Creates opening_balance ledger entries for users with seed balances but no ledger entries.
-//
-// Authorization (defence in depth, all required):
-//   1. A valid admin session      (withAdminAuth)
-//   2. The 'exceptions:manage' permission — SuperAdmin / OperationsAdmin only.
-//      This is a privileged ledger mutation, so it is deliberately held to the
-//      same bar as other operational remediation actions.
-//   3. A matching x-backfill-secret header, retained as a second factor.
-// Every invocation is recorded by withAuditLog.
-//
-// Idempotent: Safe to call multiple times (skips users who already have opening_balance entries)
-// Does NOT modify user balances.
-// Supports ?dryRun=true for preview without writing.
-async function backfillHandler(req: NextRequest): Promise<NextResponse> {
-  try {
-    // Authorization beyond authentication: this endpoint writes to the ledger.
-    requirePermission('exceptions:manage');
+/**
+ * Opening-balance endpoint — READ-ONLY since owner decision 3, 2026-11-18.
+ *
+ * WHAT THIS ENDPOINT USED TO DO, AND WHY IT NO LONGER DOES. `POST` ran a
+ * backfill that credited each user's **current** balance as an
+ * `opening_balance` ledger entry. For a user who had transacted, that books
+ * their entire history a second time. Measured on a real sandbox database:
+ *
+ *     before:  wallet 1370.00   ledger 1270.00   discrepancy   +100.00
+ *     after:   wallet 1370.00   ledger 2640.00   discrepancy  -1270.00
+ *
+ * The trap was that it looked like it helped — aggregate
+ * `user_wallets_exactly_match_ledger` violations fell from 6 to 3, because
+ * the accounts with no activity were corrected properly. An operator reading
+ * that count would have concluded the repair worked.
+ *
+ * `POST` now answers **410 Gone** and writes nothing. It is deliberately not
+ * deleted: a removed route 404s, and a 404 reads like a deployment problem to
+ * an operator following an old runbook, who would then go looking for another
+ * way to run the repair. A 410 with an explanation ends that search.
+ *
+ * `GET` is the read-only replacement: `assessOpeningBalanceDiscrepancies()`
+ * reports what is wrong and never writes. It is a DIAGNOSTIC, not a repair,
+ * and the distinction is the whole point of this change — the thing it
+ * replaces looked like a repair and was a corruption.
+ *
+ * A real repair needs its own authorization, evidence of each account's
+ * ORIGINAL grant, and a plan. `BACKFILL_SECRET` stays documented and unused
+ * here rather than being removed, because removing it from the deployment is
+ * the owner's configuration decision and not this route's to force.
+ */
 
-    // Retained as an additional factor on top of admin authorization.
-    const secret = req.headers.get('x-backfill-secret');
-    const expectedSecret = process.env.BACKFILL_SECRET;
+const RETIREMENT_NOTICE = {
+  error: 'This repair operation is retired and performs no writes.',
+  reason:
+    'It credited each user’s CURRENT balance as an opening-balance entry, ' +
+    'double-counting the entire history of every account that had transacted. ' +
+    'Measured: a +100.00 discrepancy became -1270.00.',
+  readOnlyAlternative:
+    'GET this same path for a read-only assessment of opening-balance state.',
+  toRepair:
+    'A repair requires separate owner authorization, evidence of each ' +
+    'account’s original grant, and a remediation plan. See ' +
+    'docs/runbooks/opening-balance-remediation.md.',
+} as const;
 
-    if (!expectedSecret) {
-      return NextResponse.json({
-        error: 'Backfill not enabled (BACKFILL_SECRET env var not set)',
-      }, { status: 503 });
-    }
-
-    if (!secret || secret !== expectedSecret) {
-      return NextResponse.json({ error: 'Invalid or missing x-backfill-secret header' }, { status: 403 });
-    }
-
-    // Check for dry-run mode
-    const url = new URL(req.url);
-    const dryRun = url.searchParams.get('dryRun') === 'true';
-
-    const sql = getSql();
-
-    if (dryRun) {
-      // Preview mode: count what would be created without writing
-      const cadPreview = await sql`
-        SELECT COUNT(*) as count FROM users u
-        WHERE u.balance_cad > 0
-          AND NOT EXISTS (
-            SELECT 1 FROM ledger_entries le
-            WHERE le.user_id = u.id
-              AND le.currency = 'CAD'
-              AND le.entry_type = 'opening_balance'
-          )
-      `;
-
-      const usdPreview = await sql`
-        SELECT COUNT(*) as count FROM users u
-        WHERE u.balance_usd > 0
-          AND NOT EXISTS (
-            SELECT 1 FROM ledger_entries le
-            WHERE le.user_id = u.id
-              AND le.currency = 'USD'
-              AND le.entry_type = 'opening_balance'
-          )
-      `;
-
-      const cadCount = parseInt(String(cadPreview[0]?.count || '0'));
-      const usdCount = parseInt(String(usdPreview[0]?.count || '0'));
-
-      return NextResponse.json({
-        success: true,
-        dryRun: true,
-        message: 'Dry run: no entries created',
-        preview: {
-          cad_entries_to_create: cadCount,
-          usd_entries_to_create: usdCount,
-          total_entries_to_create: cadCount + usdCount,
-        },
-      });
-    }
-
-    // Execute backfill
-    const cadResults = await sql`
-      INSERT INTO ledger_entries (
-        user_id, currency, account_type, entry_type,
-        debit, credit, description
-      )
-      SELECT
-        u.id,
-        'CAD',
-        'wallet',
-        'opening_balance',
-        0,
-        u.balance_cad,
-        'Opening seed balance'
-      FROM users u
-      WHERE u.balance_cad > 0
-        AND NOT EXISTS (
-          SELECT 1 FROM ledger_entries le
-          WHERE le.user_id = u.id
-            AND le.currency = 'CAD'
-            AND le.entry_type = 'opening_balance'
-        )
-      ON CONFLICT DO NOTHING
-      RETURNING user_id
-    `;
-
-    const usdResults = await sql`
-      INSERT INTO ledger_entries (
-        user_id, currency, account_type, entry_type,
-        debit, credit, description
-      )
-      SELECT
-        u.id,
-        'USD',
-        'wallet',
-        'opening_balance',
-        0,
-        u.balance_usd,
-        'Opening seed balance'
-      FROM users u
-      WHERE u.balance_usd > 0
-        AND NOT EXISTS (
-          SELECT 1 FROM ledger_entries le
-          WHERE le.user_id = u.id
-            AND le.currency = 'USD'
-            AND le.entry_type = 'opening_balance'
-        )
-      ON CONFLICT DO NOTHING
-      RETURNING user_id
-    `;
-
-    const cadCount = cadResults.length;
-    const usdCount = usdResults.length;
-
-    return NextResponse.json({
-      success: true,
-      dryRun: false,
-      message: 'Opening balance backfill completed',
-      created: {
-        cad_entries: cadCount,
-        usd_entries: usdCount,
-        total_entries: cadCount + usdCount,
-      },
-    });
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('Permission denied')) {
-      return NextResponse.json({ error: err.message }, { status: 403 });
-    }
-    console.error('Backfill error:', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
-  }
-}
-
-// GET — reports whether the endpoint is enabled.
-// Previously unauthenticated, which disclosed deployment configuration state to
-// anonymous callers. Now held to the same admin authorization bar as POST.
-async function statusHandler(): Promise<NextResponse> {
+async function retiredRepairHandler(): Promise<NextResponse> {
+  // Permission is still required before the explanation is returned: the
+  // notice describes an internal accounting defect and the remediation path,
+  // which is not information for an arbitrary authenticated caller.
   try {
     requirePermission('exceptions:manage');
   } catch (err) {
@@ -167,24 +62,60 @@ async function statusHandler(): Promise<NextResponse> {
     throw err;
   }
 
-  return NextResponse.json({
-    status: process.env.BACKFILL_SECRET ? 'enabled' : 'disabled',
-    message: 'POST with the x-backfill-secret header to backfill opening balances.',
-  });
+  // 410 Gone, before reading any header and before touching the database.
+  // There is no branch below this that could write, which is the property
+  // this route now has to guarantee.
+  return NextResponse.json(RETIREMENT_NOTICE, { status: 410 });
+}
+
+async function assessmentHandler(): Promise<NextResponse> {
+  try {
+    requirePermission('exceptions:manage');
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Permission denied')) {
+      return NextResponse.json({ error: err.message }, { status: 403 });
+    }
+    throw err;
+  }
+
+  try {
+    const assessment = await assessOpeningBalanceDiscrepancies();
+
+    return NextResponse.json({
+      success: true,
+      readOnly: true,
+      message:
+        'Read-only assessment. No ledger entry or balance was created, ' +
+        'modified or deleted.',
+      summary: assessment.summary,
+      withoutEvidencedGrant: assessment.withoutEvidencedGrant,
+      guidance:
+        'A null evidencedGrantMinorUnits means no independent evidence of the ' +
+        'original grant exists for that account — NOT that the grant was ' +
+        'zero, and NOT that it was 100.00. Those accounts cannot be repaired ' +
+        'from this data alone.',
+      rows: assessment.rows,
+    });
+  } catch (err) {
+    console.error('Opening balance assessment error:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
 }
 
 export const POST = (req: NextRequest) =>
   withAdminAuth(req, (r) =>
-    withAuditLog(r, backfillHandler, {
-      action: 'backfill_opening_balances',
+    withAuditLog(r, retiredRepairHandler, {
+      // Still audited. An attempt to run a retired repair operation is
+      // exactly the kind of thing an operator should be able to see later.
+      action: 'attempted_retired_backfill_opening_balances',
       resourceType: 'ledger_entry',
     }),
   );
 
 export const GET = (req: NextRequest) =>
   withAdminAuth(req, (r) =>
-    withAuditLog(r, statusHandler, {
-      action: 'read_backfill_status',
+    withAuditLog(r, assessmentHandler, {
+      action: 'read_opening_balance_assessment',
       resourceType: 'ledger_entry',
     }),
   );
