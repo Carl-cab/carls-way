@@ -58,6 +58,7 @@ Client (React 19)
 | `lib/settlement/SettlementExecutor.ts` | Settlement executor — executes settlement plans; Phase B3.1 status transitions, B3.2a ledger entries, B3.2b balance updates; all idempotent |
 | `lib/transfers/router.ts` | Compatibility layer — re-exports from `lib/providers/TransferProviderFactory` (DEPRECATED) |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
+| `lib/beta-restrictions.ts` | The restricted-beta capability gate. `betaProfile()` resolves `MANNA_BETA_PROFILE`, and **fails closed in sandbox**: absent or misspelled resolves to `p2p_only`, so forgetting the variable leaves a beta restricted rather than open. Five capabilities are withheld — `funding`, `cash_out`, `cross_currency`, `bank_linking`, `external_fx` — each for its own reason, recorded in the file header. It is a **beta** control and deliberately restricts nothing in production, where the live-rail flags and decision 0010 govern instead; do not read it as adding to them |
 | `lib/environment.ts` | Sandbox/live gate. `MANNA_ENV=sandbox` spelled exactly, and `VERCEL_ENV=production` overrides it — no value of `MANNA_ENV` can weaken a production deploy |
 | `lib/plaid-env.ts` | The single resolver for which Plaid host this process talks to. Fails closed: unset or unrecognised `PLAID_ENV` is sandbox. The client and the webhook verifier both call it, because they once defaulted to opposite hosts |
 | `lib/plaid-error.ts` | `redactedErrorLog()` — the only object that may be passed to a logger from a provider catch. Allowlist-built, so `PLAID-SECRET` and `PLAID-CLIENT-ID` headers on an Axios error cannot reach a log |
@@ -558,6 +559,58 @@ Live providers signal a **successful** submit by throwing an error carrying
 `__submitted`, after recording `processing` themselves. Success therefore
 travels on the error channel; a catch block that swallows errors broadly will
 silently lose a submitted transfer.
+
+## The restricted internal beta
+
+A **P2P-only** internal sandbox beta was approved by the owner on 2026-11-18
+and is enforced **server-side** by `lib/beta-restrictions.ts`. Five
+capabilities are withheld, each for its own reason — they are not
+interchangeable and none of them is withheld merely for tidiness:
+
+| Capability | Withheld because |
+|---|---|
+| `funding` | Sandbox funding has **no capacity control**. Decision 0013 is that control and is unimplemented and blocked. Measured 2026-11-18: one user funded CA$1,850 across five confirmations against 0013's approved CA$100 cumulative ceiling, with the P2P velocity counter untouched throughout |
+| `cash_out` | Design-blocked in this file, yet it was **fully reachable** — measured, a sandbox `cash_out` of CA$500 settled and debited a balance |
+| `cross_currency` | A cross-border payment carries `payment_rail='wire'` and is **excluded from every per-payment reconciliation invariant**, so it is money movement no control examines |
+| `bank_linking` | Serves no permitted purpose once funding and cash-out are withheld, and it is the operation that **reaches Plaid** — with the *production* secret on Preview. Covers the Plaid link-token and token-exchange routes and both Stripe PAD-mandate steps |
+| `external_fx` | A **cross-currency** `POST /api/fx/quote` calls Wise for a payment that is refused. Scoped to the cross-currency case: a same-currency quote short-circuits to the identity rate inside `buildFxQuote()` and contacts nobody |
+
+**What is deliberately NOT withheld**, recorded so it is not "tidied up"
+later: request `decline` (moves no money, and gating it would strand a
+pre-beta request); `GET /api/bank-accounts` (read-only); `DELETE
+/api/bank-accounts` (unlinking only **reduces** exposure, so gating it would
+trap an already-linked account inside the beta); a same-currency FX quote; and
+`POST /api/kyc/create-session`, which in sandbox returns on the
+`canAutoVerifyIdentity()` branch **before** `getStripe()` is called and so
+reaches no provider without needing a gate.
+
+**The gate must precede the provider call and the money transaction**, not
+merely the response. `lib/__tests__/beta-containment.test.ts` asserts the
+refusal *and* that the provider client was never touched, because a 403
+returned after a Plaid call has already done the thing the containment
+statement denies.
+
+**Two static guards, and what they are not.**
+`lib/__tests__/beta-restriction-coverage.test.ts` walks every
+`app/api/**/route.ts` twice — once for money markers, once for provider
+markers — and requires each match to reference `beta-restrictions` or carry a
+written reason in an allowlist. It reads **source text**, so a route that
+imported the module and never called it would satisfy it: it is a guard
+against a new path being added without a decision, and it is **not evidence of
+runtime enforcement**. The runtime evidence is the containment and restriction
+test files. The guard had two bugs of its own, both found by mutating it — it
+stripped the import specifier, and it stripped template literals, which is
+where all the SQL lives, so a probe route doing `UPDATE users SET balance_cad
+= balance_cad - 1` passed.
+
+**The profile cannot enable a rail, in either direction.** Live execution is
+governed by `PLAID_TRANSFER_LIVE` / `CA_EFT_LIVE` and decision 0010's zero
+permitted throughput. `MANNA_BETA_PROFILE=unrestricted` lifts the beta
+restrictions and leaves the factory returning sandbox providers; that
+independence is pinned, so wiring the profile into provider selection fails a
+test.
+
+---
 
 ## Current Priorities
 
@@ -1076,6 +1129,7 @@ in-process counter multiplier.
 | `STRIPE_WEBHOOK_SECRET` | Webhook signing secret from Stripe Dashboard → Developers → Webhooks (`whsec_…`) |
 | `NEXT_PUBLIC_APP_URL` | Full origin URL without trailing slash, e.g. `https://carloscab74.vercel.app` |
 | `MANNA_ENV` | `sandbox`, spelled exactly, declares a sandbox deployment. `VERCEL_ENV=production` overrides it, so no value here can weaken a production deploy |
+| `MANNA_BETA_PROFILE` | `p2p_only` or `unrestricted`. **Unset is not neutral**: in a sandbox deployment anything other than `unrestricted` — absent, misspelled, empty — resolves to `p2p_only`, which is the intended posture for a beta. Outside sandbox an unrecognised value resolves to `unrestricted`, so a typo cannot take a production deployment down. Set it **explicitly** on the beta scope anyway: an explicit value is what a later reader of the dashboard can see, and it survives a change to the sandbox default. Verify it from the running deployment with `GET /api/beta-profile`, never from the dashboard alone |
 | `CRON_SECRET` | Required by the reconciliation cron route; unset means the route refuses |
 | `REDIS_URL` | Optional, and **set in production** (owner-reported 2026-10-20). Set it for a shared rate-limit counter. Unset falls back to in-process counters, which on serverless means the effective limit is `limit × instances` — weaker, and not sufficient alone for a production auth endpoint. Being set is **not** proof that limiting is shared: any client or command failure degrades that instance to in-process counting — which changes `allowed`/`remaining` and lets a caller spread requests across instances to exceed the nominal limit. A failure opens a **30s cooldown** (`redisDownUntil`) and then retries, so it no longer latches until the instance recycles; the **raw exception** is unlogged by design, while a degradation line naming the stage and a cumulative count goes to stderr, so callers get no explicit failure signal and operators get one line with no connection detail. Prove it with `POST /api/admin/operations/redis-rate-limit`, which needs the `exceptions:manage` permission — **SuperAdmin or OperationsAdmin**; a lesser admin role gets 403, which is easy to misread as Redis being down. **One POST proves only the instance that served it.** The backend state (`redisClient`, `redisDownUntil`) and the in-process counters are module-level, so they are per serverless instance: another live instance can be counting in-process while this one answers pass. (Line numbers are deliberately not cited here — they went stale within a day of being written.) Serverless instances cannot be addressed individually, so repeated POSTs give sampling confidence, not coverage — VERIFIED needs evidence covering every live instance, which in practice means monitoring the degradation signal rather than running the route by hand |
 | `PLAID_TRANSFER_LIVE` | `true` enables live US ACH. Any other value, including unset, is sandbox |

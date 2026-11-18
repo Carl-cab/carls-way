@@ -3,6 +3,7 @@ import { getAuthUser } from '@/lib/auth';
 import { getStripe } from '@/lib/stripe';
 import { getSql } from '@/lib/db';
 import { logRedactedError } from '@/lib/plaid-error';
+import { isCapabilityRestricted, restrictionMessage } from '@/lib/beta-restrictions';
 
 /**
  * POST /api/stripe/setup-intent
@@ -19,6 +20,22 @@ export async function POST() {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // Containment gate, ahead of getStripe() and of any Stripe call. A PAD
+    // mandate is a step of bank linking, so it is withheld for the same
+    // reason: it exists only to authorize debits the beta refuses. Gated
+    // BEFORE the CA-only check, so a US caller gets the restriction rather
+    // than a 400 that implies the beta would otherwise allow it.
+    if (isCapabilityRestricted('bank_linking')) {
+      return NextResponse.json(
+        {
+          error: restrictionMessage('bank_linking'),
+          code: 'BETA_RESTRICTED',
+          capability: 'bank_linking',
+        },
+        { status: 403 },
+      );
+    }
 
     const stripe = getStripe();
     const sql = getSql();

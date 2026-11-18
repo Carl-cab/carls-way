@@ -145,14 +145,40 @@ Removing those accounts produced **7/7 PASS and HTTP 200**.
 
       must return
       `{"profile":"p2p_only","restricted":true,
-        "capabilities":{"funding":false,"cash_out":false,"cross_currency":false}}`
+        "capabilities":{"funding":false,"cash_out":false,
+          "cross_currency":false,"bank_linking":false,"external_fx":false}}`
 
-      A variable somebody believes they set is not evidence. This endpoint
-      reads the same resolver the routes enforce with.
-- [ ] Confirm the three refusals against the deployment:
-      `POST /api/transfers/intent` with `add_money` and with `cash_out`, and a
-      cross-currency `POST /api/transactions` — each **403 BETA_RESTRICTED** —
-      and that a same-currency payment still answers 201.
+      **All five must be present and false.** A response carrying only the
+      first three is an older deployment, not a passing check — the two
+      containment capabilities were added 2026-11-18, and reading a
+      three-key response as "restricted" would miss that bank linking and
+      external FX are open. A variable somebody believes they set is not
+      evidence either; this endpoint reads the same resolver the routes
+      enforce with.
+- [ ] Confirm the refusals against the deployment. Each must be
+      **403 `BETA_RESTRICTED`** with the matching `capability`:
+
+      | Request | capability |
+      |---|---|
+      | `POST /api/transfers/intent` with `add_money` | `funding` |
+      | `POST /api/transfers/intent` with `cash_out` | `cash_out` |
+      | cross-currency `POST /api/transactions` | `cross_currency` |
+      | `PATCH /api/transactions/<id>` accepting a cross-currency request | `cross_currency` |
+      | `POST /api/plaid/create-link-token` | `bank_linking` |
+      | `POST /api/plaid/exchange-token` | `bank_linking` |
+      | `POST /api/stripe/setup-intent` | `bank_linking` |
+      | `POST /api/stripe/confirm-setup` | `bank_linking` |
+      | `POST /api/fx/quote` with CAD→USD | `external_fx` |
+
+- [ ] Confirm the negatives, which are what prove the restriction is scoped
+      rather than a blanket outage: a **same-currency** payment still answers
+      201; a **same-currency** `POST /api/fx/quote` still answers 200;
+      `GET /api/bank-accounts` still answers 200; and declining a request
+      still succeeds. A deployment where everything refuses is not contained,
+      it is broken.
+- [ ] **Do not take the static coverage guard as proof of any of the above.**
+      It reads source text in CI. These boxes are about the running
+      deployment, and only a real request against it can tick them.
 
 ## 3. Seed synthetic data (owner or engineering, once isolated)
 

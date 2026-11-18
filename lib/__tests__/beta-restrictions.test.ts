@@ -437,13 +437,31 @@ describe('the interface and the routes read one resolver', () => {
     const state = betaRestrictionState();
 
     expect(state.restricted).toBe(true);
-    expect(state.capabilities.funding).toBe(!isCapabilityRestricted('funding'));
-    expect(state.capabilities.cash_out).toBe(!isCapabilityRestricted('cash_out'));
-    expect(state.capabilities.cross_currency).toBe(!isCapabilityRestricted('cross_currency'));
+    // Derived from the enforcement helper for EVERY capability, rather than
+    // spot-checked: the point is that the two cannot disagree, and a loop
+    // extends with the type instead of being updated by hand.
+    const CAPABILITIES = [
+      'funding',
+      'cash_out',
+      'cross_currency',
+      'bank_linking',
+      'external_fx',
+    ] as const;
+    for (const capability of CAPABILITIES) {
+      expect(state.capabilities[capability], capability).toBe(!isCapabilityRestricted(capability));
+    }
+    // Exhaustive on purpose, and extended from three to five on 2026-11-18
+    // when bank_linking and external_fx were added. This assertion failing
+    // after a capability is added is the CORRECT behaviour — a new capability
+    // the interface cannot see is a UI that looks controlled and is not — so
+    // update it deliberately and never relax it to a subset match.
+    expect(Object.keys(state.capabilities).sort()).toEqual([...CAPABILITIES].sort());
     expect(state.capabilities).toEqual({
       funding: false,
       cash_out: false,
       cross_currency: false,
+      bank_linking: false,
+      external_fx: false,
     });
   });
 });

@@ -3,6 +3,7 @@ import { getAuthUser, auditLog } from '@/lib/auth';
 import { getStripe } from '@/lib/stripe';
 import { getSql } from '@/lib/db';
 import { logRedactedError } from '@/lib/plaid-error';
+import { isCapabilityRestricted, restrictionMessage } from '@/lib/beta-restrictions';
 
 /**
  * POST /api/stripe/confirm-setup
@@ -19,6 +20,20 @@ export async function POST(req: NextRequest) {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // Containment gate, ahead of the body parse and of the Stripe retrieve.
+    // The last step of bank linking: it stores a payment method that only a
+    // withheld capability would use.
+    if (isCapabilityRestricted('bank_linking')) {
+      return NextResponse.json(
+        {
+          error: restrictionMessage('bank_linking'),
+          code: 'BETA_RESTRICTED',
+          capability: 'bank_linking',
+        },
+        { status: 403 },
+      );
+    }
 
     const { setup_intent_id, bank_account_id } = await req.json() as {
       setup_intent_id: string;

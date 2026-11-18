@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import { buildFxQuote } from '@/lib/fx';
 import { MoneyValidationError, isMoneyCurrency, parsePositiveMoney } from '@/lib/money';
+import { isCapabilityRestricted, restrictionMessage } from '@/lib/beta-restrictions';
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,6 +19,24 @@ export async function POST(req: NextRequest) {
     if (!isMoneyCurrency(source) || !isMoneyCurrency(target)) {
       return NextResponse.json({ error: 'Currency must be CAD or USD' }, { status: 400 });
     }
+    // Containment gate, BEFORE buildFxQuote(), which is what calls Wise.
+    // Scoped to the CROSS-CURRENCY case on purpose: a same-currency quote
+    // short-circuits to the identity rate inside buildFxQuote() and contacts
+    // no external provider, so refusing it would withhold something that is
+    // neither external nor cross-currency. Placed after the currency
+    // validation so an invalid currency still answers 400 rather than 403 --
+    // the refusal must not double as an input validator.
+    if (source !== target && isCapabilityRestricted('external_fx')) {
+      return NextResponse.json(
+        {
+          error: restrictionMessage('external_fx'),
+          code: 'BETA_RESTRICTED',
+          capability: 'external_fx',
+        },
+        { status: 403 },
+      );
+    }
+
     const cents = parsePositiveMoney(amount, source);
     const quote = await buildFxQuote(cents, source, target, { userId: user.userId });
     // Keep canonical cents and exact rate strings internal. The existing client

@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
 import { loadStripe } from '@stripe/stripe-js';
 
@@ -25,8 +25,27 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
   const [step, setStep] = useState<'idle' | 'plaid' | 'stripe' | 'done' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [stripeStep, setStripeStep] = useState<string>('');
+  // null = not yet known. Nothing is claimed either way until the profile
+  // answers, so a failed fetch neither hides a working button nor shows a
+  // control the API would refuse.
+  const [linkingAllowed, setLinkingAllowed] = useState<boolean | null>(null);
 
   const isCA = userCountry === 'CA';
+
+  // The interface reads the SAME resolver the route enforces with, so the
+  // button state and the refusal cannot disagree. This is presentation only --
+  // the control is the 403 in the route, and removing this effect changes
+  // nothing about what the API permits.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/beta-profile')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!cancelled && d) setLinkingAllowed(d.capabilities?.bank_linking === true);
+      })
+      .catch(() => { /* left null: unknown */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // ─── Fetch Plaid link token ───────────────────────────────────────────────
   const fetchLinkToken = useCallback(async () => {
@@ -149,6 +168,14 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
   }
 
   // ─── Render ───────────────────────────────────────────────────────────────
+  if (linkingAllowed === false) {
+    return (
+      <span className="text-xs text-gray-500">
+        Bank linking unavailable in this beta
+      </span>
+    );
+  }
+
   if (step === 'done') {
     return (
       <span className="text-xs text-green-700 font-semibold">✓ Bank linked</span>

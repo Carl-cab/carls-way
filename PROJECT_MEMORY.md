@@ -5131,3 +5131,146 @@ without authorization.
 the runbook, set and verify the beta profile from the running deployment, and
 decide the opening-balance outcome. Engineering: nothing further until those
 land — 0013 stays blocked.
+
+---
+
+## 2026-11-18 — PR #87 merged under a limited exception, then beta containment: no participant action reaches a provider
+
+**Purpose and scope.** Two things, recorded together because the second only
+makes sense after the first. (1) PR #87 was merged on the owner's conditional
+authorization. (2) Section 3 of the same directive: close the external-provider
+surface the restricted beta had left open.
+
+**The merge.** `09d01d0` → master as `71d7425`. All five of the owner's
+conditions were verified immediately beforehand: the head was exactly the
+reviewed `09d01d069bce9860c8ce788ad7093b0c819b44d6`; all four required checks
+were green on that commit; the base was still `c942ab0` with
+`mergeable_state: clean`, so master had not moved; the material
+financial-control defect raised in review (the request-accept cross-currency
+bypass) was fixed in that head; and expected-head protection was used, so a
+push during the merge would have refused rather than merged something
+unreviewed.
+
+**Recorded as the owner framed it, and not conflated.** The absence of a
+submitted independent review was accepted **for the merge decision only**.
+That is a **limited merge exception, not completed independent financial
+validation.** Decision 0012's independent accounting-review requirement
+remains outstanding, decision 0013 remains blocked by its own terms, and the
+authorization does not extend to transfer-rail activation or beta
+invitations. CodeRabbit skipped every commit on the PR (repository under 10
+stars) and is recorded as **skipped, not reviewed**.
+
+**Master after the merge.** CI run 44418715459 on `71d7425`: all four required
+checks `success` — `install · typecheck · lint · test · build`, `dependency
+audit`, `secret scan`, `analyze javascript-typescript`. GitHub deployment
+7898973350, Production, state `success`.
+**That is deployment metadata, not operational verification.** A `success`
+state says Vercel built and assigned the deployment; it says nothing about the
+application's behaviour on it, and nothing here was exercised against it. No
+deployment was promoted and no production configuration was changed.
+
+**Financial or security behaviour affected.** The containment work adds two
+capabilities to `lib/beta-restrictions.ts`, both withheld in a restricted
+beta, both answering 403 `BETA_RESTRICTED`:
+
+- **`bank_linking`** — `POST /api/plaid/create-link-token`, `POST
+  /api/plaid/exchange-token`, and both Stripe PAD-mandate steps
+  (`setup-intent`, `confirm-setup`). PR #87 withheld funding and cash-out but
+  left every one of these reachable, so a participant could still drive a real
+  Plaid token exchange and store an encrypted access token for a capability the
+  beta refuses.
+- **`external_fx`** — a **cross-currency** `POST /api/fx/quote`, which calls
+  Wise for a payment that is already refused. Scoped to the cross-currency
+  case: a same-currency quote short-circuits to the identity rate inside
+  `buildFxQuote()` and contacts nobody.
+
+**Why this was worth doing rather than relying on what was already there.**
+`PLAID_SECRET` is scoped Production **and** Preview and holds the production
+value. What stopped a preview build reaching live Plaid was a *missing*
+`PLAID_CLIENT_ID` — an accident, not a control. So the honest statement before
+this change was "preview probably cannot reach Plaid". It is now "no beta
+route asks".
+
+**What is deliberately left reachable**, each with its reason, so it is not
+tidied away later: `GET /api/bank-accounts` (read-only); `DELETE
+/api/bank-accounts` (unlinking only **reduces** exposure — gating it would
+trap an already-linked account inside the beta); a same-currency FX quote;
+and `POST /api/kyc/create-session`, which in sandbox returns on the
+`canAutoVerifyIdentity()` branch **before** `getStripe()` is called and so
+reaches no provider without needing a gate. Positive cases assert each of
+these still works: a deployment where everything refuses is not contained, it
+is broken.
+
+**Tests run and their results.** `lib/__tests__/beta-containment.test.ts`, 22
+cases against the real route handlers; every refusal asserts the status **and**
+that the provider client was never touched, because a 403 returned after a
+Plaid call has already done the thing the containment claim denies.
+`beta-restriction-coverage.test.ts` grew a second pass over provider markers,
+4 → 6 cases, with its allowlist checked in both directions.
+Mutation-checked per gate: FX removed 1 failed, FX over-broad 1, Plaid
+link-token 1, Plaid exchange-token 2, Stripe setup-intent 2, Stripe
+confirm-setup 1, `bank_linking` dropped from the set 7, `external_fx` dropped
+2; ungated provider probe route 1 naming the route; provider-allowlist entry
+for a non-provider route 1 naming the entry.
+
+**A procedural error, recorded because it nearly produced a false result.**
+The first mutation pass restored the tree with `git checkout -- .`, which
+reverted all six gates after the first mutation — so two of its three results
+were measured against a tree with *no* gates and reported "9 failed", a number
+that looked like strong detection and measured nothing about the gate named in
+its label. All edits were reapplied with asserted anchors and the table was
+measured again using per-file backups. This is the **second** time in this
+session that `git checkout --` destroyed in-progress work; the rule is to back
+up the one file being mutated, never to clean the tree.
+
+**The profile cannot enable a rail**, asserted with the profile at its most
+permissive value: `MANNA_BETA_PROFILE=unrestricted` with both live flags unset
+still resolves `sandbox` for both regions and `executeTransfer()` throws.
+Pinned in a loop over both profile values, so wiring the profile into provider
+selection fails a test. The separation matters: the beta profile is **not**
+what keeps a live rail off — that is `PLAID_TRANSFER_LIVE` / `CA_EFT_LIVE` and
+decision 0010's zero permitted throughput.
+
+**Production verified separately**, because a beta control that silently
+refused bank linking in production would be a regression dressed as a safety
+feature. With `MANNA_ENV` absent, the Plaid link token answers 200 and a
+cross-currency quote answers 200; `VERCEL_ENV=production` over
+`MANNA_ENV=sandbox` likewise answers 200; an explicit
+`MANNA_BETA_PROFILE=p2p_only` restricts even in production, which is pinned
+because it is otherwise surprising and is **not** a recommendation.
+
+**`CLAUDE.md` had no mention of the restricted beta at all** — PR #87 shipped
+the control without touching it, which the documentation contract forbids.
+Added: a `lib/beta-restrictions.ts` row, a `MANNA_BETA_PROFILE` row noting that
+unset is **not** neutral in sandbox, and a section covering all five
+capabilities, what is deliberately not withheld, and the explicit statement
+that the static guards are **not** evidence of runtime enforcement. The
+isolation runbook's §2c verification now requires all five capability keys
+present and false — a three-key response is an older deployment, not a passing
+check — with a per-route refusal table and the negatives that prove the
+restriction is scoped.
+
+**Commit SHA and PR.** Merge `71d7425`. The containment work is a separate
+branch and PR, deliberately not combined with the merge.
+
+**Migration impact.** None. No schema object added or changed.
+
+**Unresolved findings.** Everything from the previous entry stands:
+independent accounting validation still **waived rather than met**, 0013
+blocked behind it, Preview database isolation and provisioning owner-blocked,
+the app-origin `/feed?_rsc=` 404 unexplained and still failing, the
+opening-balance set quarantined with no repair authorized, and no monitoring
+of `rateLimitBackendHealth()`. New to this entry: nothing in the containment
+work has been verified **against a deployment** — every result is from local
+handlers and a test database, and the runbook's deployment boxes remain
+unticked.
+
+**Rollback requirement.** The containment change is one branch over
+`71d7425`, revertible on its own; reverting restores the pre-#87-section-3
+surface, which is reachable bank linking, not live money movement.
+
+**Next recommended action.** Owner: provision the isolated Preview database,
+set and verify `MANNA_BETA_PROFILE` from the running deployment with all five
+capability keys, remove `PLAID_SECRET` from Preview, and commission the
+independent accounting review that 0012 and 0013 wait on. Engineering: nothing
+that depends on a deployment until the first of those lands.
