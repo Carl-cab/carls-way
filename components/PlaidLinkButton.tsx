@@ -29,10 +29,10 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
   /**
    * Three states, and the distinction between the last two is the point.
    *
-   *   'pending'  the profile has not answered yet
-   *   true       the profile said bank_linking is available
-   *   false      the profile said it is withheld, OR the request failed, OR
-   *              it answered something this component cannot read
+   *   'pending'    the profile has not answered yet
+   *   'available'   the profile said bank_linking is available
+   *   'withheld'    the profile said it is withheld
+   *   'unknown'     the request failed, or answered something unreadable
    *
    * FAIL CLOSED. An earlier revision used `boolean | null` and only disabled
    * the control on an explicit `false`, so an unknown answer — a non-ok
@@ -42,8 +42,18 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
    * glancing at the page sees a beta that looks unrestricted. Treating
    * unknown as withheld costs a disabled button during an outage and cannot
    * misrepresent the restriction.
+   *
+   * WHY 'unknown' IS NOT FOLDED INTO 'withheld'. They fail closed
+   * identically — neither renders a way to start linking — but they must not
+   * say the same thing. In PRODUCTION there is no beta: bank_linking resolves
+   * available, so the only way this component ever reaches a non-available
+   * state there is a FAILED request. Collapsing the two told a production user
+   * "unavailable in this beta", which is false, and left them no way back
+   * short of reloading the page. 'unknown' says the check failed and offers a
+   * retry.
    */
-  const [linkingAllowed, setLinkingAllowed] = useState<'pending' | boolean>('pending');
+  type Availability = 'pending' | 'available' | 'withheld' | 'unknown';
+  const [linkingAllowed, setLinkingAllowed] = useState<Availability>('pending');
 
   const isCA = userCountry === 'CA';
 
@@ -52,23 +62,29 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
   // the control is the 403 in the route, and removing this effect changes
   // nothing about what the API permits. Which is also why failing closed here
   // is safe: it can only ever be MORE restrictive than the server.
+  const [profileAttempt, setProfileAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/beta-profile')
-      .then(r => (r.ok ? r.json() : null))
+    // `no-store`: the route sets no cache headers, so a heuristically cached
+    // 200 could otherwise keep showing a control after the profile was
+    // tightened — reintroducing the UI/server mismatch the one-resolver rule
+    // exists to prevent.
+    fetch('/api/beta-profile', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((d: unknown) => {
         if (cancelled) return;
-        // The shared fail-closed resolver, not an inline check: a null body,
-        // a missing capabilities object, a missing key or a non-boolean all
-        // resolve to WITHHELD. Pinned in lib/__tests__/beta-containment.test.ts.
-        setLinkingAllowed(clientCapabilityAvailable(d, 'bank_linking'));
+        // The shared fail-closed resolver, not an inline check: a missing
+        // capabilities object, a missing key or a non-boolean all resolve to
+        // WITHHELD. Pinned in lib/__tests__/beta-containment.test.ts.
+        setLinkingAllowed(clientCapabilityAvailable(d, 'bank_linking') ? 'available' : 'withheld');
       })
       .catch(() => {
-        // A failed request is NOT "unknown, carry on" — it is withheld.
-        if (!cancelled) setLinkingAllowed(false);
+        // A failed request is NOT "unknown, carry on" — but it is also not a
+        // beta restriction. See the note on the Availability type.
+        if (!cancelled) setLinkingAllowed('unknown');
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [profileAttempt]);
 
   // ─── Fetch Plaid link token ───────────────────────────────────────────────
   const fetchLinkToken = useCallback(async () => {
@@ -191,10 +207,8 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
   }
 
   // ─── Render ───────────────────────────────────────────────────────────────
-  // Anything but an explicit `true` renders no usable control. `pending` and
-  // `false` are shown differently — a user mid-page-load should not be told
-  // the feature is unavailable in the beta when the answer has not arrived —
-  // but NEITHER offers a way to start linking.
+  // Only 'available' renders a way to start linking. The other three are
+  // distinguished by what they SAY, not by what they permit.
   if (linkingAllowed === 'pending') {
     return (
       <span className="text-xs text-gray-400" aria-busy="true">
@@ -203,11 +217,27 @@ export default function PlaidLinkButton({ userCountry, onSuccess }: Props) {
     );
   }
 
-  if (!linkingAllowed) {
+  if (linkingAllowed === 'withheld') {
     return (
       <span className="text-xs text-gray-500">
         Bank linking unavailable in this beta
       </span>
+    );
+  }
+
+  if (linkingAllowed === 'unknown') {
+    // Still fails closed — no link control — but it does not claim a beta
+    // restriction it has not established, and it offers a way out.
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-gray-500">Couldn&apos;t check availability</span>
+        <button
+          onClick={() => { setLinkingAllowed('pending'); setProfileAttempt(n => n + 1); }}
+          className="text-xs text-blue-700 font-semibold hover:text-blue-800 underline"
+        >
+          Retry
+        </button>
+      </div>
     );
   }
 

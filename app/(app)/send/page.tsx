@@ -92,7 +92,10 @@ function SendForm() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/beta-profile')
+    // `no-store` for the same reason as in PlaidLinkButton: the route sets no
+    // cache headers, and a stale cached profile would make the page look less
+    // restricted than the server is.
+    fetch('/api/beta-profile', { cache: 'no-store' })
       .then(r => (r.ok ? r.json() : null))
       .then(d => {
         if (!cancelled) setCrossCurrencyAllowed(clientCapabilityAvailable(d, 'cross_currency'));

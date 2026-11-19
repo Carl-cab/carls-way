@@ -214,3 +214,86 @@ someone deciding what the profile does about it. The runtime evidence is §3,
 - No production database, credential, migration or configuration was touched.
   No live rail was enabled. No beta invitation was sent.
 - Not independently reviewed — this session authored it.
+
+---
+
+# ADDENDUM — 2026-11-19: three defects found by reviewing this change
+
+**Explicitly marked as an addendum, not an edit.** The sections above record
+what was measured on 2026-11-18 and stand unaltered. This addendum records
+what a review of the same change found afterwards, and what was done about it.
+
+The review was run at the owner's request on PR #88 at head `7dba34a`, after
+all four required GitHub checks had passed green on that commit. **Green checks
+did not find any of these**, which is the point worth keeping: the suite, the
+typecheck, the lint, the dependency audit and CodeQL were all satisfied by code
+containing all three.
+
+**This was not an independent review.** It was run by the change's own author
+over the author's own diff. It is evidence, and it is not the independent
+accounting validation decision 0012 requires.
+
+## Finding 1 — the interface told production users about a beta that does not exist
+
+`components/PlaidLinkButton.tsx`. The fail-closed fix folded a **failed**
+profile request into the same state as a **withheld** capability, and that
+state renders "Bank linking unavailable in this beta".
+
+In production there is no beta: `bank_linking` resolves available, so the only
+way the component reaches a non-available state there is a failed request. A
+transient network blip or a 401 from a cookie refreshed mid-flight therefore
+told a production user their bank linking was restricted by a beta — and the
+effect had an empty dependency array, so there was no retry and no re-fetch.
+The only way out was reloading the page.
+
+The fail-closed *decision* was correct and is unchanged. The defect was the
+wording and the absence of a way back.
+
+**Fixed:** four states — `pending`, `available`, `withheld`, `unknown` — where
+`withheld` and `unknown` fail closed identically but say different things, and
+`unknown` offers a Retry that re-runs the fetch through a `profileAttempt`
+counter. Pinned statically, because the distinction is about rendered copy
+rather than a decision function: the guard requires the `catch` to resolve to
+`'unknown'` and requires the retry to exist. Mutation: folding `unknown` back
+into `withheld` fails 1.
+
+## Finding 2 — a malformed amount reported a beta restriction
+
+`app/api/fx/quote/route.ts`. The gate sat above `parsePositiveMoney()`, so
+`{"amount":"abc","fromCurrency":"CAD","toCurrency":"USD"}` answered **403
+BETA_RESTRICTED** where it had previously answered 400. The caller was told to
+wait for the beta to end when their request was simply malformed.
+
+The gate's own comment claimed that placing it after the currency validation
+kept input validation answering 400. That was true for an invalid *currency*
+and false for an invalid *amount* — a comment that was half right, which is
+worse than a missing one.
+
+**Fixed:** `parsePositiveMoney()` now runs **before** the gate. It contacts
+nobody, so there was never a containment reason to gate ahead of it. A new case
+pins 400 for a malformed amount on a cross-currency request, and also asserts
+the provider was still not called. Mutation: moving the gate back above that
+line fails 1.
+
+## Finding 3 — the profile read was cacheable
+
+Neither component passed `cache: 'no-store'`, and `app/api/beta-profile/route.ts`
+sets no cache headers. A heuristically cached 200 could keep rendering a
+control after the profile had been tightened.
+
+Impact is cosmetic — the route still answers 403, so containment holds — but it
+reintroduces exactly the UI/server mismatch the one-resolver rule exists to
+prevent, in the direction that matters: a page looking **less** restricted than
+the server is.
+
+**Fixed:** both reads pass `cache: 'no-store'`, pinned by a guard over both
+files. Mutation: removing it from either fails 1.
+
+## What this addendum does not change
+
+Everything in §1–§9 above was measured as stated. The containment claim is
+unchanged: all five capabilities withheld, every gate ahead of its provider
+client, the permitted paths still working, production unrestricted, and the
+profile unable to enable a rail. Nothing here has been verified against a
+running deployment, and the beta remains NO-GO pending infrastructure
+isolation.

@@ -315,6 +315,29 @@ describe('external FX — POST /api/fx/quote', () => {
     expect(res.status).toBe(400);
   });
 
+  it('answers 400 for a MALFORMED AMOUNT on a cross-currency request, not 403', async () => {
+    // Found by reviewing this change. An earlier revision put the gate above
+    // parsePositiveMoney(), so {"amount":"abc"} with CAD->USD reported a beta
+    // restriction for what is simply a bad request — telling the caller to
+    // wait for the beta to end instead of to fix the call. The amount check
+    // contacts nobody, so there is no containment reason to gate ahead of it.
+    sandbox();
+    mockAuth();
+    const buildFxQuote = mockFx();
+    const { POST } = await import('../../app/api/fx/quote/route');
+
+    const res = await POST(post('http://localhost/api/fx/quote', {
+      amount: 'abc',
+      fromCurrency: 'CAD',
+      toCurrency: 'USD',
+    }));
+
+    expect(res.status).toBe(400);
+    // And still no provider call: validation refused before the gate, and the
+    // gate would have refused before the provider.
+    expect(buildFxQuote).not.toHaveBeenCalled();
+  });
+
   it('serves a cross-currency quote again when the restriction is lifted', async () => {
     sandbox();
     process.env.MANNA_BETA_PROFILE = 'unrestricted';
@@ -609,6 +632,49 @@ describe('the interface fails closed — clientCapabilityAvailable()', () => {
       );
       expect(src, `${rel} must not gate on \`=== false\` (fail-open shape)`).not.toMatch(
         /(linkingAllowed|crossCurrencyAllowed)\s*===\s*false/,
+      );
+    }
+  });
+});
+
+describe('the interface distinguishes WITHHELD from COULD-NOT-DETERMINE', () => {
+  /**
+   * Both fail closed — neither renders a way to start the action — but they
+   * must not say the same thing, and this is a static guard because the
+   * distinction is about rendered copy rather than about a decision function.
+   *
+   * THE DEFECT IT PINS, found by reviewing the fail-closed fix itself. The
+   * first version folded a failed request into `false` and rendered "Bank
+   * linking unavailable in this beta". In PRODUCTION there is no beta:
+   * bank_linking resolves available, so the ONLY way the component reaches a
+   * non-available state there is a failed request — and the user was then told
+   * a beta restriction that does not exist, with no way back short of
+   * reloading the page.
+   */
+  async function source(rel: string): Promise<string> {
+    const { readFileSync } = await import('node:fs');
+    const path = await import('node:path');
+    return readFileSync(path.join(process.cwd(), rel), 'utf8');
+  }
+
+  it('PlaidLinkButton has a distinct unknown state with a retry, not the beta message', async () => {
+    const src = await source('components/PlaidLinkButton.tsx');
+    expect(src, 'must model could-not-determine separately').toContain("'unknown'");
+    expect(src, 'must model withheld separately').toContain("'withheld'");
+    // The catch must resolve to unknown, never to the withheld branch that
+    // carries the beta wording.
+    expect(src).toMatch(/\.catch\(\(\)\s*=>\s*\{[^}]*setLinkingAllowed\('unknown'\)/s);
+    expect(src, 'the unknown state must offer a retry').toMatch(/setProfileAttempt/);
+  });
+
+  it('both components read the profile with cache: no-store', async () => {
+    // The route sets no cache headers, so a heuristically cached 200 could
+    // keep showing a control after the profile was tightened — the UI/server
+    // mismatch the one-resolver rule exists to prevent.
+    for (const rel of ['components/PlaidLinkButton.tsx', 'app/(app)/send/page.tsx']) {
+      const src = await source(rel);
+      expect(src, `${rel} must not cache the profile read`).toMatch(
+        /fetch\('\/api\/beta-profile',\s*\{\s*cache:\s*'no-store'\s*\}\)/,
       );
     }
   });
