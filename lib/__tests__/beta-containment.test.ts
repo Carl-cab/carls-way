@@ -663,7 +663,7 @@ describe('the interface distinguishes WITHHELD from COULD-NOT-DETERMINE', () => 
     expect(src, 'must model withheld separately').toContain("'withheld'");
     // The catch must resolve to unknown, never to the withheld branch that
     // carries the beta wording.
-    expect(src).toMatch(/\.catch\(\(\)\s*=>\s*\{[^}]*setLinkingAllowed\('unknown'\)/s);
+    expect(src).toMatch(/\.catch\(\(\)\s*=>\s*\{[^}]*setLinkingAllowed\('unknown'\)/);
     expect(src, 'the unknown state must offer a retry').toMatch(/setProfileAttempt/);
   });
 
