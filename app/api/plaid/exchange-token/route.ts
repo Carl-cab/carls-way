@@ -4,11 +4,27 @@ import { plaidClient } from '@/lib/plaid';
 import { getSql } from '@/lib/db';
 import { encryptToken } from '@/lib/encryption';
 import { logRedactedError } from '@/lib/plaid-error';
+import { isCapabilityRestricted, restrictionMessage } from '@/lib/beta-restrictions';
 
 export async function POST(req: NextRequest) {
   try {
     const user = await getAuthUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // Containment gate, ahead of the body parse and of every Plaid call. This
+    // is the route that actually exchanges a token, reads accounts and stores
+    // an encrypted access token, so the refusal has to precede all three -- a
+    // gate after the exchange would already have talked to the provider.
+    if (isCapabilityRestricted('bank_linking')) {
+      return NextResponse.json(
+        {
+          error: restrictionMessage('bank_linking'),
+          code: 'BETA_RESTRICTED',
+          capability: 'bank_linking',
+        },
+        { status: 403 },
+      );
+    }
 
     const { public_token, metadata } = await req.json();
     if (!public_token) return NextResponse.json({ error: 'public_token required' }, { status: 400 });

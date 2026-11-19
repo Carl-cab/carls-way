@@ -28,6 +28,27 @@
  *     The FX clearing-account treatment it would need is documented and
  *     deliberately not built.
  *
+ *   bank_linking  (added 2026-11-18, containment)
+ *     Linking a bank account serves NO permitted purpose once funding and
+ *     cash-out are withheld: the only reason a participant has an external
+ *     account on file is to move money across it, and both directions are
+ *     refused. It is not merely useless, it is the operation that reaches a
+ *     real provider -- `POST /api/plaid/exchange-token` calls Plaid, stores an
+ *     access token and writes a `bank_accounts` row, and `PLAID_SECRET` is
+ *     the PRODUCTION secret on Preview (see CLAUDE.md's known gap). So the
+ *     narrowest honest statement about the beta is "no participant action
+ *     reaches Plaid", and that needs the gate rather than the accidental
+ *     protection of a missing client id.
+ *
+ *   external_fx  (added 2026-11-18, containment)
+ *     A CROSS-CURRENCY `POST /api/fx/quote` calls Wise. With cross-currency
+ *     payments refused, quoting one is an outbound call to a live external
+ *     provider on behalf of a payment that cannot happen. A SAME-CURRENCY
+ *     quote is deliberately still allowed: `buildFxQuote()` short-circuits it
+ *     to the identity rate with provider `identity` and contacts nobody, so
+ *     restricting it would withhold something that is neither external nor
+ *     cross-currency. The gate is on the external call, not on the endpoint.
+ *
  * HOW THE PROFILE RESOLVES, and why sandbox defaults to restricted.
  *
  *   1. `MANNA_BETA_PROFILE=p2p_only`     -> restricted, anywhere.
@@ -60,12 +81,19 @@ import { isSandboxEnvironment } from '@/lib/environment';
 export type BetaProfile = 'p2p_only' | 'unrestricted';
 
 /** The capabilities a restricted beta withholds. */
-export type RestrictedCapability = 'funding' | 'cash_out' | 'cross_currency';
+export type RestrictedCapability =
+  | 'funding'
+  | 'cash_out'
+  | 'cross_currency'
+  | 'bank_linking'
+  | 'external_fx';
 
 const RESTRICTED_IN_P2P_ONLY: ReadonlySet<RestrictedCapability> = new Set([
   'funding',
   'cash_out',
   'cross_currency',
+  'bank_linking',
+  'external_fx',
 ]);
 
 /**
@@ -115,6 +143,10 @@ export function restrictionMessage(capability: RestrictedCapability): string {
       return 'Cashing out is disabled in this restricted beta.';
     case 'cross_currency':
       return 'Cross-currency payments are disabled in this restricted beta. You can send to people who use the same currency as you.';
+    case 'bank_linking':
+      return 'Linking a bank account is disabled in this restricted beta. Adding money and cashing out are both unavailable, so there is nothing an external account would be used for.';
+    case 'external_fx':
+      return 'Currency conversion quotes are disabled in this restricted beta, because cross-currency payments are disabled.';
   }
 }
 
@@ -151,6 +183,8 @@ export function betaRestrictionState(): {
       funding: !isCapabilityRestricted('funding'),
       cash_out: !isCapabilityRestricted('cash_out'),
       cross_currency: !isCapabilityRestricted('cross_currency'),
+      bank_linking: !isCapabilityRestricted('bank_linking'),
+      external_fx: !isCapabilityRestricted('external_fx'),
     },
   };
 }

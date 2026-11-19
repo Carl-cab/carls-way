@@ -118,6 +118,41 @@ const ALLOWLIST: Record<string, string> = {
     'error message, and moves no money.',
 };
 
+/**
+ * Markers that a route reaches an EXTERNAL PROVIDER. Separate from the money
+ * markers because the two questions are different: a route can move no
+ * balance and still make a live call to Plaid, Stripe or Wise on a
+ * participant's behalf, which is what the beta's containment statement is
+ * about.
+ */
+const PROVIDER_MARKERS = ['plaidClient', 'getStripe', 'buildFxQuote', 'resolveFxRate'];
+
+/**
+ * Provider-reaching routes with no beta gate, each with its reason.
+ *
+ * THIS GUARD IS NOT EVIDENCE OF RUNTIME ENFORCEMENT. It reads source text, so
+ * a route that imported `beta-restrictions` and never called it would satisfy
+ * it. `beta-containment.test.ts` calls the real handlers and asserts the
+ * provider client was never touched; this one only ensures a NEW
+ * provider-reaching route cannot appear without someone deciding about it.
+ */
+const PROVIDER_ALLOWLIST: Record<string, string> = {
+  'kyc/create-session/route.ts':
+    'REACHES NO PROVIDER IN THE BETA, by a control that predates this work. ' +
+    'canAutoVerifyIdentity() is isSandboxEnvironment(), and on that branch ' +
+    'the route marks the user verified and returns BEFORE getStripe() is ' +
+    'called, so a sandbox beta deployment makes no Stripe Identity call at ' +
+    'all. Deliberately NOT gated: identity verification is neither bank ' +
+    'linking nor FX, participants may need it to use the app, and adding a ' +
+    'refusal here would be a scope decision the owner has not made.',
+
+  'webhooks/stripe/route.ts':
+    'Inbound, not outbound: Stripe calls it, not the other way about, and it ' +
+    'is authorized by signature verification rather than by the user session ' +
+    'the beta profile applies to. It settles LIVE intents only, and with ' +
+    'CA_EFT_LIVE off no live intent exists for it to settle.',
+};
+
 function routeFiles(dir: string, found: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
@@ -204,6 +239,59 @@ describe('every balance-moving API route is accounted for under the beta profile
       .filter(([, reason]) => reason.trim().length < 80)
       .map(([k]) => k);
     expect(thin, `allowlist reason too short to be a decision: ${thin.join(', ')}`).toEqual([]);
+  });
+
+  it('each provider-reaching route either references beta-restrictions or has a recorded reason', () => {
+    // The containment question, which the money guard above does not ask: a
+    // route can move no balance and still make a live call to Plaid, Stripe
+    // or Wise on a participant's behalf.
+    const unaccounted: string[] = [];
+
+    for (const file of files) {
+      const rel = path.relative(API_ROOT, file);
+      const raw = readFileSync(file, 'utf8');
+      const body = code(raw);
+      if (!PROVIDER_MARKERS.some((m) => body.includes(m))) continue;
+
+      const gated = raw.includes('beta-restrictions');
+      const allowed =
+        Object.prototype.hasOwnProperty.call(PROVIDER_ALLOWLIST, rel) ||
+        Object.prototype.hasOwnProperty.call(ALLOWLIST, rel);
+      if (!gated && !allowed) unaccounted.push(rel);
+    }
+
+    expect(
+      unaccounted,
+      `${unaccounted.length} route(s) reach an external provider without ` +
+        `referencing lib/beta-restrictions and without a recorded reason: ` +
+        `${unaccounted.join(', ')}. The beta's containment statement is that ` +
+        `no participant action reaches Plaid, Stripe or Wise — either gate ` +
+        `the route or record why it is already contained.`,
+    ).toEqual([]);
+  });
+
+  it('every provider-allowlist entry names a route that really reaches a provider', () => {
+    // Guards the allowlist against the drift its money-side counterpart
+    // guards against, in both directions: an entry for a route that no longer
+    // exists, and an entry for one that no longer reaches a provider — which
+    // would sit there excusing nothing while reading as a decision.
+    const existing = new Set(files.map((f) => path.relative(API_ROOT, f)));
+    const stale = Object.keys(PROVIDER_ALLOWLIST).filter((k) => !existing.has(k));
+    expect(stale, `provider allowlist names missing route(s): ${stale.join(', ')}`).toEqual([]);
+
+    const notProviderReaching = Object.keys(PROVIDER_ALLOWLIST).filter((rel) => {
+      const body = code(readFileSync(path.join(API_ROOT, rel), 'utf8'));
+      return !PROVIDER_MARKERS.some((m) => body.includes(m));
+    });
+    expect(
+      notProviderReaching,
+      `provider allowlist excuses route(s) that reach no provider: ${notProviderReaching.join(', ')}`,
+    ).toEqual([]);
+
+    const thin = Object.entries(PROVIDER_ALLOWLIST)
+      .filter(([, reason]) => reason.trim().length < 80)
+      .map(([k]) => k);
+    expect(thin, `provider allowlist reason too short: ${thin.join(', ')}`).toEqual([]);
   });
 
   it('the three capability-gated routes are gated', () => {
