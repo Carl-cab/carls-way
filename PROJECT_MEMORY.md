@@ -5274,3 +5274,113 @@ set and verify `MANNA_BETA_PROFILE` from the running deployment with all five
 capability keys, remove `PLAID_SECRET` from Preview, and commission the
 independent accounting review that 0012 and 0013 wait on. Engineering: nothing
 that depends on a deployment until the first of those lands.
+
+---
+
+## 2026-11-19 — Provider containment PR prepared: the interface was failing OPEN, and that is the substantive fix
+
+**Purpose and scope.** Owner-authorized preparation of a focused PR for the
+provider-containment work on top of the merged `71d7425`, plus a correction the
+owner identified in the interface and an executable deployment-verification
+sequence for the isolated Preview environment. No merge.
+
+**Branch synchronized.** `sec/beta-provider-containment` was based on `09d01d0`
+(PR #87's head) while master had advanced to the merge commit `71d7425`.
+`origin/master` merged in as `3a787ab`. Checked for unintended PR #87 content
+by diffing the branch against master both before and after: exactly the same
+15 files either way, all of them this work's own.
+
+**Security behaviour affected — the interface was fail-OPEN.** Both
+capability-gated controls held `boolean | null` and disabled themselves only on
+an explicit `false`. A failed `GET /api/beta-profile`, a non-ok response, or a
+body missing the field therefore left `PlaidLinkButton`'s "+ Link Account"
+button live, and let `app/(app)/send/page.tsx` request a cross-currency FX
+quote — a live Wise call — for a payment the server refuses with 403.
+
+The asymmetry is the argument, and it is worth stating because the fail-open
+version looked like the cautious choice ("don't hide a working button on a
+network hiccup"). A UI **more** restrictive than the server costs a disabled
+control during an outage. A UI **less** restrictive misrepresents the
+restriction — the user is offered an action that cannot succeed, and an
+operator glancing at the page sees a beta that looks unrestricted. The second
+is the failure that matters, because the whole point of the beta profile is
+being able to state truthfully what is withheld.
+
+**Fixed in one shared place rather than twice inline.**
+`lib/beta-capability-client.ts` holds `clientCapabilityAvailable(payload,
+capability)`: only an explicit `true` is available; a null body, a missing
+`capabilities` object, a missing key, a non-boolean — including the string
+`"true"` and `1`, which a loose `if (value)` would pass and which is exactly
+what turns up in a JSON body — all resolve to withheld. The owner asked only
+about `PlaidLinkButton`; the send page had the identical shape and is fixed
+with it, which is recorded here because it was not in the instruction.
+
+**Why its own module.** Putting the helper in `lib/beta-restrictions.ts` was
+the first attempt and was wrong: that file imports `lib/environment.ts` and
+resolves `MANNA_BETA_PROFILE` from `process.env`, so importing it from a
+`'use client'` component ships server-side environment resolution into the
+browser bundle where those variables do not exist. The new module imports
+nothing but a type, which erases at compile time. Caught before commit.
+
+Both components also gained a distinct `'pending'` state, so a user
+mid-page-load is not told a feature is unavailable in the beta before the
+answer has arrived. `pending` and `false` render differently and **neither
+offers a way to start the action**.
+
+**Tests run and their results.** 77 files / **1089 tests** passing on a
+database created fresh with the CI fixture applied (1073 before; +16 in
+`beta-containment.test.ts`, now 38 cases). typecheck 0 errors; lint 0 errors /
+29 pre-existing warnings; `pnpm run build` exit 0; `pnpm audit --prod` no known
+vulnerabilities.
+
+Tested as a pure function rather than by rendering, and the reason is recorded
+in the test file: there is no DOM test stack here (node environment,
+`*.test.ts` only), and adding jsdom plus a rendering library to assert one
+branch would be a larger change than the fix. The function is the whole
+decision — each component does nothing with its answer but choose which span to
+render — and a **static** case additionally requires both components to import
+the shared resolver and to contain no `=== false` gate, which is the exact
+comparison that caused the defect.
+
+Mutation-checked five ways, each detected: loose truthiness instead of
+`=== true` (3 failed), a null payload treated as available (3), a missing
+capabilities object treated as available (3), the component reverted to the
+`=== false` shape (1), the send page reverted likewise (1).
+
+**Containment preserved and re-verified at this head.** All five capabilities
+withheld; the permitted paths — same-currency payment, request, decline, split
+payment, same-currency FX quote, bank-account read and unlink, sandbox
+registration grant — all still asserted working; an invalid currency still 400
+and not 403; live-rail flags absent and the profile unable to enable a rail at
+its most permissive value.
+
+**Deployment verification prepared.**
+`docs/runbooks/beta-deployment-verification.md`, nine sections as the owner
+scoped them, with expected output per check and the meaning of a wrong answer.
+Two rules govern it: create every account **through the running application**,
+never from SQL and never from the CI fixture (which seeds 500.00 balances with
+no ledger entries and fails wallet-equality before anyone signs up); and stop
+at the first failure, because a reconciliation pass on the wrong database
+proves nothing. It records that the provider-reach claim is **negative**, so
+the honest evidence is provider-side dashboards rather than application output,
+and that a Stripe *Identity* call is not a containment failure while a
+Transfer/ACSS/payout call is. The isolation runbook now points at it.
+
+**Commit SHA and PR.** Branch head recorded in the PR itself. NOT MERGED — the
+owner reviews the final head and its evidence first.
+
+**Migration impact.** None.
+
+**Unresolved findings.** Unchanged and all owner-blocked: independent
+accounting validation still **waived rather than met**, 0013 blocked behind it,
+Preview database isolation unresolved, `PLAID_SECRET` still scoped to Preview
+with the production value, the `/feed?_rsc=` 404 unexplained, no monitoring of
+`rateLimitBackendHealth()`. And still true of this PR: **nothing has been
+verified against a running deployment.**
+
+**Rollback requirement.** One branch over `71d7425`, revertible on its own.
+
+**Next recommended action.** Owner: review the PR head and its checks, then
+provision the isolated Preview database and run
+`docs/runbooks/beta-deployment-verification.md` end to end. The beta remains
+NO-GO until that has actually been run and recorded.

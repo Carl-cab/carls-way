@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { clientCapabilityAvailable } from '@/lib/beta-capability-client';
 
 interface FxQuote {
   fromCurrency: string;
@@ -34,7 +35,12 @@ function SendForm() {
   const [loading, setLoading] = useState(false);
   // Server-resolved beta posture. Same endpoint and same resolver the routes
   // enforce with, so the page cannot offer what the API will refuse.
-  const [crossCurrencyAllowed, setCrossCurrencyAllowed] = useState<boolean | null>(null);
+  // 'pending' until the profile answers; then true or false. FAIL CLOSED —
+  // see lib/beta-capability-client.ts. An earlier revision used
+  // `boolean | null` and treated unknown as permitted, so a failed profile
+  // request let the page quote a cross-currency rate (a live Wise call) for a
+  // payment the server refuses with 403.
+  const [crossCurrencyAllowed, setCrossCurrencyAllowed] = useState<'pending' | boolean>('pending');
   // Set when the chosen recipient uses a different currency AND cross-currency
   // is withheld. Carried in state rather than computed at render time because
   // the recipient's country is only known after the lookup below.
@@ -67,7 +73,7 @@ function SendForm() {
       // Cross-currency, and the beta withholds it: say so here rather than
       // quoting a rate for a payment the API will refuse with 403. Fetching
       // the quote anyway would also be a pointless Wise call.
-      if (crossCurrencyAllowed === false) {
+      if (crossCurrencyAllowed !== true) {
         setCrossCurrencyBlocked(true);
         setFxQuote(null);
         setFxLoading(false);
@@ -89,11 +95,13 @@ function SendForm() {
     fetch('/api/beta-profile')
       .then(r => (r.ok ? r.json() : null))
       .then(d => {
-        if (!cancelled && d) setCrossCurrencyAllowed(d.capabilities.cross_currency === true);
+        if (!cancelled) setCrossCurrencyAllowed(clientCapabilityAvailable(d, 'cross_currency'));
       })
       .catch(() => {
-        // Left null: unknown, so nothing is claimed either way and the
-        // ordinary same-currency path is unaffected.
+        // A failed request is WITHHELD, not "unknown, carry on". The
+        // same-currency path is unaffected either way: it returns before this
+        // flag is consulted.
+        if (!cancelled) setCrossCurrencyAllowed(false);
       });
     return () => { cancelled = true; };
   }, []);

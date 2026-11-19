@@ -54,6 +54,14 @@ item 2 is first.
 
 ---
 
+**The executable companion to this document is
+`docs/runbooks/beta-deployment-verification.md`** — the same requirements as a
+command sequence, in order, with expected output for each check and what a
+wrong answer means. This file decides what must be true; that one gives the
+commands. Neither has been run.
+
+---
+
 ## 1. Establish the facts (owner, dashboard)
 
 - [ ] Open Settings → Environment Variables and confirm whether `DATABASE_URL`

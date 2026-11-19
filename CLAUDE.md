@@ -59,6 +59,7 @@ Client (React 19)
 | `lib/transfers/router.ts` | Compatibility layer — re-exports from `lib/providers/TransferProviderFactory` (DEPRECATED) |
 | `proxy.ts` | Next.js middleware — enforces auth on all `(app)` routes |
 | `lib/beta-restrictions.ts` | The restricted-beta capability gate. `betaProfile()` resolves `MANNA_BETA_PROFILE`, and **fails closed in sandbox**: absent or misspelled resolves to `p2p_only`, so forgetting the variable leaves a beta restricted rather than open. Five capabilities are withheld — `funding`, `cash_out`, `cross_currency`, `bank_linking`, `external_fx` — each for its own reason, recorded in the file header. It is a **beta** control and deliberately restricts nothing in production, where the live-rail flags and decision 0010 govern instead; do not read it as adding to them |
+| `lib/beta-capability-client.ts` | The CLIENT half of the one-resolver rule: `clientCapabilityAvailable(payload, capability)`, which **fails closed** — only an explicit `true` is available, and a null body, missing key or non-boolean is withheld. Its own module rather than part of `lib/beta-restrictions.ts`, because that file resolves `process.env` and importing it from a `'use client'` component would ship server environment logic to the browser. Presentation only: it can be more restrictive than the server, never less |
 | `lib/environment.ts` | Sandbox/live gate. `MANNA_ENV=sandbox` spelled exactly, and `VERCEL_ENV=production` overrides it — no value of `MANNA_ENV` can weaken a production deploy |
 | `lib/plaid-env.ts` | The single resolver for which Plaid host this process talks to. Fails closed: unset or unrecognised `PLAID_ENV` is sandbox. The client and the webhook verifier both call it, because they once defaulted to opposite hosts |
 | `lib/plaid-error.ts` | `redactedErrorLog()` — the only object that may be passed to a logger from a provider catch. Allowlist-built, so `PLAID-SECRET` and `PLAID-CLIENT-ID` headers on an Axios error cannot reach a log |
@@ -583,6 +584,20 @@ trap an already-linked account inside the beta); a same-currency FX quote; and
 `POST /api/kyc/create-session`, which in sandbox returns on the
 `canAutoVerifyIdentity()` branch **before** `getStripe()` is called and so
 reaches no provider without needing a gate.
+
+**The interface fails closed too, and the asymmetry is why.** Both
+capability-gated controls — `components/PlaidLinkButton.tsx` and the
+cross-currency notice on `app/(app)/send/page.tsx` — first held
+`boolean | null` and disabled themselves only on an explicit `false`. So a
+failed `GET /api/beta-profile`, a non-ok response, or a body missing the field
+left the "+ Link Account" button live and let the send page request a
+cross-currency FX quote: the user was offered an action the server answers with
+403, and a page that looked unrestricted. A UI **more** restrictive than the
+server costs a disabled control during an outage; a UI **less** restrictive
+misrepresents the restriction, which is the thing a beta has to be able to
+state truthfully. Both now call `clientCapabilityAvailable()` and treat
+unknown as withheld, with a distinct `pending` state so a user mid-page-load is
+not told a feature is unavailable before the answer arrives.
 
 **The gate must precede the provider call and the money transaction**, not
 merely the response. `lib/__tests__/beta-containment.test.ts` asserts the

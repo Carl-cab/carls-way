@@ -511,3 +511,105 @@ describe('production is untouched by the containment gates', () => {
     expect(plaid.linkTokenCreate).not.toHaveBeenCalled();
   });
 });
+
+describe('the interface fails closed — clientCapabilityAvailable()', () => {
+  /**
+   * THE DEFECT THIS PINS. PlaidLinkButton first held `boolean | null` and
+   * disabled its control only on an explicit `false`. So a failed
+   * /api/beta-profile request, a non-ok response, or a body missing the field
+   * all left the "+ Link Account" button live — offering the user an action
+   * the server answers with 403, and showing an operator a beta that looked
+   * unrestricted.
+   *
+   * The asymmetry is the reason to fail closed. A UI more restrictive than the
+   * server costs a disabled button during an outage. A UI LESS restrictive
+   * than the server misrepresents the restriction, which is the thing the beta
+   * is supposed to be able to state truthfully.
+   *
+   * Tested as a pure function rather than by rendering: there is no DOM test
+   * stack in this repository (node environment, *.test.ts only), and adding
+   * jsdom plus a rendering library to assert one branch would be a larger
+   * change than the fix. The function is the whole decision — the component
+   * does nothing with its answer but choose which span to render — and the
+   * rendered strings are asserted by the browser smoke script.
+   */
+  it('returns true ONLY for an explicit boolean true', async () => {
+    const { clientCapabilityAvailable } = await import('../beta-capability-client');
+    expect(
+      clientCapabilityAvailable({ capabilities: { bank_linking: true } }, 'bank_linking'),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['null body, as a non-ok response produces', null],
+    ['undefined', undefined],
+    ['a string instead of an object', 'p2p_only'],
+    ['an object with no capabilities key', { profile: 'p2p_only', restricted: true }],
+    ['capabilities null', { capabilities: null }],
+    ['capabilities a string', { capabilities: 'all' }],
+    ['the capability key absent', { capabilities: { funding: true } }],
+    ['the value undefined', { capabilities: { bank_linking: undefined } }],
+    ['the value the STRING "true"', { capabilities: { bank_linking: 'true' }}],
+    ['the value 1', { capabilities: { bank_linking: 1 } }],
+    ['the value an empty object', { capabilities: { bank_linking: {} } }],
+  ])('withholds when the payload is %s', async (_label, payload) => {
+    // The string "true" and 1 are the cases a loose `if (value)` would let
+    // through, and a JSON body is exactly where a stringified boolean shows up.
+    const { clientCapabilityAvailable } = await import('../beta-capability-client');
+    expect(clientCapabilityAvailable(payload, 'bank_linking')).toBe(false);
+  });
+
+  it('withholds an explicit false', async () => {
+    const { clientCapabilityAvailable } = await import('../beta-capability-client');
+    expect(
+      clientCapabilityAvailable({ capabilities: { bank_linking: false } }, 'bank_linking'),
+    ).toBe(false);
+  });
+
+  it('reads the named capability and not another one', async () => {
+    // A copy-paste of the wrong key would otherwise pass every case above.
+    const { clientCapabilityAvailable } = await import('../beta-capability-client');
+    const payload = { capabilities: { bank_linking: false, cross_currency: true } };
+    expect(clientCapabilityAvailable(payload, 'bank_linking')).toBe(false);
+    expect(clientCapabilityAvailable(payload, 'cross_currency')).toBe(true);
+  });
+
+  it('agrees with the server resolver on a real /api/beta-profile body', async () => {
+    // The one-resolver rule end to end: the client helper fed the exact object
+    // the route serialises must reach the same answer as the server's own
+    // isCapabilityRestricted() for all five capabilities.
+    sandbox();
+    const { betaRestrictionState, isCapabilityRestricted } = await import('../beta-restrictions');
+    const { clientCapabilityAvailable } = await import('../beta-capability-client');
+    const body = JSON.parse(JSON.stringify(betaRestrictionState()));
+
+    for (const capability of [
+      'funding',
+      'cash_out',
+      'cross_currency',
+      'bank_linking',
+      'external_fx',
+    ] as const) {
+      expect(clientCapabilityAvailable(body, capability), capability).toBe(
+        !isCapabilityRestricted(capability),
+      );
+    }
+  });
+
+  it('the two capability-gated components use the shared resolver, not an inline check', async () => {
+    // Static, and deliberately so: the fix is only worth anything if the
+    // components actually call it. Both held the fail-open `boolean | null`
+    // shape, and `=== false` is the exact comparison that caused it.
+    const { readFileSync } = await import('node:fs');
+    const path = await import('node:path');
+    for (const rel of ['components/PlaidLinkButton.tsx', 'app/(app)/send/page.tsx']) {
+      const src = readFileSync(path.join(process.cwd(), rel), 'utf8');
+      expect(src, `${rel} must import the shared resolver`).toContain(
+        'clientCapabilityAvailable',
+      );
+      expect(src, `${rel} must not gate on \`=== false\` (fail-open shape)`).not.toMatch(
+        /(linkingAllowed|crossCurrencyAllowed)\s*===\s*false/,
+      );
+    }
+  });
+});
