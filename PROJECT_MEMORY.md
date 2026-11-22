@@ -5384,3 +5384,118 @@ verified against a running deployment.**
 provision the isolated Preview database and run
 `docs/runbooks/beta-deployment-verification.md` end to end. The beta remains
 NO-GO until that has actually been run and recorded.
+
+---
+
+## 2026-11-19 — PR #88 merged: provider containment, and the interface no longer fails open
+
+**Purpose and scope.** Records the merge of PR #88 on the owner's explicit
+instruction. Supersedes the previous entry's closing line, which said "NOT
+MERGED — the owner reviews the final head first"; that was true when written
+and the correction is appended rather than edited, per this file's rule.
+
+**Commit SHA and PR.** PR #88 merged as **`843519d41a484b75ebaac3c78b26e1c9a4465a67`**
+from branch `sec/beta-provider-containment`, head pinned to
+`2200fd0589c7075dba618ace43d6f677fa7a4872`. Verified immediately before
+merging: that exact head, base still `71d7425`, `mergeable_state: clean`, 0
+commits behind master, all four required checks green on that commit.
+
+**Master after the merge.** All four required checks green on `843519d` —
+`install · typecheck · lint · test · build`, `dependency audit`, `secret
+scan`, `analyze javascript-typescript`. GitHub deployment **7925710240**,
+Production, state `success`.
+**That is deployment metadata, not operational verification.** It says Vercel
+built and assigned the deployment and nothing about the application's
+behaviour on it. Nothing was exercised against it, no deployment was promoted,
+and no production configuration was changed.
+
+**Financial or security behaviour affected.** Two capabilities added to
+`lib/beta-restrictions.ts`, both answering 403 `BETA_RESTRICTED`:
+`bank_linking` (both Plaid routes and both Stripe PAD-mandate steps) and
+`external_fx` (a **cross-currency** `POST /api/fx/quote` only — a
+same-currency quote short-circuits to the identity rate and contacts nobody).
+Five capabilities are now withheld in a restricted beta.
+
+PR #87 had withheld funding, cash-out and cross-currency but left every
+provider-reaching route open, which is a different question: a route can move
+no balance and still make a live call on a participant's behalf.
+`plaid/exchange-token` was the sharp one — it exchanges a token, reads
+accounts, stores an encrypted access token and writes a `bank_accounts` row.
+The reason it mattered: `PLAID_SECRET` is scoped Production **and** Preview and
+holds the production value, so what stopped a preview build reaching live
+Plaid was a *missing* `PLAID_CLIENT_ID` — an accident, not a control.
+
+**And the interface was failing OPEN**, which was the owner's finding and the
+substantive fix. Both capability-gated controls held `boolean | null` and
+disabled themselves only on an explicit `false`, so a failed
+`GET /api/beta-profile` left the "+ Link Account" button live and let the send
+page request a cross-currency FX quote — a live Wise call — for a payment the
+server refuses. Fixed in one shared, tested place
+(`lib/beta-capability-client.ts`), kept in its own module because
+`beta-restrictions.ts` resolves `process.env` and importing it from a
+`'use client'` component would ship server environment logic to the browser.
+
+**Tests run and their results.** At `2200fd0`, on a database created fresh
+with the CI fixture applied: **77 files / 1092 tests passing**; typecheck 0
+errors; lint 0 errors / 29 pre-existing warnings; `pnpm run build` exit 0;
+`pnpm audit --prod` no known vulnerabilities. `beta-containment.test.ts`
+41/41; coverage guard 6/6. Confirmed by a second independent run on a
+separately created database before the merge.
+
+Mutation-checked throughout — each gate neutered individually with the file
+restored from a per-file backup, plus the client resolver and both components.
+Every mutation was detected.
+
+**Three review findings, all in this diff, all missed by green CI**, found by
+reviewing `7dba34a` *after* its four checks had passed: the fail-closed fix
+told **production** users "unavailable in this beta" on a transient failure
+with no retry (production has no beta, so a failed request was the only route
+to that state); the FX gate sat above `parsePositiveMoney()` so a malformed
+amount reported a beta restriction instead of a bad request; and neither
+component read the profile with `cache: 'no-store'`. Recorded as a marked
+addendum to `docs/audits/2026-11-18-beta-containment.md`, never over it.
+
+**Two errors of mine in the head history, recorded rather than tidied away.**
+`b6bd8ef` carried the review fixes but broke CI *and* the Vercel deployment on
+a needless `/s` regex flag, because I pushed before the build finished. And I
+mis-diagnosed that failure as `next build` type-checking against a lower
+target than `pnpm run typecheck`; probing both with a one-line file disproved
+it — they produce the identical error from the same tsconfig, and the real
+cause was that I ran only the single test file after my last edit. **I nearly
+wrote that false lesson into `CLAUDE.md`.** The real lesson is narrower and
+duller: run the whole gate after the *last* edit, not the second-to-last.
+
+**Migration impact.** None. No schema object added or changed.
+
+**Unresolved findings.** All of the following are unchanged by this merge and
+none of them is weakened by it:
+- **Nothing has been verified against a running deployment.** Every result
+  above is from local handlers and a test database, so the nine sections of
+  `docs/runbooks/beta-deployment-verification.md` remain unticked.
+- Preview database isolation unresolved and owner-blocked; no transactional
+  testing may run against Preview until it is settled.
+- `PLAID_SECRET` still scoped to Preview with the production value. This
+  change means no beta route uses it; removing it is a production
+  configuration change and the owner's.
+- Decision **0012**'s independent accounting review remains **outstanding**.
+  PR #87's merge waived it for that merge decision only, which is not a pass
+  through the gate, and nothing in #88 counts toward it. Decision **0013**
+  remains blocked by its own terms.
+- The app-origin `/feed?_rsc=` 404 is unexplained and still failing, not
+  suppressed.
+- No monitoring of `rateLimitBackendHealth()`.
+- **Not independently reviewed — I authored every commit here, and CodeRabbit
+  skipped all of them (repository under 10 stars). A skipped review is not an
+  approval, and a merge is not a review.**
+
+**Rollback requirement.** `843519d` is a merge commit over `71d7425` and is
+revertible on its own. Reverting restores the pre-#88 surface — which is
+reachable bank linking and cross-currency FX quoting in the beta, not live
+money movement, since the live-rail flags are off either way.
+
+**Next recommended action.** Owner: provision the isolated Preview Supabase
+project, then run `docs/runbooks/beta-deployment-verification.md` end to end
+and record its outputs; remove `PLAID_SECRET` from the Preview scope; and
+commission the independent accounting review that 0012 and 0013 wait on.
+Engineering: nothing that depends on a deployment until the first of those
+lands. **The beta remains NO-GO.**
